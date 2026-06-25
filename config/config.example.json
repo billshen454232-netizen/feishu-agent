@@ -1,0 +1,38 @@
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8000
+  },
+  "feishu": {
+    "app_id": "cli_xxx 或 cli_aab...",
+    "app_secret": "填写飞书开放平台应用凭证里的 App Secret",
+    "verification_token": "填写事件订阅里的 Verification Token；如果未启用可留空",
+    "encrypt_key": "第一版暂不支持加密事件，建议先在飞书事件订阅里关闭 Encrypt Key",
+    "base_url": "https://open.feishu.cn"
+  },
+  "ai": {
+    "provider": "openai_compatible",
+    "base_url": "https://api.example.com/v1",
+    "api_key": "填写模型 API Key",
+    "model": "填写模型名，例如 gpt-4.1 或你的中转模型名",
+    "system_prompt": "你是一个飞书里的 AI 助手，请用简洁、准确的中文回答。",
+    "temperature": 0.2,
+    "max_tokens": 2048,
+    "timeout_seconds": 60
+  },
+  "conversation": {
+    "max_history_messages": 12
+  },
+  "bot": {
+    "name": "AI助手"
+  },
+  "knowledge_base": {
+    "enabled": true,
+    "type": "dual_chain_vault",
+    "vault_path": "D:/MySecondBrian/vault",
+    "min_score": 3,
+    "max_results": 5,
+    "max_context_chars": 12000,
+    "fallback_when_miss": "local_only"
+  }
+}
