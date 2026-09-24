@@ -158,10 +158,26 @@ async def test_process_one_marks_failed_when_ai_raises(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_queue_puts_and_gets_message_ids():
+async def test_queue_puts_and_gets_request_items():
     queue = MessageJobQueue()
 
     await queue.enqueue("om_1")
-    message_id = await queue.get()
+    item = await queue.get()
 
-    assert message_id == "om_1"
+    assert item.kind == "request"
+    assert item.message_id == "om_1"
+    assert item.chat_id == ""
+    assert item.confirmation_token == ""
+
+
+@pytest.mark.asyncio
+async def test_queue_puts_and_gets_confirmation_items():
+    queue = MessageJobQueue()
+
+    await queue.enqueue_confirmation("om_confirm", "oc_group", "ABC123")
+    item = await queue.get()
+
+    assert item.kind == "confirmation"
+    assert item.message_id == "om_confirm"
+    assert item.chat_id == "oc_group"
+    assert item.confirmation_token == "ABC123"

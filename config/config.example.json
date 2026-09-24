@@ -3,6 +3,11 @@
     "host": "127.0.0.1",
     "port": 8000
   },
+  "job_queue": {
+    "enabled": true,
+    "database_path": "data/feishu_bot.sqlite3",
+    "recovery_window_seconds": 600
+  },
   "feishu": {
     "app_id": "cli_xxx 或 cli_aab...",
     "app_secret": "填写飞书开放平台应用凭证里的 App Secret",
@@ -27,12 +32,47 @@
     "name": "AI助手"
   },
   "knowledge_base": {
-    "enabled": true,
+    "enabled": false,
     "type": "dual_chain_vault",
-    "vault_path": "D:/MySecondBrian/vault",
+    "vault_path": "",
     "min_score": 3,
     "max_results": 5,
     "max_context_chars": 12000,
     "fallback_when_miss": "local_only"
+  },
+  "script_knowledge": {
+    "enabled": true,
+    "path": "knowledge",
+    "min_score": 2,
+    "max_results": 3,
+    "max_context_chars": 10000
+  },
+  "conversation_log": {
+    "enabled": true,
+    "directory": "logs/conversations",
+    "max_text_chars": 12000
+  },
+  "muliu": {
+    "enabled": true,
+    "base_url": "https://填写你的-Muliu-地址",
+    "username": "填写本机 Muliu 登录账号",
+    "password": "填写本机 Muliu 登录密码",
+    "task_id": 89,
+    "step": 11,
+    "script_index": 0,
+    "parameter_index": 0,
+    "log_wait_seconds": 5,
+    "log_completion_timeout_seconds": 1800,
+    "start_verification_wait_seconds": 60,
+    "request_timeout_seconds": 20,
+    "script_root": "/home/serverGeneralScript",
+    "script_catalog_path": "config/muliu_script_catalog.md",
+    "max_steps": 10,
+    "max_arguments_per_step": 32,
+    "max_argument_length": 1024,
+    "confirmation_prefix": "确认执行",
+    "confirmation_timeout_seconds": 600,
+    "blocked_keywords": [],
+    "blocked_patterns": []
   }
 }

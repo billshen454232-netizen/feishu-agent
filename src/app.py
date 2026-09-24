@@ -10,11 +10,17 @@ from fastapi import FastAPI
 from .ai_client import create_ai_client
 from .config import ConfigError, load_config
 from .conversation import ConversationStore
+from .conversation_log import ConversationLog
 from .event_handler import FeishuEventHandler
 from .feishu_client import FeishuClient
-from .knowledge_base import DualChainVaultKnowledgeBase
 from .message_jobs import MessageJobStore
 from .message_worker import MessageJobProcessor, MessageJobQueue
+from .muliu_executor import MuliuExecutor
+from .muliu_firewall import MuliuFirewall
+from .muliu_intent import MuliuIntentRouter
+from .muliu_planner import MuliuPlanner
+from .muliu_script_catalog import MuliuScriptCatalog
+from .script_knowledge_base import ScriptKnowledgeBase
 
 logger = logging.getLogger(__name__)
 
@@ -24,20 +30,51 @@ def create_app(config_path: str | Path = "config/config.json") -> FastAPI:
     conversations = ConversationStore(config.conversation.max_history_messages)
     ai_client = create_ai_client(config.ai)
     feishu_client = FeishuClient(config.feishu)
-    knowledge_base = None
-    if config.knowledge_base.enabled and config.knowledge_base.type == "dual_chain_vault":
-        knowledge_base = DualChainVaultKnowledgeBase(
-            vault_path=config.knowledge_base.vault_path,
-            min_score=config.knowledge_base.min_score,
-            max_results=config.knowledge_base.max_results,
-            max_context_chars=config.knowledge_base.max_context_chars,
-        )
-
     job_store = MessageJobStore(config.job_queue.database_path)
     job_store.initialize()
     job_queue = MessageJobQueue()
-    job_processor = MessageJobProcessor(config, job_store, conversations, ai_client, feishu_client, knowledge_base=knowledge_base, queue=job_queue)
-    event_handler = FeishuEventHandler(config, job_store, job_queue)
+
+    script_catalog = MuliuScriptCatalog(config.muliu.script_catalog_path)
+    operation_planner = MuliuPlanner(
+        ai_client=ai_client,
+        script_catalog=script_catalog,
+        max_steps=config.muliu.max_steps,
+    )
+    muliu_firewall = MuliuFirewall(
+        config.muliu,
+        call_contracts=script_catalog.read_call_contracts(),
+    )
+    muliu_executor = MuliuExecutor(config.muliu)
+    script_knowledge_base = None
+    if config.script_knowledge.enabled:
+        script_knowledge_base = ScriptKnowledgeBase(
+            config.script_knowledge.path,
+            min_score=config.script_knowledge.min_score,
+            max_results=config.script_knowledge.max_results,
+            max_context_chars=config.script_knowledge.max_context_chars,
+        )
+    conversation_log = None
+    if config.conversation_log.enabled:
+        conversation_log = ConversationLog(
+            config.conversation_log.directory,
+            max_text_chars=config.conversation_log.max_text_chars,
+        )
+    job_processor = MessageJobProcessor(
+        config=config,
+        store=job_store,
+        conversations=conversations,
+        ai_client=ai_client,
+        feishu_client=feishu_client,
+        queue=job_queue,
+        operation_planner=operation_planner,
+        muliu_firewall=muliu_firewall,
+        muliu_executor=muliu_executor,
+        script_knowledge_base=script_knowledge_base,
+        script_catalog=script_catalog,
+        intent_router=MuliuIntentRouter(),
+        conversation_log=conversation_log,
+    )
+    event_handler = FeishuEventHandler(config, job_store, job_queue, job_processor=job_processor)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -53,7 +90,7 @@ def create_app(config_path: str | Path = "config/config.json") -> FastAPI:
         finally:
             await job_processor.stop()
 
-    app = FastAPI(title="Feishu AI Bot Backend", lifespan=lifespan)
+    app = FastAPI(title="Feishu Muliu Server Operations Bot", lifespan=lifespan)
 
     @app.get("/health")
     async def health() -> dict[str, str]:
@@ -71,7 +108,7 @@ def _create_default_app() -> FastAPI:
         return create_app()
     except ConfigError as exc:
         detail = str(exc)
-        fallback = FastAPI(title="Feishu AI Bot Backend")
+        fallback = FastAPI(title="Feishu Muliu Server Operations Bot")
 
         @fallback.get("/health")
         async def health() -> dict[str, str]:

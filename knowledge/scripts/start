@@ -1,0 +1,30 @@
+#!/bin/bash
+server_id=$1
+if_no_zone=$2
+# 获取远程服务器的IP
+REMOTE_HOST=$(awk -F '=' -v key="$server_id"_game '$1 == key {print $2}' config.ini)
+# 如果不开启战区 直接启动逻辑服
+if [[ $if_no_zone == "noz" ]];then
+    echo "只启动gamelogic服务器"
+    if [[ "$server_id" == "4001" ]];then
+        bash yc_start.sh
+        exit 0
+    fi
+    ssh "root@$REMOTE_HOST" "cd /data/app/game-server && bash release_bin/start_game.sh"
+    exit 0
+fi
+
+if [[ "$server_id" == "4001" ]];then
+    bash yc_start.sh
+    exit 0
+fi
+
+
+
+# 执行启动战区服的脚本
+ssh "root@$REMOTE_HOST" "cd /data/app/game-server && bash release_bin/start_zone.sh"
+
+#sleep 15
+# 执行启动游戏服的脚本
+ssh "root@$REMOTE_HOST" "cd /data/app/game-server && bash release_bin/start_game.sh"
+

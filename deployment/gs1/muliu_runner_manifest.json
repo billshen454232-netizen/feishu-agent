@@ -1,0 +1,279 @@
+{
+  "version": 1,
+  "contracts": [
+    {
+      "name": "basic-server-info",
+      "path": "/home/serverGeneralScript/basic_info.sh",
+      "args": [
+        "{server_id}"
+      ],
+      "variables": {
+        "server_id": "[0-9]{3,8}"
+      },
+      "runner": [
+        "bash"
+      ],
+      "risk": "read"
+    },
+    {
+      "name": "shutdown-normal",
+      "path": "/home/serverGeneralScript/shutdown",
+      "args": [
+        "{server_id}"
+      ],
+      "variables": {
+        "server_id": "[0-9]{3,8}"
+      },
+      "runner": [
+        "bash"
+      ],
+      "risk": "write"
+    },
+    {
+      "name": "shutdown-mode",
+      "path": "/home/serverGeneralScript/shutdown",
+      "args": [
+        "{server_id}",
+        "{shutdown_mode}"
+      ],
+      "variables": {
+        "server_id": "[0-9]{3,8}",
+        "shutdown_mode": "normal|kill|autokill|gvgzone|gvgdaemon"
+      },
+      "runner": [
+        "bash"
+      ],
+      "risk": "write"
+    },
+    {
+      "name": "start-server",
+      "path": "/home/serverGeneralScript/start",
+      "args": [
+        "{server_id}"
+      ],
+      "variables": {
+        "server_id": "[0-9]{3,8}"
+      },
+      "runner": [
+        "bash"
+      ],
+      "risk": "write"
+    },
+    {
+      "name": "start-game-only",
+      "path": "/home/serverGeneralScript/start",
+      "args": [
+        "{server_id}",
+        "noz"
+      ],
+      "variables": {
+        "server_id": "[0-9]{3,8}"
+      },
+      "runner": [
+        "bash"
+      ],
+      "risk": "write"
+    },
+    {
+      "name": "clear-server",
+      "path": "/home/serverGeneralScript/clear",
+      "args": [
+        "{server_id}"
+      ],
+      "variables": {
+        "server_id": "[0-9]{3,8}"
+      },
+      "runner": [
+        "bash"
+      ],
+      "risk": "write"
+    },
+    {
+      "name": "clear-server-opening-time",
+      "path": "/home/serverGeneralScript/clear",
+      "args": [
+        "{server_id}",
+        "{clear_mode}"
+      ],
+      "variables": {
+        "clear_mode": "by|noby",
+        "server_id": "[0-9]{3,8}"
+      },
+      "runner": [
+        "bash"
+      ],
+      "risk": "write"
+    },
+    {
+      "name": "modify-game-config",
+      "path": "/home/serverGeneralScript/modify_game_config.sh",
+      "args": [
+        "{server_id}",
+        "{season}",
+        "{scenario}"
+      ],
+      "variables": {
+        "scenario": "[0-9]{1,8}",
+        "season": "[0-9]{1,8}",
+        "server_id": "[0-9]{3,8}"
+      },
+      "runner": [
+        "bash"
+      ],
+      "risk": "write"
+    },
+    {
+      "name": "check-start-time",
+      "path": "/home/serverGeneralScript/starttime",
+      "args": [
+        "{server_id}"
+      ],
+      "variables": {
+        "server_id": "[0-9]{3,8}"
+      },
+      "runner": [
+        "bash"
+      ],
+      "risk": "write"
+    },
+    {
+      "name": "set-start-time-current",
+      "path": "/home/serverGeneralScript/starttime",
+      "args": [
+        "{server_id}",
+        "ctime",
+        "--backup",
+        "yes"
+      ],
+      "variables": {
+        "server_id": "[0-9]{3,8}"
+      },
+      "runner": [
+        "bash"
+      ],
+      "risk": "write"
+    },
+    {
+      "name": "set-start-time-timestamp",
+      "path": "/home/serverGeneralScript/starttime",
+      "args": [
+        "{server_id}",
+        "{timestamp}",
+        "--backup",
+        "yes"
+      ],
+      "variables": {
+        "server_id": "[0-9]{3,8}",
+        "timestamp": "[0-9]{9,12}"
+      },
+      "runner": [
+        "bash"
+      ],
+      "risk": "write"
+    },
+    {
+      "name": "startup-failure-diagnosis",
+      "path": "/home/serverGeneralScript/server_log_query.py",
+      "args": [
+        "--server-id",
+        "{server_id}",
+        "--profile",
+        "startup_errors",
+        "--max-lines",
+        "50"
+      ],
+      "variables": {
+        "server_id": "[0-9]{3,8}"
+      },
+      "runner": [
+        "python3.7"
+      ],
+      "risk": "read"
+    },
+    {
+      "name": "single-server-patch-list-check",
+      "path": "/home/serverGeneralScript/cc_patch.py",
+      "args": [
+        "-s",
+        "{server_id}",
+        "-ck"
+      ],
+      "variables": {
+        "server_id": "[0-9]{3,8}"
+      },
+      "runner": [
+        "python3.7"
+      ],
+      "risk": "read"
+    },
+    {
+      "name": "two-server-patch-list-compare",
+      "path": "/home/serverGeneralScript/cc_patch.py",
+      "args": [
+        "-s",
+        "{server_id_a}",
+        "{server_id_b}",
+        "-ck"
+      ],
+      "variables": {
+        "server_id_a": "[0-9]{3,8}",
+        "server_id_b": "[0-9]{3,8}"
+      },
+      "runner": [
+        "python3.7"
+      ],
+      "risk": "read"
+    },
+    {
+      "name": "patch-list-backup-or-restore",
+      "path": "/home/serverGeneralScript/cc_patch.py",
+      "args": [
+        "-s",
+        "{server_id}",
+        "-r",
+        "{patch_recovery_mode}"
+      ],
+      "variables": {
+        "patch_recovery_mode": "bak|re",
+        "server_id": "[0-9]{3,8}"
+      },
+      "runner": [
+        "python3.7"
+      ],
+      "risk": "write"
+    },
+    {
+      "name": "patch-list-check-and-clean-missing",
+      "path": "/home/serverGeneralScript/cc_patch.py",
+      "args": [
+        "-s",
+        "{server_id}",
+        "-ck",
+        "-m"
+      ],
+      "variables": {
+        "server_id": "[0-9]{3,8}"
+      },
+      "runner": [
+        "python3.7"
+      ],
+      "risk": "write"
+    },
+    {
+      "name": "patch-hot-update",
+      "path": "/home/serverGeneralScript/cc_patch.py",
+      "args": [
+        "-s",
+        "{server_id}",
+        "-u"
+      ],
+      "variables": {
+        "server_id": "[0-9]{3,8}"
+      },
+      "runner": [
+        "python3.7"
+      ],
+      "risk": "write"
+    }
+  ]
+}

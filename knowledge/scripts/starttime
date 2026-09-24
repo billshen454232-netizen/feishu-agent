@@ -1,0 +1,312 @@
+#!/bin/bash
+
+##############################################
+# 配置项
+##############################################
+
+# 配置管理脚本路径
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+MODIFY_CONFIG_SCRIPT="$SCRIPT_DIR/script_helper/modify_remote_config.sh"
+MODIFY_SCRIPT="script_helper/modify_remote_config.sh"
+# 默认配置文件路径
+CONFIG_FILE="/data/app/game-etc/server_cluster_config.lua"
+# Debug时间戳文件路径
+DEBUG_TIME_FILE="/data/app/game-server/server_common/Debug_ServerStartTime.lua"
+# 配置块名称
+CONFIG_SECTION="common"
+# 要检查和添加的配置项
+CONFIG_KEY="debug_serverstarttime_config"
+CONFIG_VALUE="{ fpath = './', file='Debug_ServerStartTime', rpath = '' }"
+
+##############################################
+# 使用说明
+##############################################
+usage() {
+    cat << EOF
+用法: $0 <server_id> [timestamp] [选项]
+
+功能:
+  1. 检查并添加 debug_serverstarttime_config 配置到 config['common'] 块
+  2. 更新或创建 Debug_ServerStartTime.lua 文件（可选）
+
+位置参数:
+  server_id                   远程服务器ID（必需）
+  timestamp                   设置时间戳（可选）
+                              支持格式：
+                              1. ctime: 使用当前时间
+                                 (注释配置值为 nil，让游戏服使用默认当前时间)
+                              2. 时间戳数字: 1735286400
+                                 (取消注释并设置固定开服时间)
+                              3. 时间字符串: "2026-2-27 10:00:00"
+                                 (取消注释并设置固定开服时间)
+
+选项:
+  -b, --backup yes|no        是否备份（默认: no）
+  -h, --help                 显示此帮助信息
+
+示例:
+  # 检查当前配置
+  $0 2016
+
+  # 使用当前时间（注释配置值）
+  $0 2016 ctime
+
+  # 设置固定开服时间（时间戳）
+  $0 2016 1735286400
+
+  # 设置固定开服时间（时间字符串）
+  $0 2016 "2026-2-27 10:00:00"
+
+  # 需要备份时
+  $0 2016 1735286400 --backup yes
+EOF
+    exit 0
+}
+
+##############################################
+# 时间转换函数
+##############################################
+convert_to_timestamp() {
+    local input="$1"
+
+    # 如果已经是纯数字时间戳，直接返回
+    if [[ "$input" =~ ^[0-9]+$ ]]; then
+        echo "$input"
+        return 0
+    fi
+
+    # 尝试将时间字符串转换为时间戳
+    # 支持格式: "2026-2-27 10:00:00" 或 "2026-02-27 10:00:00"
+    local timestamp
+    timestamp=$(date -d "$input" +%s 2>/dev/null)
+
+    if [ $? -eq 0 ] && [ -n "$timestamp" ]; then
+        echo "$timestamp"
+        return 0
+    else
+        echo "错误: 无法解析时间格式 '$input'" >&2
+        echo "支持的格式: 时间戳数字(如 1735286400) 或 时间字符串(如 '2026-2-27 10:00:00')" >&2
+        return 1
+    fi
+}
+
+##############################################
+# 解析命令行参数
+##############################################
+
+SERVER_ID=""
+TIMESTAMP_INPUT=""
+IS_BACKUP="no"  # 默认不备份
+
+# 检查是否有帮助选项
+for arg in "$@"; do
+    if [ "$arg" = "-h" ] || [ "$arg" = "--help" ]; then
+        usage
+    fi
+done
+
+# 解析位置参数
+POSITIONAL_ARGS=()
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -b|--backup)
+            IS_BACKUP="$2"
+            shift 2
+            ;;
+        -*)
+            echo "错误: 未知选项 $1"
+            echo "使用 -h 或 --help 查看使用说明"
+            exit 1
+            ;;
+        *)
+            POSITIONAL_ARGS+=("$1")
+            shift
+            ;;
+    esac
+done
+
+# 恢复位置参数
+set -- "${POSITIONAL_ARGS[@]}"
+
+# 解析位置参数
+if [ $# -ge 1 ]; then
+    SERVER_ID="$1"
+fi
+
+if [ $# -ge 2 ]; then
+    TIMESTAMP_INPUT="$2"
+fi
+
+# 检查必需参数
+if [ -z "$SERVER_ID" ]; then
+    echo "错误: 必须指定服务器ID"
+    echo "使用 -h 或 --help 查看使用说明"
+    exit 1
+fi
+
+# 检查 modify_remote_config.sh 是否存在
+if [ ! -f "$MODIFY_CONFIG_SCRIPT" ]; then
+    echo "错误: 找不到配置管理脚本: $MODIFY_CONFIG_SCRIPT"
+    exit 1
+fi
+
+# 转换时间戳（如果提供且不是 ctime）
+TIMESTAMP=""
+if [ -n "$TIMESTAMP_INPUT" ] && [ "$TIMESTAMP_INPUT" != "ctime" ]; then
+    TIMESTAMP=$(convert_to_timestamp "$TIMESTAMP_INPUT")
+    if [ $? -ne 0 ]; then
+        exit 1
+    fi
+fi
+
+# 从config.ini获取目标服务器IP（用于显示信息）
+CONFIG_INI="config.ini"
+REMOTE_HOST=$(awk -F '=' -v key="${SERVER_ID}_game" '$1 == key {print $2}' $CONFIG_INI)
+
+if [ -z "$REMOTE_HOST" ]; then
+    echo "错误: 无法从config.ini中找到服务器ID ${SERVER_ID} 对应的IP地址"
+    exit 1
+fi
+
+##############################################
+# 主逻辑
+##############################################
+
+echo "========================================"
+echo "Debug StartTime 配置管理脚本"
+echo "========================================"
+echo "服务器ID:    $SERVER_ID"
+echo "目标IP:      $REMOTE_HOST"
+echo "配置文件:    $CONFIG_FILE"
+echo "时间戳文件:  $DEBUG_TIME_FILE"
+
+if [ "$TIMESTAMP_INPUT" = "ctime" ]; then
+    echo "操作模式:    使用当前时间（注释配置值）"
+elif [ -n "$TIMESTAMP" ]; then
+    READABLE_TIME=$(python3 -c "from datetime import datetime; print(datetime.fromtimestamp($TIMESTAMP).strftime('%Y-%m-%d %H:%M:%S'))")
+    echo "操作模式:    设置固定开服时间 ($READABLE_TIME)"
+else
+    echo "操作模式:    检查配置"
+fi
+
+echo "是否备份:    $IS_BACKUP"
+echo "========================================"
+echo
+
+##############################################
+# 判断操作类型
+##############################################
+
+USE_CURRENT_TIME=false
+if [ "$TIMESTAMP_INPUT" = "ctime" ]; then
+    USE_CURRENT_TIME=true
+fi
+
+##############################################
+# 步骤1: 处理配置项（调用 modify_remote_config.sh）
+##############################################
+
+if [ "$USE_CURRENT_TIME" = true ]; then
+    # ctime 模式：将配置值设为 nil，让游戏服使用默认当前时间
+    echo "正在将 debug_serverstarttime_config 设为 nil..."
+
+    # 备份配置文件
+    if [ "$IS_BACKUP" = "yes" ] || [ "$IS_BACKUP" = "true" ] || [ "$IS_BACKUP" = "y" ]; then
+        ssh root@$REMOTE_HOST "cp $CONFIG_FILE ${CONFIG_FILE}.backup.$(date +%Y%m%d_%H%M%S)" >/dev/null 2>&1
+    fi
+
+    # 将值改为 nil，保留逗号：{ ... }, → nil,
+    ssh root@$REMOTE_HOST "sed -i 's|^\([[:space:]]*debug_serverstarttime_config[[:space:]]*=[[:space:]]*\){.*},|\1nil,|' $CONFIG_FILE"
+
+    if [ $? -eq 0 ]; then
+        echo "✅ 配置已设为 nil，游戏服将使用默认当前时间"
+    else
+        echo "❌ 配置修改失败"
+        exit 1
+    fi
+
+    # 删除时间戳文件（如果存在）
+    if ssh root@$REMOTE_HOST "test -f $DEBUG_TIME_FILE" 2>/dev/null; then
+        echo "正在删除时间戳文件..."
+
+        # 备份后删除
+        if [ "$IS_BACKUP" = "yes" ] || [ "$IS_BACKUP" = "true" ] || [ "$IS_BACKUP" = "y" ]; then
+            ssh root@$REMOTE_HOST "cp $DEBUG_TIME_FILE ${DEBUG_TIME_FILE}.backup.$(date +%Y%m%d_%H%M%S)" >/dev/null 2>&1
+        fi
+
+        ssh root@$REMOTE_HOST "rm -f $DEBUG_TIME_FILE" >/dev/null 2>&1
+        echo "✅ 时间戳文件已删除"
+    fi
+
+elif [ -n "$TIMESTAMP_INPUT" ]; then
+    # 固定时间模式：取消注释配置并创建时间戳文件
+    echo "正在设置固定开服时间..."
+
+    # 备份配置文件
+    if [ "$IS_BACKUP" = "yes" ] || [ "$IS_BACKUP" = "true" ] || [ "$IS_BACKUP" = "y" ]; then
+        ssh root@$REMOTE_HOST "cp $CONFIG_FILE ${CONFIG_FILE}.backup.$(date +%Y%m%d_%H%M%S)" >/dev/null 2>&1
+    fi
+
+    # 检查配置是否存在
+    if ssh root@$REMOTE_HOST "grep -q '$CONFIG_KEY' $CONFIG_FILE" 2>/dev/null; then
+        # 配置存在，取消注释：将 = nil -- { ... } 改为 = { ... }
+        # ssh root@$REMOTE_HOST "sed -i 's|^\([[:space:]]*debug_serverstarttime_config[[:space:]]*=[[:space:]]*\)nil -- \({.*}\)|\1\2|' $CONFIG_FILE" >/dev/null 2>&1
+        bash "$MODIFY_SCRIPT" -s "$SERVER_ID" -f "$CONFIG_FILE" -p inside -c common -k debug_serverstarttime_config -v "{ fpath = './', file='Debug_ServerStartTime', rpath = '' }"
+
+    else
+        # 配置不存在，添加配置
+        bash "$MODIFY_SCRIPT" -s "$SERVER_ID" -f "$CONFIG_FILE" -p inside -c common -k debug_serverstarttime_config -v "{ fpath = './', file='Debug_ServerStartTime', rpath = '' }"
+        # NEW_CONFIG_LINE="    $CONFIG_KEY = $CONFIG_VALUE,"
+        # ssh root@$REMOTE_HOST "sed -i \"/^config\\['$CONFIG_SECTION'\\][[:space:]]*=[[:space:]]*{/a\\$NEW_CONFIG_LINE\" $CONFIG_FILE" >/dev/null 2>&1
+    fi
+
+    # 创建/更新时间戳文件
+    echo "正在更新时间戳文件..."
+
+    # 备份时间戳文件
+    if [ "$IS_BACKUP" = "yes" ] || [ "$IS_BACKUP" = "true" ] || [ "$IS_BACKUP" = "y" ]; then
+        if ssh root@$REMOTE_HOST "test -f $DEBUG_TIME_FILE" 2>/dev/null; then
+            ssh root@$REMOTE_HOST "cp $DEBUG_TIME_FILE ${DEBUG_TIME_FILE}.backup.$(date +%Y%m%d_%H%M%S)" >/dev/null 2>&1
+        fi
+    fi
+
+    # 确保目录存在
+    ssh root@$REMOTE_HOST "mkdir -p $(dirname $DEBUG_TIME_FILE)" >/dev/null 2>&1
+
+    # 写入时间戳文件
+    ssh root@$REMOTE_HOST "cat > $DEBUG_TIME_FILE << 'EOFMARKER'
+return $TIMESTAMP
+EOFMARKER
+" >/dev/null 2>&1
+
+    READABLE_TIME=$(python3 -c "from datetime import datetime; print(datetime.fromtimestamp($TIMESTAMP).strftime('%Y-%m-%d %H:%M:%S'))")
+    echo "✅ 已设置开服时间为: $READABLE_TIME ($TIMESTAMP)"
+
+else
+    # 未提供时间戳参数：只检查配置，不做修改
+    echo "正在检查配置..."
+
+    # 检查配置项是否存在
+    if ssh root@$REMOTE_HOST "grep -q '$CONFIG_KEY' $CONFIG_FILE" 2>/dev/null; then
+        CONFIG_LINE=$(ssh root@$REMOTE_HOST "sed -n \"/^config\\['$CONFIG_SECTION'\\]/,/^}/p\" $CONFIG_FILE | grep '$CONFIG_KEY'" 2>/dev/null)
+
+        # 判断是否被注释
+        if echo "$CONFIG_LINE" | grep -q "nil --"; then
+            echo "✅ 配置已注释（使用当前时间模式）"
+        else
+            echo "✅ 配置已启用（使用固定时间模式）"
+        fi
+        echo "   $CONFIG_LINE"
+    else
+        echo "⚠️  配置项不存在"
+        echo "   提示: 使用时间参数来添加配置"
+    fi
+fi
+
+echo ""
+echo "========================================"
+echo "✅ 操作完成！"
+if [ "$IS_BACKUP" = "yes" ] || [ "$IS_BACKUP" = "true" ] || [ "$IS_BACKUP" = "y" ]; then
+    echo "备份文件已保存在远程服务器上（*.backup.*）"
+fi
+echo "========================================"

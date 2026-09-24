@@ -1,0 +1,40 @@
+{
+  "profiles": {
+    "overseas": {
+      "display_name": "海外服",
+      "enabled": true,
+      "base_url": "https://填写海外-Muliu-地址",
+      "username": "填写海外-Muliu-账号",
+      "password": "填写海外-Muliu-密码",
+      "task_id": 89,
+      "step": 11,
+      "script_index": 0,
+      "parameter_index": 0,
+      "log_wait_seconds": 5,
+      "request_timeout_seconds": 20,
+      "script_root": "/home/serverGeneralScript",
+      "script_catalog_path": "config/muliu_script_catalog.md"
+    },
+    "china": {
+      "display_name": "国服",
+      "enabled": true,
+      "base_url": "https://填写国服-Muliu-地址",
+      "username": "填写国服-Muliu-账号",
+      "password": "填写国服-Muliu-密码",
+      "task_id": 89,
+      "step": 11,
+      "script_index": 0,
+      "parameter_index": 0,
+      "log_wait_seconds": 5,
+      "request_timeout_seconds": 20,
+      "script_root": "/home/serverGeneralScript",
+      "script_catalog_path": "config/muliu_script_catalog.md"
+    }
+  },
+  "server_regions": {
+    "6000": "overseas",
+    "6001": "overseas",
+    "10001": "china",
+    "10002": "china"
+  }
+}

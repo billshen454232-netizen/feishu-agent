@@ -39,14 +39,35 @@ class FeishuClient:
         self._tenant_token_expires_at = now + max(expire - 120, 60)
         return token
 
-    async def reply_text(self, message_id: str, text: str) -> None:
+    async def reply_text(self, message_id: str, text: str) -> str:
+        return await self._reply_message(message_id, "text", {"text": text})
+
+    async def reply_card(self, message_id: str, card: dict[str, object]) -> str:
+        """Reply with an interactive CardKit card owned by this application."""
+        return await self._reply_message(message_id, "interactive", card)
+
+    async def update_card(self, message_id: str, card: dict[str, object]) -> None:
+        """Replace a card sent by this bot with a non-actionable status card."""
+        token = await self.get_tenant_access_token()
+        response = await self._client.patch(
+            f"{self._config.base_url}/open-apis/im/v1/messages/{message_id}",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={"msg_type": "interactive", "content": json.dumps(card, ensure_ascii=False)},
+        )
+        response.raise_for_status()
+        data = response.json()
+        if data.get("code") != 0:
+            raise FeishuAPIError(f"Failed to update card message: {data}")
+
+    async def _reply_message(self, message_id: str, msg_type: str, content: dict[str, object]) -> str:
         token = await self.get_tenant_access_token()
         response = await self._client.post(
             f"{self._config.base_url}/open-apis/im/v1/messages/{message_id}/reply",
             headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-            json={"msg_type": "text", "content": json.dumps({"text": text}, ensure_ascii=False)},
+            json={"msg_type": msg_type, "content": json.dumps(content, ensure_ascii=False)},
         )
         response.raise_for_status()
         data = response.json()
         if data.get("code") != 0:
             raise FeishuAPIError(f"Failed to reply message: {data}")
+        return str(data.get("data", {}).get("message_id", ""))

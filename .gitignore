@@ -5,7 +5,13 @@ __pycache__/
 venv/
 .env
 config/config.json
+knowledge/scripts/config.ini
+knowledge/scripts/clear_logic_game.py
+knowledge/scripts/cleardb.py
+knowledge/scripts/clear_zone.py
+knowledge/references/*.xlsx
 .coverage
 htmlcov/
 .worktrees/
 data/
+logs/conversations/

@@ -1,0 +1,60 @@
+#!/bin/bash
+server_id=$1
+by=$2
+
+# 帮助信息
+if [ "$server_id" = "help" ] || [ "$server_id" = "h" ]; then
+    echo "用法: bash clear.sh <server_id> [by|noby]"
+    echo ""
+    echo "参数说明:"
+    echo "  server_id : 服务器ID（必需）"
+    echo "  by        : 设置真实霸业开服时间为 2030-12-25/10:00:00（可选）"
+    echo "  noby      : 删除 NSLG_OPEN_SERVER_TIME 配置（可选）"
+    echo ""
+    echo "示例:"
+    echo "  bash clear.sh 2016       # 仅清服"
+    echo "  bash clear.sh 2016 by    # 清服并设置开服时间"
+    echo "  bash clear.sh 2016 noby  # 清服并删除开服时间配置"
+    exit 0
+fi
+
+# 获取远程服务器的IP
+REMOTE_HOST=$(awk -F '=' -v key="$server_id"_game '$1 == key {print $2}' config.ini)
+
+if [ "$server_id" = "4001" ];then
+    bash yc_shutdown.sh kill
+    sleep 5
+    python3 clear_logic_game.py 4001
+
+    # 处理 NSLG_OPEN_SERVER_TIME 配置 (4001)
+    if [ "$by" = "by" ]; then
+        bash modify_remote_config.sh -s "$server_id" -p after -b no -f '/data/app/etc/nslg_game.lua' -k 'NSLG_OPEN_SERVER_TIME' -v '"2030-12-25/10:00:00"' -a add
+        echo "已设置 NSLG_OPEN_SERVER_TIME"
+    fi
+    if [ "$by" = "noby" ]; then
+        bash modify_remote_config.sh -s "$server_id" -p after -b no -f '/data/app/etc/nslg_game.lua' -k 'NSLG_OPEN_SERVER_TIME' -a delete
+        echo "已删除 NSLG_OPEN_SERVER_TIME"
+    fi
+
+    exit 0
+fi
+
+
+# 关服
+ssh "root@$REMOTE_HOST" "cd /data/app/game-server/bin && bash kill_server.sh"
+sleep 5
+ssh "root@$REMOTE_HOST" "cd /data/app/game-server/bin && bash kill_zone.sh"
+python3 clear_logic_game.py $server_id
+sleep 3
+python3 clear_zone.py $server_id
+
+# 处理 NSLG_OPEN_SERVER_TIME 配置
+file_path="script_helper/modify_remote_config.sh"
+if [ "$by" = "by" ]; then
+    bash "$file_path" -s "$server_id" -p after -b no -f '/data/app/etc/nslg_game.lua' -k 'NSLG_OPEN_SERVER_TIME' -v '"2030-12-25/10:00:00"' -a add
+    echo "已设置 NSLG_OPEN_SERVER_TIME"
+fi
+if [ "$by" = "noby" ]; then
+    bash "$file_path" -s "$server_id" -p after -b no -f '/data/app/etc/nslg_game.lua' -k 'NSLG_OPEN_SERVER_TIME' -a delete
+    echo "已删除 NSLG_OPEN_SERVER_TIME"
+fi

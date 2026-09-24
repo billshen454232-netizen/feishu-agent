@@ -1,0 +1,226 @@
+#!/bin/bash
+set -u
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+CONFIG_FILE="$SCRIPT_DIR/config.ini"
+
+server_id=${1:-}
+action=${2:-normal}
+
+if [[ -z "$server_id" ]]; then
+    echo "用法: $0 <server_id|dev|weekly|qa|devgvg|weeklygvg|qagvg> [normal|kill|autokill|gvgzone|gvgdaemon]" >&2
+    exit 1
+fi
+
+get_game_host() {
+    local id=$1
+    awk -F '=' -v key="${id}_game" '$1 == key {print $2}' "$CONFIG_FILE"
+}
+
+require_game_host() {
+    local id=$1
+    local host
+    host=$(get_game_host "$id")
+    if [[ -z "$host" ]]; then
+        echo "找不到服务器 ${id} 对应的 ${id}_game 配置" >&2
+        exit 1
+    fi
+    printf '%s' "$host"
+}
+
+ssh_game() {
+    local host=$1
+    local command=$2
+    ssh "root@$host" "$command"
+}
+
+check_remaining_skynet() {
+    local host=$1
+    local remaining
+
+    echo "[$host] 等待 15 秒后检查 skynet 进程残留..."
+    sleep 15
+    remaining=$(ssh_game "$host" "ps -ef | grep '[s]kynet' | grep -E 'GROUP=(game|zone|gvg_zone)( |$)'" || true)
+    if [[ -z "$remaining" ]]; then
+        echo "[$host] 关服检查通过：未发现 game/zone/gvg_zone skynet 进程残留"
+        return 0
+    fi
+
+    echo "[$host] 关服检查失败：发现 game/zone/gvg_zone skynet 进程残留" >&2
+    echo "$remaining" >&2
+    return 1
+}
+
+shutdown_normal() {
+    local host=$1
+    ssh_game "$host" "cd /data/app/game-server && bash release_bin/shutdon_game.sh"
+    sleep 15
+    ssh_game "$host" "cd /data/app/game-server && bash release_bin/shutdon_zone.sh zone qa_zone"
+}
+
+shutdown_kill() {
+    local host=$1
+    echo "杀进程关服"
+    ssh_game "$host" "cd /data/app/game-server/bin && bash kill_server.sh"
+    sleep 5
+    ssh_game "$host" "cd /data/app/game-server/bin && bash kill_zone.sh"
+    sleep 5
+    echo "服务器已关闭"
+}
+
+shutdown_autokill() {
+    local host=$1
+    local process_count
+
+    echo "自动关服"
+    ssh_game "$host" "cd /data/app/game-server && bash release_bin/shutdon_game.sh"
+    sleep 15
+    ssh_game "$host" "cd /data/app/game-server && bash release_bin/shutdon_zone.sh zone qa_zone"
+    sleep 15
+
+    process_count=$(ssh_game "$host" "cd /data/app/game-server && ps -aux | grep skynet | grep -v grep | wc -l")
+    process_count=${process_count//[[:space:]]/}
+    if [[ "$process_count" != "0" ]]; then
+        echo "正常关服失败，残留 skynet 进程数: $process_count"
+        shutdown_kill "$host"
+    else
+        echo "正常关服成功"
+    fi
+}
+
+shutdown_gvg_zone() {
+    local host=$1
+    ssh_game "$host" "cd /data/app/game-server/bin && bash kill_gvg_zone.sh"
+}
+
+shutdown_gvg_daemon() {
+    local host=$1
+    ssh_game "$host" "cd /data/app/game-server/bin && bash kill_gvg_zone_daemon.sh"
+}
+
+shutdown_normal_server() {
+    local id=$1
+    local mode=$2
+    local host
+    host=$(require_game_host "$id")
+
+    case "$mode" in
+        normal)
+            shutdown_normal "$host"
+            ;;
+        kill)
+            if [[ "$id" == "4001" ]]; then
+                bash yc_shutdown.sh kill
+            else
+                shutdown_kill "$host"
+            fi
+            ;;
+        autokill)
+            shutdown_autokill "$host"
+            ;;
+        gvgzone)
+            shutdown_gvg_zone "$host"
+            ;;
+        gvgdaemon)
+            shutdown_gvg_daemon "$host"
+            ;;
+        *)
+            echo "未知操作: $mode" >&2
+            exit 1
+            ;;
+    esac
+
+    if [[ "$mode" != "kill" && "$mode" != "autokill" ]]; then
+        check_remaining_skynet "$host"
+    fi
+}
+
+get_gvg_hosts() {
+    local id=$1
+    case "$id" in
+        weeklygvg)
+            printf '%s\n' "2022" "2023" "2024" "2025"
+            ;;
+        devgvg)
+            printf '%s\n' "2026" "2027"
+            ;;
+        qagvg)
+            printf '%s\n' "2028" "2029"
+            ;;
+        *)
+            echo "未知 GVG 服务器: $id" >&2
+            exit 1
+            ;;
+    esac
+}
+
+shutdown_special_gvg() {
+    local id=$1
+    local mode=$2
+    local gvg_ids=()
+    local hosts=()
+    local gvg_id
+    local host
+
+    mapfile -t gvg_ids < <(get_gvg_hosts "$id")
+    for gvg_id in "${gvg_ids[@]}"; do
+        host=$(require_game_host "$gvg_id")
+        hosts+=("$host")
+    done
+
+    case "$mode" in
+        normal|autokill|kill)
+            for host in "${hosts[@]}"; do
+                shutdown_gvg_zone "$host"
+            done
+            sleep 5
+            for host in "${hosts[@]}"; do
+                shutdown_gvg_daemon "$host"
+            done
+            ;;
+        gvgzone)
+            for host in "${hosts[@]}"; do
+                shutdown_gvg_zone "$host"
+            done
+            ;;
+        gvgdaemon)
+            for host in "${hosts[@]}"; do
+                shutdown_gvg_daemon "$host"
+            done
+            ;;
+        *)
+            echo "未知操作: $mode" >&2
+            exit 1
+            ;;
+    esac
+
+    if [[ "$mode" != "kill" && "$mode" != "autokill" ]]; then
+        local check_status=0
+        for host in "${hosts[@]}"; do
+            check_remaining_skynet "$host" || check_status=1
+        done
+        return "$check_status"
+    fi
+}
+
+case "$server_id" in
+    4001)
+        if [[ "$action" == "kill" ]]; then
+            bash yc_shutdown.sh kill
+        elif [[ "$action" == "normal" ]]; then
+            bash yc_shutdown.sh
+        else
+            shutdown_normal_server "$server_id" "$action"
+        fi
+        ;;
+    dev|weekly|qa|krdev|krweekly|krqa)
+        python3 asyncio_shutdown.py "$server_id"
+        echo "$server_id"
+        ;;
+    weeklygvg|devgvg|qagvg)
+        shutdown_special_gvg "$server_id" "$action"
+        ;;
+    *)
+        shutdown_normal_server "$server_id" "$action"
+        ;;
+esac
