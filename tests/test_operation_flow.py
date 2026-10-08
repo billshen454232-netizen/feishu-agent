@@ -13,6 +13,7 @@ from src.config import (
     JobQueueConfig,
     KnowledgeBaseConfig,
     MuliuConfig,
+    RuntimeConfig,
     ServerConfig,
 )
 from src.conversation_log import ConversationLog
@@ -158,7 +159,7 @@ class FakeScriptKnowledgeBase:
         )
 
 
-def make_config():
+def make_config(*, runtime=RuntimeConfig()):
     return AppConfig(
         server=ServerConfig(),
         feishu=FeishuConfig(app_id="app", app_secret="secret"),
@@ -167,6 +168,7 @@ def make_config():
         knowledge_base=KnowledgeBaseConfig(enabled=False),
         bot=BotConfig(),
         job_queue=JobQueueConfig(),
+        runtime=runtime,
         muliu=MuliuConfig(
             script_root="/home/serverGeneralScript",
             confirmation_prefix="确认执行",
@@ -784,6 +786,42 @@ async def test_card_confirmation_claims_stored_plan_and_updates_original_card(tm
     assert feishu.card_updates[0][0] == "om_card"
     assert feishu.card_updates[0][1]["header"]["title"]["content"] == "测试服操作已完成"
     assert feishu.replies[0][0] == "om_card"
+
+
+@pytest.mark.asyncio
+async def test_text_confirmation_in_gateway_mode_acknowledges_queued_worker_plan(tmp_path):
+    config = make_config(runtime=RuntimeConfig(role="gateway", worker_token="worker-token"))
+    store = MessageJobStore(tmp_path / "jobs.sqlite3")
+    store.initialize()
+    plan = make_plan()
+    store.create_if_new("om_request", "evt", "oc_group", "ou_requester", "查询 6001 服", chat_type="group")
+    store.mark_awaiting_confirmation(
+        "om_request",
+        plan_json=json.dumps({
+            "kind": plan.kind.value,
+            "summary": plan.summary,
+            "steps": [{"path": plan.steps[0].path, "args": plan.steps[0].args, "description": plan.steps[0].description}],
+        }),
+        confirmation_message_id="om_card",
+        confirmation_token="ABC123",
+        confirmation_method="text",
+    )
+    feishu = FakeFeishuClient()
+    processor = MessageJobProcessor(
+        config,
+        store,
+        ConversationStore(4),
+        ai_client=None,
+        feishu_client=feishu,
+        muliu_executor=None,
+    )
+
+    assert await processor.process_confirmation("oc_group", "ABC123", "om_confirm") is True
+
+    assert store.get("om_request").status == "queued_for_worker"
+    assert len(feishu.replies) == 1
+    assert feishu.replies[0][0] == "om_confirm"
+    assert "已排入内网 Muliu Worker 队列" in feishu.replies[0][1]
 
 
 @pytest.mark.asyncio

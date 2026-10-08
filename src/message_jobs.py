@@ -11,6 +11,8 @@ JobStatus = Literal[
     "processing",
     "awaiting_confirmation",
     "confirmed",
+    "queued_for_worker",
+    "leased",
     "submission_in_progress",
     "submitted_result_unknown",
     "done",
@@ -37,6 +39,8 @@ class MessageJob:
     confirmation_message_id: str
     confirmation_token: str
     confirmation_method: str
+    worker_id: str
+    worker_leased_at: int | None
 
 
 class MessageJobStore:
@@ -63,7 +67,9 @@ class MessageJobStore:
                     plan_json TEXT NOT NULL DEFAULT '',
                     confirmation_message_id TEXT NOT NULL DEFAULT '',
                     confirmation_token TEXT NOT NULL DEFAULT '',
-                    confirmation_method TEXT NOT NULL DEFAULT 'text'
+                    confirmation_method TEXT NOT NULL DEFAULT 'text',
+                    worker_id TEXT NOT NULL DEFAULT '',
+                    worker_leased_at INTEGER
                 )
                 """
             )
@@ -72,6 +78,8 @@ class MessageJobStore:
             self._add_column_if_missing(conn, "confirmation_message_id", "TEXT NOT NULL DEFAULT ''")
             self._add_column_if_missing(conn, "confirmation_token", "TEXT NOT NULL DEFAULT ''")
             self._add_column_if_missing(conn, "confirmation_method", "TEXT NOT NULL DEFAULT 'text'")
+            self._add_column_if_missing(conn, "worker_id", "TEXT NOT NULL DEFAULT ''")
+            self._add_column_if_missing(conn, "worker_leased_at", "INTEGER")
             conn.commit()
 
     def create_if_new(
@@ -112,7 +120,8 @@ class MessageJobStore:
                 """
                 SELECT message_id, event_id, chat_id, chat_type, user_id, text,
                        status, attempts, created_at, updated_at, last_error,
-                       plan_json, confirmation_message_id, confirmation_token, confirmation_method
+                       plan_json, confirmation_message_id, confirmation_token, confirmation_method,
+                       worker_id, worker_leased_at
                 FROM message_jobs
                 WHERE message_id = ?
                 """,
@@ -126,6 +135,139 @@ class MessageJobStore:
     def mark_submission_in_progress(self, message_id: str, now: int | None = None) -> None:
         """Record that a confirmed request is being submitted to Muliu."""
         self._update_status(message_id, "submission_in_progress", self._now(now))
+
+    def queue_for_worker(self, message_id: str, now: int | None = None) -> bool:
+        """Make a locally validated, confirmed plan available to an intranet worker."""
+        timestamp = self._now(now)
+        with self._connect() as conn:
+            updated = conn.execute(
+                """
+                UPDATE message_jobs
+                SET status = 'queued_for_worker', worker_id = '', worker_leased_at = NULL,
+                    updated_at = ?
+                WHERE message_id = ? AND status = 'confirmed'
+                """,
+                (timestamp, message_id),
+            )
+            conn.commit()
+        return updated.rowcount == 1
+
+    def claim_next_worker_job(self, worker_id: str, now: int | None = None) -> MessageJob | None:
+        """Atomically lease the next plan while globally serializing Muliu Task 89."""
+        timestamp = self._now(now)
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            active_lease = conn.execute(
+                "SELECT 1 FROM message_jobs WHERE status = 'leased' LIMIT 1"
+            ).fetchone()
+            if active_lease is not None:
+                conn.rollback()
+                return None
+            row = conn.execute(
+                """
+                SELECT message_id, event_id, chat_id, chat_type, user_id, text,
+                       status, attempts, created_at, updated_at, last_error,
+                       plan_json, confirmation_message_id, confirmation_token, confirmation_method,
+                       worker_id, worker_leased_at
+                FROM message_jobs
+                WHERE status = 'queued_for_worker'
+                ORDER BY created_at ASC
+                LIMIT 1
+                """
+            ).fetchone()
+            if row is None:
+                conn.rollback()
+                return None
+            updated = conn.execute(
+                """
+                UPDATE message_jobs
+                SET status = 'leased', worker_id = ?, worker_leased_at = ?, updated_at = ?
+                WHERE message_id = ? AND status = 'queued_for_worker'
+                """,
+                (worker_id, timestamp, timestamp, row["message_id"]),
+            )
+            if updated.rowcount != 1:
+                conn.rollback()
+                return None
+            conn.commit()
+        return self.get(str(row["message_id"]))
+
+    def complete_worker_job(
+        self,
+        message_id: str,
+        worker_id: str,
+        *,
+        status: str,
+        error: str = "",
+        now: int | None = None,
+    ) -> MessageJob | None:
+        """Store a terminal result reported by the worker that owns the lease."""
+        if status not in {"done", "failed", "submitted_result_unknown"}:
+            raise ValueError("worker terminal status is invalid")
+        timestamp = self._now(now)
+        with self._connect() as conn:
+            updated = conn.execute(
+                """
+                UPDATE message_jobs
+                SET status = ?, last_error = ?, updated_at = ?
+                WHERE message_id = ? AND status = 'leased' AND worker_id = ?
+                """,
+                (status, error, timestamp, message_id, worker_id),
+            )
+            conn.commit()
+        if updated.rowcount != 1:
+            return None
+        return self.get(message_id)
+
+    def renew_worker_lease(self, message_id: str, worker_id: str, now: int | None = None) -> bool:
+        """Renew only the lease owned by the calling worker."""
+        timestamp = self._now(now)
+        with self._connect() as conn:
+            updated = conn.execute(
+                """
+                UPDATE message_jobs
+                SET worker_leased_at = ?, updated_at = ?
+                WHERE message_id = ? AND status = 'leased' AND worker_id = ?
+                """,
+                (timestamp, timestamp, message_id, worker_id),
+            )
+            conn.commit()
+        return updated.rowcount == 1
+
+    def expire_worker_leases(
+        self,
+        lease_timeout_seconds: float,
+        now: int | None = None,
+    ) -> list[MessageJob]:
+        """Mark lost worker leases unknown instead of allowing a remote replay."""
+        timestamp = self._now(now)
+        latest_allowed_lease = timestamp - lease_timeout_seconds
+        reason = "内网 Worker 心跳超时，无法确认已领取操作是否已提交给 Muliu；请勿重复确认或重试"
+        expired_ids: list[str] = []
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT message_id
+                FROM message_jobs
+                WHERE status = 'leased' AND worker_leased_at IS NOT NULL
+                      AND worker_leased_at < ?
+                ORDER BY worker_leased_at ASC
+                """,
+                (latest_allowed_lease,),
+            ).fetchall()
+            for row in rows:
+                updated = conn.execute(
+                    """
+                    UPDATE message_jobs
+                    SET status = 'submitted_result_unknown', last_error = ?, updated_at = ?
+                    WHERE message_id = ? AND status = 'leased' AND worker_leased_at < ?
+                    """,
+                    (reason, timestamp, row["message_id"], latest_allowed_lease),
+                )
+                if updated.rowcount == 1:
+                    expired_ids.append(str(row["message_id"]))
+            conn.commit()
+        return [job for message_id in expired_ids if (job := self.get(message_id)) is not None]
 
     def mark_submitted_result_unknown(self, message_id: str, reason: str, now: int | None = None) -> None:
         """Preserve an accepted or interrupted operation without allowing replay."""
@@ -173,7 +315,8 @@ class MessageJobStore:
                 """
                 SELECT message_id, event_id, chat_id, chat_type, user_id, text,
                        status, attempts, created_at, updated_at, last_error,
-                       plan_json, confirmation_message_id, confirmation_token, confirmation_method
+                       plan_json, confirmation_message_id, confirmation_token, confirmation_method,
+                       worker_id, worker_leased_at
                 FROM message_jobs
                 WHERE chat_id = ? AND confirmation_token = ?
                       AND confirmation_method = 'text'
@@ -221,7 +364,8 @@ class MessageJobStore:
                 """
                 SELECT message_id, event_id, chat_id, chat_type, user_id, text,
                        status, attempts, created_at, updated_at, last_error,
-                       plan_json, confirmation_message_id, confirmation_token, confirmation_method
+                       plan_json, confirmation_message_id, confirmation_token, confirmation_method,
+                       worker_id, worker_leased_at
                 FROM message_jobs
                 WHERE message_id = ? AND confirmation_message_id = ?
                       AND chat_id = ? AND user_id = ?
@@ -270,7 +414,8 @@ class MessageJobStore:
                 """
                 SELECT message_id, event_id, chat_id, chat_type, user_id, text,
                        status, attempts, created_at, updated_at, last_error,
-                       plan_json, confirmation_message_id, confirmation_token, confirmation_method
+                       plan_json, confirmation_message_id, confirmation_token, confirmation_method,
+                       worker_id, worker_leased_at
                 FROM message_jobs
                 WHERE message_id = ? AND confirmation_message_id = ?
                       AND chat_id = ? AND user_id = ?
@@ -352,7 +497,8 @@ class MessageJobStore:
                 """
                 SELECT message_id, event_id, chat_id, chat_type, user_id, text,
                        status, attempts, created_at, updated_at, last_error,
-                       plan_json, confirmation_message_id, confirmation_token, confirmation_method
+                       plan_json, confirmation_message_id, confirmation_token, confirmation_method,
+                       worker_id, worker_leased_at
                 FROM message_jobs
                 WHERE status IN ('queued', 'processing') AND created_at >= ?
                 ORDER BY created_at ASC
@@ -369,7 +515,8 @@ class MessageJobStore:
                 """
                 SELECT message_id, event_id, chat_id, chat_type, user_id, text,
                        status, attempts, created_at, updated_at, last_error,
-                       plan_json, confirmation_message_id, confirmation_token, confirmation_method
+                       plan_json, confirmation_message_id, confirmation_token, confirmation_method,
+                       worker_id, worker_leased_at
                 FROM message_jobs
                 WHERE status IN ('queued', 'processing', 'awaiting_confirmation') AND created_at < ?
                 ORDER BY created_at ASC
@@ -437,4 +584,6 @@ class MessageJobStore:
             confirmation_message_id=str(row["confirmation_message_id"]),
             confirmation_token=str(row["confirmation_token"]),
             confirmation_method=str(row["confirmation_method"]),
+            worker_id=str(row["worker_id"]),
+            worker_leased_at=(int(row["worker_leased_at"]) if row["worker_leased_at"] is not None else None),
         )

@@ -230,6 +230,24 @@ https://你的公网域名/feishu/events
 
 群内自然语言请求生成的计划会以卡片展示完整步骤、脚本名和参数，并提供“确认执行 / 取消”按钮。按钮仅引用本地数据库中已存储的待确认计划，不能传入或修改脚本路径、参数或 Shell 命令。只有原请求人可以确认或取消；确认后操作仍经过计划解析、注册表合同和本地防火墙校验，再转入后台提交 Muliu。卡片回调不等待 Muliu 结果，避免超过飞书 3 秒回调限制。
 
+## 部署模式（单机模式 vs Gateway/Worker 分离模式）
+
+由于 Muliu 服务通常部署在公司内网、公网云服务器无法直接建立 HTTP 连接，系统支持通过 `runtime.role` 拆分运行职责：
+
+### 1. 单机模式（`runtime.role: "local"`）
+- 本机单进程运行飞书事件、AI 规划与 MuliuExecutor 执行器。
+- 适合本地开发、单机验证与自动化测试。示例见 `config/config.example.json`。
+
+### 2. 公网网关（`runtime.role: "gateway"`）
+- 部署在阿里云等公网云服务器（例如 `/opt/feishu-agent`）。
+- 职责：接收飞书事件回调、生成 AI 计划、投递待确认卡片、管理 SQLite 任务队列、提供内部受控认领接口。
+- **安全保障**：无需配置、也无需持有 Muliu 内网地址、账号或密码。配置示例见 `config/config.gateway.example.json`。
+
+### 3. 内网执行器（`runtime.role: "worker"`）
+- 部署在可连通 Muliu 的内网机器（例如内网 Jenkins Runner 服务器）。
+- 职责：只主动出站向 Gateway 发起 HTTPS 请求认领已确认计划；使用防火墙重新核验计划合法性；通过本地 `MuliuExecutor` 访问 Muliu 并回传终态。
+- **安全保障**：无需开放任何公网入站端口，无需配置飞书 App Secret 或 AI API Key。配置示例见 `config/config.worker.example.json`。
+
 ## 测试
 
 ```bash

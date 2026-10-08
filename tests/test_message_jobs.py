@@ -214,3 +214,74 @@ def test_initialize_migrates_legacy_database_with_empty_chat_type(tmp_path):
     job = store.get("legacy")
     assert job is not None
     assert job.chat_type == ""
+
+
+def _queue_confirmed_worker_job(store, message_id, now=1000):
+    store.create_if_new(message_id, "evt_{}".format(message_id), "oc", "ou", "操作", now=now)
+    store.mark_awaiting_confirmation(
+        message_id,
+        plan_json=(
+            '{"kind":"operation","summary":"操作","steps":['
+            '{"path":"/home/serverGeneralScript/basic_info.sh","args":["6001"],'
+            '"description":"查询"}]}'
+        ),
+        confirmation_message_id="om_card_{}".format(message_id),
+        confirmation_token="ABC123",
+        now=now,
+    )
+    claimed = store.claim_card_confirmation(
+        message_id,
+        "om_card_{}".format(message_id),
+        "oc",
+        "ou",
+        "ABC123",
+        600,
+        now=now + 1,
+    )
+    assert claimed is not None
+    assert store.queue_for_worker(message_id, now=now + 2)
+
+
+def test_worker_claim_is_globally_serialized_and_owned_by_one_worker(tmp_path):
+    store = MessageJobStore(tmp_path / "jobs.sqlite3")
+    store.initialize()
+    _queue_confirmed_worker_job(store, "first", now=1000)
+    _queue_confirmed_worker_job(store, "second", now=1010)
+
+    first = store.claim_next_worker_job("worker-a", now=1020)
+    blocked = store.claim_next_worker_job("worker-b", now=1021)
+    wrong_heartbeat = store.renew_worker_lease("first", "worker-b", now=1022)
+    wrong_result = store.complete_worker_job("first", "worker-b", status="done", now=1022)
+    completed = store.complete_worker_job("first", "worker-a", status="done", now=1023)
+    second = store.claim_next_worker_job("worker-b", now=1024)
+
+    assert first is not None
+    assert first.message_id == "first"
+    assert blocked is None
+    assert wrong_heartbeat is False
+    assert wrong_result is None
+    assert completed is not None
+    assert completed.status == "done"
+    assert second is not None
+    assert second.message_id == "second"
+    assert second.worker_id == "worker-b"
+
+
+def test_worker_lease_timeout_becomes_result_unknown_without_requeue(tmp_path):
+    store = MessageJobStore(tmp_path / "jobs.sqlite3")
+    store.initialize()
+    _queue_confirmed_worker_job(store, "request", now=1000)
+    leased = store.claim_next_worker_job("worker-a", now=1010)
+
+    assert leased is not None
+    assert store.renew_worker_lease("request", "worker-a", now=1020) is True
+    assert store.expire_worker_leases(30, now=1049) == []
+
+    expired = store.expire_worker_leases(30, now=1051)
+
+    assert [job.message_id for job in expired] == ["request"]
+    job = store.get("request")
+    assert job is not None
+    assert job.status == "submitted_result_unknown"
+    assert "请勿重复确认或重试" in job.last_error
+    assert store.claim_next_worker_job("worker-b", now=1052) is None

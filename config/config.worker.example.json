@@ -1,0 +1,32 @@
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8001
+  },
+  "runtime": {
+    "role": "worker",
+    "worker_id": "jenkins-worker-1",
+    "worker_token": "填写与阿里云Gateway一致的高强度随机Bearer令牌",
+    "gateway_base_url": "https://你的阿里云网关域名",
+    "poll_interval_seconds": 5,
+    "heartbeat_interval_seconds": 30,
+    "lease_timeout_seconds": 180
+  },
+  "muliu": {
+    "enabled": true,
+    "base_url": "http://10.x.x.x:8080或内网Muliu域名",
+    "username": "内网Muliu账号",
+    "password": "内网Muliu密码",
+    "task_id": 89,
+    "step": 11,
+    "script_index": 0,
+    "parameter_index": 0,
+    "log_wait_seconds": 5,
+    "log_completion_timeout_seconds": 1800,
+    "start_verification_wait_seconds": 60,
+    "request_timeout_seconds": 20,
+    "script_root": "/home/serverGeneralScript",
+    "script_catalog_path": "config/muliu_script_catalog.md",
+    "max_steps": 10
+  }
+}

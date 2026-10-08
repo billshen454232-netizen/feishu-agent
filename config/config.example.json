@@ -52,6 +52,15 @@
     "directory": "logs/conversations",
     "max_text_chars": 12000
   },
+  "runtime": {
+    "role": "local",
+    "worker_token": "若部署为 gateway 或 worker，请填写两端一致的随机强密码令牌",
+    "worker_id": "若为 worker 角色，请填写内网 Worker 标识（例如 jenkins-worker-1）",
+    "gateway_base_url": "若为 worker 角色，请填写阿里云 Gateway HTTPS 地址，例如 https://feishu.example.com",
+    "poll_interval_seconds": 5,
+    "heartbeat_interval_seconds": 30,
+    "lease_timeout_seconds": 180
+  },
   "muliu": {
     "enabled": true,
     "base_url": "https://填写你的-Muliu-地址",

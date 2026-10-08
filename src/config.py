@@ -11,6 +11,7 @@ class ConfigError(ValueError):
 
 
 Provider = Literal["openai_compatible", "claude_messages"]
+RuntimeRole = Literal["local", "gateway", "worker"]
 
 
 def _require_positive_number(value: float, label: str) -> float:
@@ -109,6 +110,24 @@ class MuliuConfig:
 
 
 @dataclass(frozen=True)
+class RuntimeConfig:
+    """Select where confirmed Muliu plans are executed.
+
+    ``local`` keeps planning and execution in one process. ``gateway`` queues a
+    confirmed plan for an intranet worker. ``worker`` claims those plans and is
+    the only role that connects to Muliu.
+    """
+
+    role: RuntimeRole = "local"
+    worker_token: str = ""
+    worker_id: str = ""
+    gateway_base_url: str = ""
+    poll_interval_seconds: float = 5.0
+    heartbeat_interval_seconds: float = 30.0
+    lease_timeout_seconds: float = 180.0
+
+
+@dataclass(frozen=True)
 class ScriptKnowledgeConfig:
     enabled: bool = True
     path: str = "knowledge"
@@ -133,6 +152,7 @@ class AppConfig:
     knowledge_base: KnowledgeBaseConfig
     bot: BotConfig
     job_queue: JobQueueConfig
+    runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
     muliu: MuliuConfig = field(default_factory=MuliuConfig)
     script_knowledge: ScriptKnowledgeConfig = field(default_factory=ScriptKnowledgeConfig)
     conversation_log: ConversationLogConfig = field(default_factory=ConversationLogConfig)
@@ -143,6 +163,46 @@ def _require_str(data: dict[str, Any], key: str, section: str) -> str:
     if not isinstance(value, str) or not value:
         raise ConfigError(f"Missing required {section}.{key}")
     return value
+
+
+def _load_runtime(raw: dict[str, Any]) -> RuntimeConfig:
+    role = str(raw.get("role", "local")).strip()
+    if role not in ("local", "gateway", "worker"):
+        raise ConfigError("runtime.role 必须是 local、gateway 或 worker")
+
+    worker_token = str(raw.get("worker_token", "")).strip()
+    worker_id = str(raw.get("worker_id", "")).strip()
+    gateway_base_url = str(raw.get("gateway_base_url", "")).rstrip("/")
+    poll_interval_seconds = _require_positive_number(
+        float(raw.get("poll_interval_seconds", 5)),
+        "runtime.poll_interval_seconds",
+    )
+    heartbeat_interval_seconds = _require_positive_number(
+        float(raw.get("heartbeat_interval_seconds", 30)),
+        "runtime.heartbeat_interval_seconds",
+    )
+    lease_timeout_seconds = _require_positive_number(
+        float(raw.get("lease_timeout_seconds", 180)),
+        "runtime.lease_timeout_seconds",
+    )
+    if heartbeat_interval_seconds >= lease_timeout_seconds:
+        raise ConfigError("runtime.heartbeat_interval_seconds 必须小于 runtime.lease_timeout_seconds")
+    if role in ("gateway", "worker") and not worker_token:
+        raise ConfigError("runtime.worker_token 不能为空")
+    if role == "worker" and not worker_id:
+        raise ConfigError("runtime.worker_id 不能为空")
+    if role == "worker" and not gateway_base_url.startswith("https://"):
+        raise ConfigError("runtime.gateway_base_url 必须是 HTTPS 地址")
+
+    return RuntimeConfig(
+        role=role,  # type: ignore[arg-type]
+        worker_token=worker_token,
+        worker_id=worker_id,
+        gateway_base_url=gateway_base_url,
+        poll_interval_seconds=poll_interval_seconds,
+        heartbeat_interval_seconds=heartbeat_interval_seconds,
+        lease_timeout_seconds=lease_timeout_seconds,
+    )
 
 
 def load_config(path: str | Path = "config/config.json") -> AppConfig:
@@ -165,6 +225,7 @@ def load_config(path: str | Path = "config/config.json") -> AppConfig:
     bot_raw = raw.get("bot", {})
     job_queue_raw = raw.get("job_queue", {})
     muliu_raw = raw.get("muliu", {})
+    runtime_raw = raw.get("runtime", {})
     script_knowledge_raw = raw.get("script_knowledge", {})
     conversation_log_raw = raw.get("conversation_log", {})
 
@@ -172,32 +233,59 @@ def load_config(path: str | Path = "config/config.json") -> AppConfig:
         raise ConfigError("server, feishu, and ai sections must be JSON objects")
     if not isinstance(muliu_raw, dict):
         raise ConfigError("muliu section must be a JSON object")
+    if not isinstance(runtime_raw, dict):
+        raise ConfigError("runtime section must be a JSON object")
+    runtime = _load_runtime(runtime_raw)
     if not isinstance(script_knowledge_raw, dict):
         raise ConfigError("script_knowledge section must be a JSON object")
     if not isinstance(conversation_log_raw, dict):
         raise ConfigError("conversation_log section must be a JSON object")
 
-    provider = _require_str(ai_raw, "provider", "ai")
+    provider = (
+        str(ai_raw.get("provider", "openai_compatible"))
+        if runtime.role == "worker"
+        else _require_str(ai_raw, "provider", "ai")
+    )
     if provider not in ("openai_compatible", "claude_messages"):
         raise ConfigError(f"Unsupported ai.provider: {provider}")
 
-    return AppConfig(
+    config = AppConfig(
         server=ServerConfig(
             host=str(server_raw.get("host", "127.0.0.1")),
             port=int(server_raw.get("port", 8000)),
         ),
         feishu=FeishuConfig(
-            app_id=_require_str(feishu_raw, "app_id", "feishu"),
-            app_secret=_require_str(feishu_raw, "app_secret", "feishu"),
+            app_id=(
+                str(feishu_raw.get("app_id", ""))
+                if runtime.role == "worker"
+                else _require_str(feishu_raw, "app_id", "feishu")
+            ),
+            app_secret=(
+                str(feishu_raw.get("app_secret", ""))
+                if runtime.role == "worker"
+                else _require_str(feishu_raw, "app_secret", "feishu")
+            ),
             verification_token=str(feishu_raw.get("verification_token", "")),
             encrypt_key=str(feishu_raw.get("encrypt_key", "")),
             base_url=str(feishu_raw.get("base_url", "https://open.feishu.cn")).rstrip("/"),
         ),
         ai=AIConfig(
             provider=provider,  # type: ignore[arg-type]
-            base_url=_require_str(ai_raw, "base_url", "ai").rstrip("/"),
-            api_key=_require_str(ai_raw, "api_key", "ai"),
-            model=_require_str(ai_raw, "model", "ai"),
+            base_url=(
+                str(ai_raw.get("base_url", "")).rstrip("/")
+                if runtime.role == "worker"
+                else _require_str(ai_raw, "base_url", "ai").rstrip("/")
+            ),
+            api_key=(
+                str(ai_raw.get("api_key", ""))
+                if runtime.role == "worker"
+                else _require_str(ai_raw, "api_key", "ai")
+            ),
+            model=(
+                str(ai_raw.get("model", ""))
+                if runtime.role == "worker"
+                else _require_str(ai_raw, "model", "ai")
+            ),
             system_prompt=str(ai_raw.get("system_prompt", "你是一个飞书里的 AI 助手，请用简洁、准确的中文回答。")),
             temperature=float(ai_raw.get("temperature", 0.2)),
             max_tokens=int(ai_raw.get("max_tokens", 2048)),
@@ -231,6 +319,7 @@ def load_config(path: str | Path = "config/config.json") -> AppConfig:
                 "job_queue.recovery_window_seconds",
             ),
         ),
+        runtime=runtime,
         muliu=MuliuConfig(
             enabled=bool(muliu_raw.get("enabled", True)),
             base_url=str(muliu_raw.get("base_url", "")).rstrip("/"),
@@ -282,3 +371,4 @@ def load_config(path: str | Path = "config/config.json") -> AppConfig:
             max_text_chars=int(conversation_log_raw.get("max_text_chars", 12000)),
         ),
     )
+    return config

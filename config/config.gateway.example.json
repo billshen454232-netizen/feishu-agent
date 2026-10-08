@@ -1,0 +1,59 @@
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8000
+  },
+  "runtime": {
+    "role": "gateway",
+    "worker_token": "填写一个与内网Worker一致的高强度随机Bearer令牌",
+    "lease_timeout_seconds": 180
+  },
+  "job_queue": {
+    "enabled": true,
+    "database_path": "data/feishu_bot.sqlite3",
+    "recovery_window_seconds": 600
+  },
+  "feishu": {
+    "app_id": "cli_xxx",
+    "app_secret": "填写飞书应用 App Secret",
+    "verification_token": "填写事件订阅 Verification Token",
+    "encrypt_key": "",
+    "base_url": "https://open.feishu.cn"
+  },
+  "ai": {
+    "provider": "openai_compatible",
+    "base_url": "https://api.example.com/v1",
+    "api_key": "填写模型 API Key",
+    "model": "填写模型名",
+    "system_prompt": "你是一个飞书里的 AI 助手，请用简洁、准确的中文回答。",
+    "temperature": 0.2,
+    "max_tokens": 2048,
+    "timeout_seconds": 60
+  },
+  "conversation": {
+    "max_history_messages": 12
+  },
+  "bot": {
+    "name": "AI助手"
+  },
+  "script_knowledge": {
+    "enabled": true,
+    "path": "knowledge",
+    "min_score": 2,
+    "max_results": 3,
+    "max_context_chars": 10000
+  },
+  "conversation_log": {
+    "enabled": true,
+    "directory": "logs/conversations",
+    "max_text_chars": 12000
+  },
+  "muliu": {
+    "enabled": true,
+    "script_root": "/home/serverGeneralScript",
+    "script_catalog_path": "config/muliu_script_catalog.md",
+    "max_steps": 10,
+    "confirmation_prefix": "确认执行",
+    "confirmation_timeout_seconds": 600
+  }
+}

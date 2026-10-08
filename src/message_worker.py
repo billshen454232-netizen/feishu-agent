@@ -271,6 +271,21 @@ class MessageJobProcessor:
         if pending_job is None:
             return False
         await self._start_claimed_confirmation(pending_job, message_id)
+        if self._config.runtime.role == "gateway":
+            queued_job = self._store.get(pending_job.message_id)
+            if queued_job is not None and queued_job.status == "queued_for_worker":
+                reply = (
+                    "计划已排入内网 Muliu Worker 队列，等待受控 Worker 领取并回传可信终态。"
+                    "请勿重复确认或重试。"
+                )
+                try:
+                    await self._feishu_client.reply_text(message_id, reply)
+                except Exception:  # noqa: BLE001 - queueing remains durable if acknowledgement fails
+                    logger.exception(
+                        "gateway queue acknowledgement failed message_id=%s",
+                        pending_job.message_id,
+                    )
+                self._append_conversation_log(queued_job, "operation_queued_for_worker", reply)
         return True
 
     async def process_card_action(
@@ -329,30 +344,16 @@ class MessageJobProcessor:
         return build_operation_status_card(
             "测试服操作已提交",
             pending_job.text,
-            "正在等待 Muliu Task 89 返回可信终态。请勿重复确认或重试。",
+            (
+                "计划已排入内网 Muliu Worker 队列，等待受控 Worker 领取并回传可信终态。请勿重复确认或重试。"
+                if self._config.runtime.role == "gateway"
+                else "正在等待 Muliu Task 89 返回可信终态。请勿重复确认或重试。"
+            ),
             template="blue",
         )
 
     async def _start_claimed_confirmation(self, pending_job: Any, reply_message_id: str) -> None:
         """Parse the stored plan and launch it after an atomic confirmation claim."""
-        if self._muliu_executor is None:
-            error = "Muliu 执行器尚未初始化"
-            result = MuliuExecutionResult(
-                summary=pending_job.text,
-                step_results=[],
-                failed_step_number=1,
-                failure_reason=error,
-            )
-            reply = format_rejection(error)
-            self._store.mark_failed(pending_job.message_id, error)
-            await self._deliver_execution_result(
-                pending_job,
-                reply_message_id,
-                reply,
-                status_card=build_execution_status_card(result),
-            )
-            return
-
         try:
             plan = parse_plan(pending_job.plan_json, max_steps=self._config.muliu.max_steps)
         except MuliuPlanError as exc:
@@ -365,10 +366,45 @@ class MessageJobProcessor:
             )
             self._store.mark_failed(pending_job.message_id, error)
             reply = format_rejection(error)
-            await self._deliver_execution_result(
+            await self.deliver_execution_result(
                 pending_job,
                 reply_message_id,
                 reply,
+                status_card=build_execution_status_card(result),
+            )
+            return
+
+        if self._config.runtime.role == "gateway":
+            if not self._store.queue_for_worker(pending_job.message_id):
+                error = "确认计划无法进入内网 Worker 队列"
+                result = MuliuExecutionResult(
+                    summary=plan.summary,
+                    step_results=[],
+                    failed_step_number=1,
+                    failure_reason=error,
+                )
+                self._store.mark_failed(pending_job.message_id, error)
+                await self.deliver_execution_result(
+                    pending_job,
+                    reply_message_id,
+                    format_rejection(error),
+                    status_card=build_execution_status_card(result),
+                )
+            return
+
+        if self._muliu_executor is None:
+            error = "Muliu 执行器尚未初始化"
+            result = MuliuExecutionResult(
+                summary=plan.summary,
+                step_results=[],
+                failed_step_number=1,
+                failure_reason=error,
+            )
+            self._store.mark_failed(pending_job.message_id, error)
+            await self.deliver_execution_result(
+                pending_job,
+                reply_message_id,
+                format_rejection(error),
                 status_card=build_execution_status_card(result),
             )
             return
@@ -394,7 +430,7 @@ class MessageJobProcessor:
                 )
             else:
                 self._store.mark_failed(pending_job.message_id, execution_result.failure_reason)
-            await self._deliver_execution_result(
+            await self.deliver_execution_result(
                 pending_job,
                 reply_message_id,
                 reply,
@@ -425,7 +461,7 @@ class MessageJobProcessor:
                 )
                 reply = format_rejection(error)
                 self._store.mark_submission_failed(pending_job.message_id, error)
-            await self._deliver_execution_result(
+            await self.deliver_execution_result(
                 pending_job,
                 reply_message_id,
                 reply,
@@ -441,7 +477,7 @@ class MessageJobProcessor:
             )
             self._store.mark_submission_failed(pending_job.message_id, error)
             reply = format_rejection(error)
-            await self._deliver_execution_result(
+            await self.deliver_execution_result(
                 pending_job,
                 reply_message_id,
                 reply,
@@ -456,14 +492,14 @@ class MessageJobProcessor:
             )
             self._store.mark_submitted_result_unknown(pending_job.message_id, error)
             reply = format_execution_result(result)
-            await self._deliver_execution_result(
+            await self.deliver_execution_result(
                 pending_job,
                 reply_message_id,
                 reply,
                 status_card=build_execution_status_card(result),
             )
 
-    async def _deliver_execution_result(
+    async def deliver_execution_result(
         self,
         pending_job: Any,
         reply_message_id: str,
@@ -471,7 +507,7 @@ class MessageJobProcessor:
         *,
         status_card: dict[str, object] | None = None,
     ) -> None:
-        """Persisted outcome first; card and text delivery never rewrite that outcome."""
+        """Deliver an already-persisted terminal outcome without changing it."""
         try:
             update_card = getattr(self._feishu_client, "update_card", None)
             if (

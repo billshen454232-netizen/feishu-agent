@@ -175,3 +175,72 @@ def test_job_queue_custom_values(tmp_path):
     assert config.job_queue.enabled is False
     assert config.job_queue.database_path == "tmp/jobs.sqlite3"
     assert config.job_queue.recovery_window_seconds == 120
+
+
+def test_gateway_requires_only_worker_token_beyond_normal_gateway_config(tmp_path):
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({
+        "runtime": {"role": "gateway", "worker_token": "shared-worker-token"},
+        "feishu": {"app_id": "app", "app_secret": "secret"},
+        "ai": {"provider": "openai_compatible", "base_url": "https://api.example.com/v1", "api_key": "key", "model": "m"},
+        "muliu": {"base_url": "", "username": "", "password": ""},
+    }), encoding="utf-8")
+
+    config = load_config(config_path)
+
+    assert config.runtime.role == "gateway"
+    assert config.runtime.worker_token == "shared-worker-token"
+    assert config.muliu.base_url == ""
+
+
+def test_worker_allows_empty_feishu_and_ai_but_requires_gateway_and_identity(tmp_path):
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({
+        "runtime": {
+            "role": "worker",
+            "worker_token": "shared-worker-token",
+            "worker_id": "jenkins-worker-1",
+            "gateway_base_url": "https://feishu.example.com",
+        },
+        "feishu": {},
+        "ai": {},
+        "muliu": {"base_url": "http://muliu.internal", "username": "user", "password": "secret"},
+    }), encoding="utf-8")
+
+    config = load_config(config_path)
+
+    assert config.runtime.role == "worker"
+    assert config.feishu.app_id == ""
+    assert config.ai.api_key == ""
+    assert config.runtime.gateway_base_url == "https://feishu.example.com"
+
+
+@pytest.mark.parametrize(
+    "runtime, pattern",
+    [
+        ({"role": "gateway"}, "worker_token"),
+        ({"role": "worker", "worker_token": "token"}, "worker_id"),
+        ({"role": "worker", "worker_token": "token", "worker_id": "id", "gateway_base_url": "http://gateway"}, "HTTPS"),
+        ({"role": "worker", "worker_token": "token", "worker_id": "id", "gateway_base_url": "https://gateway", "heartbeat_interval_seconds": 180, "lease_timeout_seconds": 180}, "必须小于"),
+    ],
+)
+def test_rejects_invalid_runtime_configuration(tmp_path, runtime, pattern):
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({
+        "runtime": runtime,
+        "feishu": {"app_id": "app", "app_secret": "secret"},
+        "ai": {"provider": "openai_compatible", "base_url": "https://api.example.com/v1", "api_key": "key", "model": "m"},
+    }), encoding="utf-8")
+
+    with pytest.raises(ConfigError, match=pattern):
+        load_config(config_path)
+
+
+def test_example_configurations_are_valid():
+    from pathlib import Path
+    root = Path(__file__).parents[1]
+    gateway_config = load_config(root / "config" / "config.gateway.example.json")
+    worker_config = load_config(root / "config" / "config.worker.example.json")
+
+    assert gateway_config.runtime.role == "gateway"
+    assert worker_config.runtime.role == "worker"
