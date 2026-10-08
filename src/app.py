@@ -6,7 +6,7 @@ import logging
 import re
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Optional
 
 from fastapi import FastAPI, Header, HTTPException, Response
 
@@ -184,9 +184,9 @@ def _add_gateway_worker_routes(
 
     @app.post("/internal/worker/jobs/claim", include_in_schema=False)
     async def claim_worker_job(
-        authorization: str | None = Header(default=None),
-        x_feishu_worker_id: str | None = Header(default=None),
-    ) -> Response | dict[str, str]:
+        authorization: Optional[str] = Header(default=None),
+        x_feishu_worker_id: Optional[str] = Header(default=None),
+    ) -> Any:
         worker_id = require_worker(authorization, x_feishu_worker_id)
         await _deliver_expired_worker_leases(
             job_store,
@@ -201,8 +201,8 @@ def _add_gateway_worker_routes(
     @app.post("/internal/worker/jobs/{message_id}/heartbeat", include_in_schema=False)
     async def heartbeat_worker_job(
         message_id: str,
-        authorization: str | None = Header(default=None),
-        x_feishu_worker_id: str | None = Header(default=None),
+        authorization: Optional[str] = Header(default=None),
+        x_feishu_worker_id: Optional[str] = Header(default=None),
     ) -> dict[str, str]:
         worker_id = require_worker(authorization, x_feishu_worker_id)
         if not job_store.renew_worker_lease(message_id, worker_id):
@@ -213,8 +213,8 @@ def _add_gateway_worker_routes(
     async def finish_worker_job(
         message_id: str,
         payload: dict[str, Any],
-        authorization: str | None = Header(default=None),
-        x_feishu_worker_id: str | None = Header(default=None),
+        authorization: Optional[str] = Header(default=None),
+        x_feishu_worker_id: Optional[str] = Header(default=None),
     ) -> dict[str, str]:
         worker_id = require_worker(authorization, x_feishu_worker_id)
         leased_job = job_store.get(message_id)
