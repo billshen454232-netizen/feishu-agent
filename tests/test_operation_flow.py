@@ -1116,3 +1116,45 @@ async def test_wrong_confirmation_token_does_not_execute(tmp_path):
     assert handled is False
     assert executor.plans == []
     assert feishu.replies == []
+
+
+@pytest.mark.asyncio
+async def test_batch_environment_version_query_passes_firewall_and_waits_for_confirmation(tmp_path):
+    config = make_config()
+    store = MessageJobStore(tmp_path / "jobs.sqlite3")
+    store.initialize()
+    store.create_if_new("om_batch", "evt_batch", "oc_group", "ou_user", "查看海外所有DEV环境服务器代码版本", chat_type="group")
+    batch_plan = MuliuPlan(
+        summary="批量查询海外所有DEV环境服务器代码版本",
+        steps=[
+            MuliuStep(
+                path="/home/serverGeneralScript/batch_server_query.py",
+                args=["--env", "overseas_dev"],
+                description="并发查询海外所有DEV环境（港澳台+韩服DEV）服务器代码版本",
+            )
+        ],
+        kind=MuliuPlanKind.OPERATION,
+    )
+    feishu = FakeFeishuClient()
+    executor = FakeExecutor()
+    processor = MessageJobProcessor(
+        config,
+        store,
+        ConversationStore(4),
+        ai_client=None,
+        feishu_client=feishu,
+        operation_planner=FakePlanner(batch_plan),
+        muliu_firewall=production_firewall(config),
+        muliu_executor=executor,
+    )
+
+    await processor.process_one("om_batch")
+
+    job = store.get("om_batch")
+    assert job is not None
+    assert job.status == "awaiting_confirmation"
+    assert executor.plans == []
+    assert len(feishu.cards) == 1
+    assert "batch_server_query.py" in str(feishu.cards[0][1])
+    assert "--env overseas_dev" in str(feishu.cards[0][1])
+

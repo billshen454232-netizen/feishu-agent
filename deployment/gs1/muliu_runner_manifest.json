@@ -274,6 +274,21 @@
         "python3.7"
       ],
       "risk": "write"
+    },
+    {
+      "name": "batch-environment-version-query",
+      "path": "/home/serverGeneralScript/batch_server_query.py",
+      "args": [
+        "--env",
+        "{env_key}"
+      ],
+      "variables": {
+        "env_key": "[a-zA-Z0-9_]{2,32}"
+      },
+      "runner": [
+        "python3.7"
+      ],
+      "risk": "read"
     }
   ]
 }

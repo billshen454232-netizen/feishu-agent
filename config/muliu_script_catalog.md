@@ -158,6 +158,46 @@
 }
 ```
 
+### 模式 I：批量查询指定环境服务器代码版本
+
+- **用途**：读取指定环境下所有服务器的当前代码版本（通过并发 SSH 读取各服 release_etc/version.txt）。
+- **匹配的自然语言**：`查看海外所有DEV环境服务器代码版本`、`查询海外所有DEV环境代码版本`、`查看港澳台DEV代码版本`、`查询韩服DEV代码版本`、`查看国服weekly代码版本`。
+- **精确脚本路径**：`/home/serverGeneralScript/batch_server_query.py`
+- **已登记参数数组模板**：`["--env", "<env_key>"]`
+- **参数顺序**：固定为 2 个参数，第 1 项为 `--env`，第 2 项为已登记的环境标识。
+- **支持的环境标识（`<env_key>`）**：
+  - `overseas_dev`：海外所有DEV环境（包含港澳台 5000/5001 和韩服 6000/6001）
+  - `overseas_weekly`：海外所有weekly环境（港澳台 5010~5013 + 韩服 6010/6011）
+  - `overseas_qa`：海外所有QA环境（港澳台 5020/5021 + 韩服 6020/6021）
+  - `hmt_dev`：港澳台繁体 DEV 环境（5000、5001）
+  - `hmt_weekly`：港澳台繁体 weekly 环境（5010~5013）
+  - `hmt_qa`：港澳台繁体 QA 环境（5020、5021）
+  - `kr_dev`：韩服 DEV 环境（6000、6001）
+  - `kr_weekly`：韩服 weekly 环境（6010、6011）
+  - `kr_qa`：韩服 QA 环境（6020、6021）
+  - `kr_review`：韩服提审服环境（6100、6101）
+  - `cn_weekly`：国服 weekly 演练服环境
+  - `cn_qa`：国服 QA 测试服环境
+  - `cn_noversion`：国服 noversion 开发服环境
+- **预期输出**：按目标服务器列表并发汇总版本、对齐表格与版本一致性统计。
+- **远端影响**：只并发读取版本文件，不修改任何远端数据。
+
+标准计划示例：
+
+```json
+{
+  "kind": "operation",
+  "summary": "批量查询海外所有DEV环境服务器代码版本",
+  "steps": [
+    {
+      "path": "/home/serverGeneralScript/batch_server_query.py",
+      "args": ["--env", "overseas_dev"],
+      "description": "并发查询海外所有DEV环境（港澳台+韩服DEV）服务器代码版本"
+    }
+  ]
+}
+```
+
 ## 未单独开放的脚本
 
 `clear_logic_game.py`、`clear_zone.py` 和 `cleardb.py` 目前不允许从飞书单独调用。它们是清服链路的内部数据库清理步骤；本地阅读副本无法确认与 GS-1 实际部署版本一致，因此只通过已登记的 `clear` 入口执行，直到确认实际路径、参数和用途。
@@ -409,6 +449,19 @@
       },
       "runner": "python3.7",
       "risk": "write"
+    },
+    {
+      "name": "batch-environment-version-query",
+      "path": "/home/serverGeneralScript/batch_server_query.py",
+      "args": [
+        "--env",
+        "{env_key}"
+      ],
+      "variables": {
+        "env_key": "[a-zA-Z0-9_]{2,32}"
+      },
+      "runner": "python3.7",
+      "risk": "read"
     }
   ]
 }
