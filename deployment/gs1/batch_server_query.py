@@ -4,10 +4,8 @@
 
 Queries multiple servers in parallel for version.txt, resolving server IPs
 from config.ini. Designed to be invoked by Muliu Task 89.
-Compatible with Python 3.7+.
+Compatible with Python 3.6+.
 """
-
-from __future__ import annotations
 
 import argparse
 import concurrent.futures
@@ -16,13 +14,12 @@ import os
 import re
 import subprocess
 import sys
-from typing import Any, Dict, List, Optional
 
 VERSION_FILE_PATH = "/data/app/game-server/release_etc/version.txt"
 DEFAULT_TIMEOUT_SECONDS = 6
 
 
-def load_environment_map(custom_config_path: Optional[str] = None) -> Dict[str, Dict[str, Any]]:
+def load_environment_map(custom_config_path=None):
     """从 server_environments.json 配置文件加载环境映射，不硬编码任何服号。"""
     candidates = []
     if custom_config_path:
@@ -47,9 +44,9 @@ def load_environment_map(custom_config_path: Optional[str] = None) -> Dict[str, 
     return {}
 
 
-def parse_config_ini(ini_path: str) -> Dict[str, str]:
+def parse_config_ini(ini_path):
     """从 config.ini 解析 server_id -> host 映射。"""
-    mapping: Dict[str, str] = {}
+    mapping = {}
     if not os.path.isfile(ini_path):
         return mapping
 
@@ -70,11 +67,7 @@ def parse_config_ini(ini_path: str) -> Dict[str, str]:
     return mapping
 
 
-def query_single_server_version(
-    server_id: str,
-    host: Optional[str],
-    timeout: int = DEFAULT_TIMEOUT_SECONDS,
-) -> Dict[str, Any]:
+def query_single_server_version(server_id, host, timeout=DEFAULT_TIMEOUT_SECONDS):
     """通过 SSH 读取单台目标服的 version.txt 文件。"""
     if not host:
         return {
@@ -100,8 +93,7 @@ def query_single_server_version(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             timeout=timeout + 2,
-            text=True,
-            encoding="utf-8",
+            universal_newlines=True,
             errors="replace",
         )
         if proc.returncode == 0:
@@ -139,15 +131,10 @@ def query_single_server_version(
         }
 
 
-def run_batch_query(
-    servers: List[str],
-    ini_path: str,
-    timeout: int = DEFAULT_TIMEOUT_SECONDS,
-    max_workers: int = 8,
-) -> List[Dict[str, Any]]:
+def run_batch_query(servers, ini_path, timeout=DEFAULT_TIMEOUT_SECONDS, max_workers=8):
     """线程池并发查询各目标服务器。"""
     server_host_map = parse_config_ini(ini_path)
-    results: List[Dict[str, Any]] = []
+    results = []
 
     worker_count = min(max_workers, max(1, len(servers)))
     with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
@@ -169,11 +156,7 @@ def run_batch_query(
     return results
 
 
-def format_text_report(
-    label: str,
-    servers: List[str],
-    results: List[Dict[str, Any]],
-) -> str:
+def format_text_report(label, servers, results):
     """输出适合在飞书卡片中展示的清晰对齐格式。"""
     lines = []
     lines.append("============================================================")
@@ -212,7 +195,7 @@ def format_text_report(
     return "\n".join(lines)
 
 
-def main() -> int:
+def main():
     parser = argparse.ArgumentParser(description="Batch server version query tool for GS-1")
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument(
