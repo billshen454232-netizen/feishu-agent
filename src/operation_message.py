@@ -250,22 +250,53 @@ def _display_script_path(path: str) -> str:
 
 
 def _result_label(step: MuliuStepResult) -> str:
-    if step.path in (BASIC_INFO_SCRIPT_PATH, BATCH_SERVER_QUERY_SCRIPT_PATH) and step.succeeded:
+    if step.path == BASIC_INFO_SCRIPT_PATH and step.succeeded:
         return "查询结果："
     if step.path == SERVER_LOG_QUERY_SCRIPT_PATH and step.succeeded:
         return "诊断结果："
-    return "最新日志："
+    if step.succeeded:
+        return "执行结果："
+    return "失败详情："
 
 
 def _format_step_log(step: MuliuStepResult) -> str:
-    log = step.log
-    if step.path == BASIC_INFO_SCRIPT_PATH and step.succeeded:
-        return _format_basic_info_result(log)
-    if step.path == SERVER_LOG_QUERY_SCRIPT_PATH and step.succeeded:
-        return _format_server_log_query_result(log)
-    if step.path == BATCH_SERVER_QUERY_SCRIPT_PATH and step.succeeded:
-        return _format_batch_server_query_result(log)
-    return _truncate_log(log)
+    return clean_muliu_execution_log(step.log)
+
+
+def clean_muliu_execution_log(log: str) -> str:
+    """Universally clean Muliu Task 89 wrapper noise for any script."""
+    lines = log.splitlines()
+
+    start_idx = 0
+    for idx, raw_line in enumerate(lines):
+        line = raw_line.strip()
+        if line.startswith("AI_OP_START"):
+            start_idx = idx + 1
+
+    end_idx = len(lines)
+    for idx in range(len(lines) - 1, -1, -1):
+        line = lines[idx].strip()
+        if line.startswith("AI_OP_END") or line == "END":
+            end_idx = idx
+        elif line:
+            break
+
+    business_lines = lines[start_idx:end_idx] if start_idx < end_idx else lines
+
+    visible_lines: list[str] = []
+    for raw_line in business_lines:
+        line = raw_line.strip()
+        if not line or _is_execution_wrapper_line(line) or _is_visual_separator(line):
+            continue
+        visible_lines.append(raw_line)
+
+    if not visible_lines:
+        for raw_line in lines:
+            line = raw_line.strip()
+            if "AI_OP_END status=failed" in line:
+                return _truncate_log(line)
+        return "（无额外输出日志）"
+    return _truncate_log("\n".join(visible_lines))
 
 
 def _format_batch_server_query_result(log: str) -> str:

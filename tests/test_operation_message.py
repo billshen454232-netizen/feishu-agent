@@ -245,7 +245,7 @@ def test_execution_result_marks_returned_dispatcher_failure_as_failed_step():
     assert "❌ 执行失败：核对日志诊断入口" in message
     assert "1/1 ❌ 查询 6000 服基础信息" in message
     assert "AI_OP_END status=failed" in message
-    assert "最新日志：" in message
+    assert "失败详情：" in message
 
 
 def test_successful_batch_query_hides_muliu_wrapper_metadata():
@@ -296,7 +296,7 @@ END"""
 
     message = format_execution_result(result)
 
-    assert "查询结果：" in message
+    assert "执行结果：" in message
     assert "【批量查询】海外所有DEV环境" in message
     assert "汇总状态：全部成功（4/4）" in message
     assert "5000     | ✅" in message
@@ -308,4 +308,68 @@ END"""
     assert "Running" not in message
     assert "10.202.28.150" not in message
     assert "[内部主机]" in message
+
+
+def test_successful_cc_patch_result_hides_muliu_wrapper_metadata():
+    raw_muliu_log = """MULIU_RUN_VERSION: 83680c2e-830b-4185-afc5-102446956442
+WORKSPACE_PATH: ../muliu_ws/workspace
+CODE_PATH: ../muliu_ws/workspace/code
+RUN_SCRIPT: ok_/muliu_ai_ops.sh
+TASK_WORKSPACE_PATH: ../muliu_ws/workspace/taskDir/task_89
+ARGS_FILE_PATH: args/s_11_0_0_261009_190723_47
+OUT_PUT_LOG_FILE: log/step_11_param_0/run_0_261009_190724_46.log
+TASK_TO_CODE_PATH: ../../code
+TASK_ID: 89
+PYTHON_CODE_ROOT: /data/app/muliu_ws/workspace/code
+/data/app/muliu_ws/workspace/taskDir/task_89
+START
+bash ../../code/ok_/muliu_ai_ops.sh
+Running
+AI_OP_START task_id=89 path=/home/serverGeneralScript/cc_patch.py
+命令执行成功:
+命令执行成功: {
+  "version": "hk_noversion_260928",
+  "dev_start": 0,
+  "publish_start": 1,
+  "list": {
+    "0": {
+      "patch_type": "client_avatar",
+      "order": 0,
+      "file": "client_avatar_patch_0.lua"
+    }
+  }
+}
+类型 client_avatar 所有文件均存在
+AI_OP_END status=success
+END"""
+    result = MuliuExecutionResult(
+        summary="查询 5001 服当前 Patch 列表",
+        step_results=[
+            MuliuStepResult(
+                step_number=1,
+                description="查询 5001 服当前 Patch 列表并检查缺失文件",
+                path="/home/serverGeneralScript/cc_patch.py",
+                args=["-s", "5001", "-ck"],
+                succeeded=True,
+                log=raw_muliu_log,
+            )
+        ],
+    )
+
+    message = format_execution_result(result)
+
+    assert "执行结果：" in message
+    assert '"version": "hk_noversion_260928"' in message
+    assert "类型 client_avatar 所有文件均存在" in message
+    assert "MULIU_RUN_VERSION" not in message
+    assert "WORKSPACE_PATH" not in message
+    assert "CODE_PATH" not in message
+    assert "TASK_ID" not in message
+    assert "AI_OP_START" not in message
+    assert "AI_OP_END" not in message
+    assert "bash ../../code/" not in message
+    assert "Running" not in message
+    assert "START" not in message
+    assert "END" not in message
+
 
