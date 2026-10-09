@@ -173,9 +173,9 @@ def main():
     parser = argparse.ArgumentParser(description="Batch server version query tool for GS-1")
     parser.add_argument(
         "--servers",
-        type=str,
+        nargs="+",
         required=True,
-        help="目标服务器编号列表，支持逗号分隔，例如: --servers 5000,5001,6000,6001",
+        help="目标服务器编号列表，支持逗号或空格分隔，例如: --servers 5000,5001,6000,6001",
     )
     parser.add_argument(
         "--label",
@@ -204,9 +204,14 @@ def main():
 
     args = parser.parse_args()
 
-    # 支持逗号、空格分隔的服号解析
-    raw_servers = re.split(r"[,;\s]+", args.servers.strip())
-    servers = [s for s in raw_servers if s]
+    # 无论是逗号连接还是空格隔开，均彻底拆分为独立服号列表并去重
+    servers = []
+    input_items = args.servers if isinstance(args.servers, list) else [args.servers]
+    for item in input_items:
+        for s in re.split(r"[,;\s]+", str(item).strip()):
+            s = s.strip()
+            if s and s not in servers:
+                servers.append(s)
 
     if not servers:
         print("AI_OP_ERROR: 目标服务器列表为空")
@@ -228,10 +233,12 @@ def main():
     success_count = sum(1 for r in results if r["success"])
     if success_count > 0:
         print("AI_OP_END status=success")
+        ret = 0
     else:
         print("AI_OP_END status=failed error=所有服务器查询均失败")
+        ret = 1
     print("END")
-    return 0
+    return ret
 
 
 if __name__ == "__main__":
