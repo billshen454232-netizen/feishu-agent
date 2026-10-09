@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from .muliu_executor import MuliuExecutionResult, MuliuStepResult
 from .muliu_plan import MuliuPlan
 
@@ -11,6 +13,9 @@ SCRIPT_ROOT = "/home/serverGeneralScript"
 BASIC_INFO_SCRIPT_PATH = "{}/basic_info.sh".format(SCRIPT_ROOT)
 SERVER_LOG_QUERY_SCRIPT_PATH = "{}/server_log_query.py".format(SCRIPT_ROOT)
 BATCH_SERVER_QUERY_SCRIPT_PATH = "{}/batch_server_query.py".format(SCRIPT_ROOT)
+_INTERNAL_IP_PATTERN = re.compile(
+    r"\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3})\b"
+)
 _EXECUTION_WRAPPER_PREFIXES = (
     "MULIU_RUN_VERSION:",
     "WORKSPACE_PATH:",
@@ -225,11 +230,16 @@ def format_execution_result(result: MuliuExecutionResult) -> str:
     if not result.step_results and not result.succeeded and not result.result_unknown:
         lines.append("Muliu 尚未开始执行任何步骤。")
 
-    return "\n".join(lines).rstrip()
+    return _mask_internal_ips("\n".join(lines).rstrip())
 
 
 def format_rejection(reason: str) -> str:
-    return "❌ 未执行\n原因：{}".format(reason)
+    return _mask_internal_ips("❌ 未执行\n原因：{}".format(reason))
+
+
+def _mask_internal_ips(text: str) -> str:
+    """Mask private IPv4 addresses (10.x, 172.16-31.x, 192.168.x) from Feishu replies."""
+    return _INTERNAL_IP_PATTERN.sub("[内部主机]", text)
 
 
 def _display_script_path(path: str) -> str:

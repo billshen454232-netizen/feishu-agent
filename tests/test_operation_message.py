@@ -306,4 +306,6 @@ END"""
     assert "AI_OP_END" not in message
     assert "bash ../../code/" not in message
     assert "Running" not in message
+    assert "10.202.28.150" not in message
+    assert "[内部主机]" in message
 

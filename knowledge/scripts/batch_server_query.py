@@ -157,13 +157,13 @@ def format_text_report(label, servers, results):
 
     lines.append("汇总状态：{}".format(summary_status))
     lines.append("------------------------------------------------------------")
-    lines.append("{:<8} | {:<4} | {:<16} | 版本信息 / 错误详情".format("服号", "状态", "IP主机"))
-    lines.append("-" * 60)
+    lines.append("{:<8} | {:<4} | 版本信息 / 错误详情".format("服号", "状态"))
+    lines.append("-" * 50)
 
     for r in results:
         status_icon = "✅" if r["success"] else "❌"
         detail = r["version"] if r["success"] else "失败: {}".format(r["error"])
-        lines.append("{:<8} | {:<4} | {:<16} | {}".format(r["server_id"], status_icon, r["host"], detail))
+        lines.append("{:<8} | {:<4} | {}".format(r["server_id"], status_icon, detail))
 
     lines.append("============================================================")
     return "\n".join(lines)
