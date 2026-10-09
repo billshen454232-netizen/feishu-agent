@@ -1159,3 +1159,46 @@ async def test_batch_environment_version_query_passes_firewall_and_waits_for_con
     assert "--servers 5000,5001,6000,6001,7001,7002" in str(feishu.cards[0][1])
     assert "海外所有DEV环境" in str(feishu.cards[0][1])
 
+
+@pytest.mark.asyncio
+async def test_scenario_lookup_plan_passes_firewall_and_waits_for_confirmation(tmp_path):
+    config = make_config()
+    store = MessageJobStore(tmp_path / "jobs.sqlite3")
+    store.initialize()
+    store.create_if_new("om_ssinfo", "evt_ssinfo", "oc_group", "ou_user", "查看目前所有服务器哪个是2001剧本", chat_type="group")
+    ssinfo_plan = MuliuPlan(
+        summary="查询 2001 剧本的所有服务器",
+        steps=[
+            MuliuStep(
+                path="/home/serverGeneralScript/basic_info.sh",
+                args=["ssinfo", "2001"],
+                description="查询归属 2001 剧本的所有服务器信息",
+            )
+        ],
+        kind=MuliuPlanKind.OPERATION,
+    )
+    feishu = FakeFeishuClient()
+    executor = FakeExecutor()
+    processor = MessageJobProcessor(
+        config,
+        store,
+        ConversationStore(4),
+        ai_client=None,
+        feishu_client=feishu,
+        operation_planner=FakePlanner(ssinfo_plan),
+        muliu_firewall=production_firewall(config),
+        muliu_executor=executor,
+    )
+
+    await processor.process_one("om_ssinfo")
+
+    job = store.get("om_ssinfo")
+    assert job is not None
+    assert job.status == "awaiting_confirmation"
+    assert executor.plans == []
+    assert len(feishu.cards) == 1
+    assert "basic_info.sh" in str(feishu.cards[0][1])
+    assert "ssinfo" in str(feishu.cards[0][1])
+    assert "2001" in str(feishu.cards[0][1])
+
+

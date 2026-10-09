@@ -166,6 +166,19 @@ def test_production_catalog_accepts_ordered_registered_steps():
         ("/home/serverGeneralScript/cc_patch.py", ["-s", "5000", "-r", "re"]),
         ("/home/serverGeneralScript/cc_patch.py", ["-s", "5000", "-ck", "-m"]),
         ("/home/serverGeneralScript/cc_patch.py", ["-s", "5000", "-u"]),
+        ("/home/serverGeneralScript/cc_patch.py", ["-s", "5000", "-d", "avatar_patch_60952.lua"]),
+        ("/home/serverGeneralScript/cc_patch.py", ["-s", "5000", "-f", "uf_hotfix"]),
+        ("/home/serverGeneralScript/basic_info.sh", ["5000", "ctime"]),
+        ("/home/serverGeneralScript/basic_info.sh", ["ssinfo", "2001"]),
+        ("/home/serverGeneralScript/basic_info.sh", ["ssnum", "player_account"]),
+        ("/home/serverGeneralScript/basic_info.sh", ["5000", "123456"]),
+        ("/home/serverGeneralScript/clear_logic_game.py", ["5000"]),
+        ("/home/serverGeneralScript/clear_zone.py", ["5000"]),
+        ("/home/serverGeneralScript/cleardb.py", ["5000"]),
+        (
+            "/home/serverGeneralScript/batch_server_query.py",
+            ["--servers", "5000,5001,6000,6001", "--label", "海外所有DEV环境"],
+        ),
     ],
 )
 def test_production_catalog_accepts_every_registered_operation_shape(path, args):
@@ -175,7 +188,7 @@ def test_production_catalog_accepts_every_registered_operation_shape(path, args)
     contracts.validate(make_plan(path, args))
 
 
-def test_production_catalog_does_not_expose_unverified_database_scripts():
+def test_production_catalog_exposes_database_scripts_as_registered_contracts():
     catalog_path = Path(__file__).parents[1] / "config" / "muliu_script_catalog.md"
     contracts = parse_call_contracts(catalog_path.read_text(encoding="utf-8"))
 
@@ -184,8 +197,7 @@ def test_production_catalog_does_not_expose_unverified_database_scripts():
         "/home/serverGeneralScript/clear_zone.py",
         "/home/serverGeneralScript/cleardb.py",
     ):
-        with pytest.raises(MuliuCallContractError, match="不符合任何已登记调用合同"):
-            contracts.validate(make_plan(path, ["5000"]))
+        assert contracts.validate(make_plan(path, ["5000"])) is None
 
 
 def test_runner_manifest_includes_exact_contracts_and_fixed_runners():

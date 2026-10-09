@@ -16,6 +16,67 @@
       "risk": "read"
     },
     {
+      "name": "basic-server-ctime",
+      "path": "/home/serverGeneralScript/basic_info.sh",
+      "args": [
+        "{server_id}",
+        "ctime"
+      ],
+      "variables": {
+        "server_id": "[0-9]{3,8}"
+      },
+      "runner": [
+        "bash"
+      ],
+      "risk": "read"
+    },
+    {
+      "name": "basic-scenario-servers-info",
+      "path": "/home/serverGeneralScript/basic_info.sh",
+      "args": [
+        "ssinfo",
+        "{scenario}"
+      ],
+      "variables": {
+        "scenario": "[0-9]{1,8}"
+      },
+      "runner": [
+        "bash"
+      ],
+      "risk": "read"
+    },
+    {
+      "name": "basic-account-season-history",
+      "path": "/home/serverGeneralScript/basic_info.sh",
+      "args": [
+        "ssnum",
+        "{account}"
+      ],
+      "variables": {
+        "account": "[A-Za-z0-9_.-]{1,64}"
+      },
+      "runner": [
+        "bash"
+      ],
+      "risk": "read"
+    },
+    {
+      "name": "basic-player-season-score",
+      "path": "/home/serverGeneralScript/basic_info.sh",
+      "args": [
+        "{server_id}",
+        "{user_id}"
+      ],
+      "variables": {
+        "server_id": "[0-9]{3,8}",
+        "user_id": "[0-9]{1,16}"
+      },
+      "runner": [
+        "bash"
+      ],
+      "risk": "read"
+    },
+    {
       "name": "shutdown-normal",
       "path": "/home/serverGeneralScript/shutdown",
       "args": [
@@ -292,6 +353,84 @@
         "python3.7"
       ],
       "risk": "read"
+    },
+    {
+      "name": "patch-delete-item",
+      "path": "/home/serverGeneralScript/cc_patch.py",
+      "args": [
+        "-s",
+        "{server_id}",
+        "-d",
+        "{patch_file}"
+      ],
+      "variables": {
+        "patch_file": "[A-Za-z0-9_.-]{1,64}",
+        "server_id": "[0-9]{3,8}"
+      },
+      "runner": [
+        "python3.7"
+      ],
+      "risk": "write"
+    },
+    {
+      "name": "patch-upload-item",
+      "path": "/home/serverGeneralScript/cc_patch.py",
+      "args": [
+        "-s",
+        "{server_id}",
+        "-f",
+        "{patch_name}"
+      ],
+      "variables": {
+        "patch_name": "[A-Za-z0-9_.-]{1,64}",
+        "server_id": "[0-9]{3,8}"
+      },
+      "runner": [
+        "python3.7"
+      ],
+      "risk": "write"
+    },
+    {
+      "name": "clear-logic-game",
+      "path": "/home/serverGeneralScript/clear_logic_game.py",
+      "args": [
+        "{server_id}"
+      ],
+      "variables": {
+        "server_id": "[0-9]{3,8}"
+      },
+      "runner": [
+        "python3.7"
+      ],
+      "risk": "write"
+    },
+    {
+      "name": "clear-zone",
+      "path": "/home/serverGeneralScript/clear_zone.py",
+      "args": [
+        "{server_id}"
+      ],
+      "variables": {
+        "server_id": "[0-9]{3,8}"
+      },
+      "runner": [
+        "python3.7"
+      ],
+      "risk": "write"
+    },
+    {
+      "name": "clear-db",
+      "path": "/home/serverGeneralScript/cleardb.py",
+      "args": [
+        "{server_id}"
+      ],
+      "variables": {
+        "server_id": "[0-9]{3,8}"
+      },
+      "runner": [
+        "python3.7"
+      ],
+      "risk": "write"
     }
   ]
 }

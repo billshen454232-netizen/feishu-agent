@@ -22,21 +22,23 @@
 
 ## 允许调用模式
 
-### 模式 A：查询单服基础信息
+### 模式 A：查询测试服基础信息与剧本数据（basic_info.sh）
 
-- **用途**：读取一个测试服的基础状态。
-- **匹配的自然语言**：`查询 6001 服基础信息`、`查看 6001 服务器当前状态`、`查看 6001 服开服信息`、`检查 6001 服版本和进程`、`查询 6000 服当前剧本`、`6000 服现在是什么剧本`、`查看 6000 服的剧本配置`。
+- **用途**：读取测试服基础状态、当前时间、按剧本反查所有服务器、查询玩家账号历史赛季与积分。
 - **精确脚本路径**：`/home/serverGeneralScript/basic_info.sh`
-- **精确参数数组模板**：`["<server_id>"]`
-- **参数顺序**：数组中只允许一个元素，即合法的 `<server_id>`；不能在前后添加任何参数。
-- **预期输出**：剧本配置、当前代码版本、开服时间、Skynet 进程状态、最近启动日志中的成功或常见失败提示。若用户问“当前剧本 / 现在是什么剧本 / 剧本配置”，仍使用本模式；返回的是目标服实时读取到的基础信息，不是静态资料问答。
-- **远端影响**：脚本通过已有 SSH / 远程读取能力查询配置、进程和日志；默认模式不修改服务器数据。
-- **明确不允许的调用**：
-  - `basic_info.sh <server_id> ctime`：查询服务器当前时间的源码辅助分支，未登记；
-  - `basic_info.sh ssinfo <scenario>`：剧本服务器信息 / 数据库查询分支，未登记；
-  - `basic_info.sh ssnum <account>`：账号赛季 / 数据库查询分支，未登记；
-  - `basic_info.sh <server_id> <user_id>`：玩家赛季分数查询分支，未登记；
-  - 任何非数字服务器标识、第二个参数或服务状态变更请求。
+- **已登记参数数组模板**：
+  - **A1. 单服基础信息**：`["<server_id>"]`
+    - 匹配：`查询 6001 服基础信息`、`查看 6001 服务器当前状态`、`查看 6001 服开服信息`、`检查 6001 服版本和进程`、`查询 6000 服当前剧本`、`6000 服现在是什么剧本`。
+  - **A2. 单服当前时间**：`["<server_id>", "ctime"]`
+    - 匹配：`查询 5000 服当前时间`、`查看 5000 服服务器时间`。
+  - **A3. 按剧本反查所有服务器**：`["ssinfo", "<scenario>"]`
+    - 匹配：`查看目前所有服务器哪个是2001剧本`、`查询 2001 剧本有哪些服务器`、`哪些服是 1002 剧本`、`2001剧本服务器有哪些`。
+  - **A4. 查询账号经历过的赛季**：`["ssnum", "<account>"]`
+    - 匹配：`查询账号 xxx 经历过的赛季`、`查看玩家账号 xxx 历史赛季`。
+  - **A5. 查询玩家赛季积分**：`["<server_id>", "<user_id>"]`
+    - 匹配：`查询 5000 服玩家 123456 的赛季积分`。
+- **预期输出**：目标服配置版本；或指定剧本匹配到的服务器列表；或账号赛季积分记录。
+- **远端影响**：均为只读查询，不修改任何远端数据。
 
 标准计划示例：
 
@@ -49,6 +51,20 @@
       "path": "/home/serverGeneralScript/basic_info.sh",
       "args": ["6001"],
       "description": "查询 6001 服基础信息、版本、开服时间和进程状态"
+    }
+  ]
+}
+```
+
+```json
+{
+  "kind": "operation",
+  "summary": "查询 2001 剧本的所有服务器",
+  "steps": [
+    {
+      "path": "/home/serverGeneralScript/basic_info.sh",
+      "args": ["ssinfo", "2001"],
+      "description": "查询归属 2001 剧本的所有服务器信息"
     }
   ]
 }
@@ -135,12 +151,10 @@
   - 对比两服：`["-s", "<server_id_a>", "<server_id_b>", "-ck"]`；
   - 备份或恢复：`["-s", "<server_id>", "-r", "bak"]` 或 `["-s", "<server_id>", "-r", "re"]`；
   - 检查并清理缺失条目：`["-s", "<server_id>", "-ck", "-m"]`；
-  - 热更：`["-s", "<server_id>", "-u"]`。
-- **远端影响**：查询与对比会读取远端列表；清理缺失条目、恢复备份和热更会修改远端状态，仍须群内确认。
-- **未登记调用**：
-  - `-d <patch_file>`：删除 Patch 并重新排序；
-  - `-f <patch_name>`：上传 Patch 文件或更新列表；
-  - `--server`、`--check` 等参数别名。
+  - 热更：`["-s", "<server_id>", "-u"]`；
+  - 删除指定Patch：`["-s", "<server_id>", "-d", "<patch_file>"]`；
+  - 上传/更新指定Patch：`["-s", "<server_id>", "-f", "<patch_name>"]`。
+- **远端影响**：查询与对比会读取远端列表；清理缺失条目、恢复备份、删除Patch和热更会修改远端状态，仍须群内确认。
 
 标准计划示例：
 
@@ -205,9 +219,29 @@
 }
 ```
 
-## 未单独开放的脚本
+### 模式 J：清理逻辑服数据库（clear_logic_game.py）
 
-`clear_logic_game.py`、`clear_zone.py` 和 `cleardb.py` 目前不允许从飞书单独调用。它们是清服链路的内部数据库清理步骤；本地阅读副本无法确认与 GS-1 实际部署版本一致，因此只通过已登记的 `clear` 入口执行，直到确认实际路径、参数和用途。
+- **用途**：单独清理指定测试服的 Game 游戏逻辑数据库（MongoDB）。
+- **匹配的自然语言**：`清理 5000 逻辑服数据库`、`单独清 5000 游戏服数据`。
+- **精确脚本路径**：`/home/serverGeneralScript/clear_logic_game.py`
+- **精确参数数组模板**：`["<server_id>"]`
+- **远端影响**：删除目标服游戏逻辑库集合，破坏性操作，必须群内确认。
+
+### 模式 K：清理战区数据库（clear_zone.py）
+
+- **用途**：单独清理指定测试服的 Zone 战区数据库（MongoDB）。
+- **匹配的自然语言**：`清理 5000 战区数据库`、`单独清 5000 zone数据`。
+- **精确脚本路径**：`/home/serverGeneralScript/clear_zone.py`
+- **精确参数数组模板**：`["<server_id>"]`
+- **远端影响**：删除目标服战区库集合，破坏性操作，必须群内确认。
+
+### 模式 L：底层数据库单项清理（cleardb.py）
+
+- **用途**：对指定测试服执行底层数据库单项重置与集合清理。
+- **匹配的自然语言**：`清理 5000 数据库`、`重置 5000 数据库集合`。
+- **精确脚本路径**：`/home/serverGeneralScript/cleardb.py`
+- **精确参数数组模板**：`["<server_id>"]`
+- **远端影响**：清理数据库，破坏性操作，必须群内确认。
 
 ## 维护要求
 
@@ -225,6 +259,59 @@
       ],
       "variables": {
         "server_id": "[0-9]{3,8}"
+      },
+      "runner": "bash",
+      "risk": "read"
+    },
+    {
+      "name": "basic-server-ctime",
+      "path": "/home/serverGeneralScript/basic_info.sh",
+      "args": [
+        "{server_id}",
+        "ctime"
+      ],
+      "variables": {
+        "server_id": "[0-9]{3,8}"
+      },
+      "runner": "bash",
+      "risk": "read"
+    },
+    {
+      "name": "basic-scenario-servers-info",
+      "path": "/home/serverGeneralScript/basic_info.sh",
+      "args": [
+        "ssinfo",
+        "{scenario}"
+      ],
+      "variables": {
+        "scenario": "[0-9]{1,8}"
+      },
+      "runner": "bash",
+      "risk": "read"
+    },
+    {
+      "name": "basic-account-season-history",
+      "path": "/home/serverGeneralScript/basic_info.sh",
+      "args": [
+        "ssnum",
+        "{account}"
+      ],
+      "variables": {
+        "account": "[A-Za-z0-9_.-]{1,64}"
+      },
+      "runner": "bash",
+      "risk": "read"
+    },
+    {
+      "name": "basic-player-season-score",
+      "path": "/home/serverGeneralScript/basic_info.sh",
+      "args": [
+        "{server_id}",
+        "{user_id}"
+      ],
+      "variables": {
+        "server_id": "[0-9]{3,8}",
+        "user_id": "[0-9]{1,16}"
       },
       "runner": "bash",
       "risk": "read"
@@ -472,6 +559,74 @@
       },
       "runner": "python3.7",
       "risk": "read"
+    },
+    {
+      "name": "patch-delete-item",
+      "path": "/home/serverGeneralScript/cc_patch.py",
+      "args": [
+        "-s",
+        "{server_id}",
+        "-d",
+        "{patch_file}"
+      ],
+      "variables": {
+        "server_id": "[0-9]{3,8}",
+        "patch_file": "[A-Za-z0-9_.-]{1,64}"
+      },
+      "runner": "python3.7",
+      "risk": "write"
+    },
+    {
+      "name": "patch-upload-item",
+      "path": "/home/serverGeneralScript/cc_patch.py",
+      "args": [
+        "-s",
+        "{server_id}",
+        "-f",
+        "{patch_name}"
+      ],
+      "variables": {
+        "server_id": "[0-9]{3,8}",
+        "patch_name": "[A-Za-z0-9_.-]{1,64}"
+      },
+      "runner": "python3.7",
+      "risk": "write"
+    },
+    {
+      "name": "clear-logic-game",
+      "path": "/home/serverGeneralScript/clear_logic_game.py",
+      "args": [
+        "{server_id}"
+      ],
+      "variables": {
+        "server_id": "[0-9]{3,8}"
+      },
+      "runner": "python3.7",
+      "risk": "write"
+    },
+    {
+      "name": "clear-zone",
+      "path": "/home/serverGeneralScript/clear_zone.py",
+      "args": [
+        "{server_id}"
+      ],
+      "variables": {
+        "server_id": "[0-9]{3,8}"
+      },
+      "runner": "python3.7",
+      "risk": "write"
+    },
+    {
+      "name": "clear-db",
+      "path": "/home/serverGeneralScript/cleardb.py",
+      "args": [
+        "{server_id}"
+      ],
+      "variables": {
+        "server_id": "[0-9]{3,8}"
+      },
+      "runner": "python3.7",
+      "risk": "write"
     }
   ]
 }
