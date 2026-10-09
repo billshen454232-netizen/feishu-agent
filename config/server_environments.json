@@ -91,6 +91,26 @@
           "6101"
         ]
       }
+    },
+    "vn": {
+      "name": "越南服",
+      "alias": [
+        "越南",
+        "VN"
+      ],
+      "environments": {
+        "dev": [
+          "7001",
+          "7002"
+        ],
+        "weekly": [
+          "7010",
+          "7011"
+        ],
+        "qa": [
+          "7020"
+        ]
+      }
     }
   },
   "alias_groups": {
@@ -100,9 +120,11 @@
         "5000",
         "5001",
         "6000",
-        "6001"
+        "6001",
+        "7001",
+        "7002"
       ],
-      "description": "港澳台DEV (5000, 5001) + 韩服DEV (6000, 6001)"
+      "description": "港澳台DEV (5000, 5001) + 韩服DEV (6000, 6001) + 越南DEV (7001, 7002)"
     },
     "overseas_weekly": {
       "name": "海外所有weekly环境",
@@ -112,9 +134,11 @@
         "5012",
         "5013",
         "6010",
-        "6011"
+        "6011",
+        "7010",
+        "7011"
       ],
-      "description": "港澳台weekly (5010~5013) + 韩服weekly (6010, 6011)"
+      "description": "港澳台weekly (5010~5013) + 韩服weekly (6010, 6011) + 越南weekly (7010, 7011)"
     },
     "overseas_qa": {
       "name": "海外所有QA环境",
@@ -122,9 +146,33 @@
         "5020",
         "5021",
         "6020",
-        "6021"
+        "6021",
+        "7020"
       ],
-      "description": "港澳台QA (5020, 5021) + 韩服QA (6020, 6021)"
+      "description": "港澳台QA (5020, 5021) + 韩服QA (6020, 6021) + 越南QA (7020)"
+    },
+    "vn_dev": {
+      "name": "越南DEV环境",
+      "servers": [
+        "7001",
+        "7002"
+      ],
+      "description": "越南测试服 (7001, 7002)"
+    },
+    "vn_weekly": {
+      "name": "越南weekly环境",
+      "servers": [
+        "7010",
+        "7011"
+      ],
+      "description": "越南 weekly (7010, 7011)"
+    },
+    "vn_qa": {
+      "name": "越南QA环境",
+      "servers": [
+        "7020"
+      ],
+      "description": "越南 QA (7020)"
     },
     "hmt_dev": {
       "name": "港澳台DEV环境",
@@ -469,6 +517,31 @@
       "region": "kr",
       "env": "review",
       "remark": "提审-6101"
+    },
+    "7001": {
+      "region": "vn",
+      "env": "dev",
+      "remark": "DEV-7001 测试服"
+    },
+    "7002": {
+      "region": "vn",
+      "env": "dev",
+      "remark": "DEV-7002 测试服"
+    },
+    "7010": {
+      "region": "vn",
+      "env": "weekly",
+      "remark": "weekly-7010"
+    },
+    "7011": {
+      "region": "vn",
+      "env": "weekly",
+      "remark": "weekly-7011"
+    },
+    "7020": {
+      "region": "vn",
+      "env": "qa",
+      "remark": "QA-7020"
     }
   }
 }
