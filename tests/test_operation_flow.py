@@ -1129,8 +1129,8 @@ async def test_batch_environment_version_query_passes_firewall_and_waits_for_con
         steps=[
             MuliuStep(
                 path="/home/serverGeneralScript/batch_server_query.py",
-                args=["--env", "overseas_dev"],
-                description="并发查询海外所有DEV环境（港澳台+韩服DEV）服务器代码版本",
+                args=["--servers", "5000,5001,6000,6001", "--label", "海外所有DEV环境"],
+                description="并发查询 5000,5001,6000,6001 服务器代码版本",
             )
         ],
         kind=MuliuPlanKind.OPERATION,
@@ -1156,5 +1156,6 @@ async def test_batch_environment_version_query_passes_firewall_and_waits_for_con
     assert executor.plans == []
     assert len(feishu.cards) == 1
     assert "batch_server_query.py" in str(feishu.cards[0][1])
-    assert "--env overseas_dev" in str(feishu.cards[0][1])
+    assert "--servers 5000,5001,6000,6001" in str(feishu.cards[0][1])
+    assert "海外所有DEV环境" in str(feishu.cards[0][1])
 

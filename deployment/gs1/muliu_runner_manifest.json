@@ -276,14 +276,17 @@
       "risk": "write"
     },
     {
-      "name": "batch-environment-version-query",
+      "name": "batch-servers-version-query",
       "path": "/home/serverGeneralScript/batch_server_query.py",
       "args": [
-        "--env",
-        "{env_key}"
+        "--servers",
+        "{server_ids}",
+        "--label",
+        "{label}"
       ],
       "variables": {
-        "env_key": "[a-zA-Z0-9_]{2,32}"
+        "label": "[^\"'\\n\\r]{1,64}",
+        "server_ids": "[0-9]{3,8}(,[0-9]{3,8})*"
       },
       "runner": [
         "python3.7"
