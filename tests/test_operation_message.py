@@ -246,3 +246,64 @@ def test_execution_result_marks_returned_dispatcher_failure_as_failed_step():
     assert "1/1 ❌ 查询 6000 服基础信息" in message
     assert "AI_OP_END status=failed" in message
     assert "最新日志：" in message
+
+
+def test_successful_batch_query_hides_muliu_wrapper_metadata():
+    raw_muliu_log = """MULIU_RUN_VERSION: 3d62564e-90cc-47e9-8ac1-8aededab74b7
+WORKSPACE_PATH: ../muliu_ws/workspace
+CODE_PATH: ../muliu_ws/workspace/code
+RUN_SCRIPT: ok_/muliu_ai_ops.sh
+TASK_WORKSPACE_PATH: ../muliu_ws/workspace/taskDir/task_89
+ARGS_FILE_PATH: args/s_11_0_0_261009_152047_40
+OUT_PUT_LOG_FILE: log/step_11_param_0/run_0_261009_152047_39.log
+TASK_TO_CODE_PATH: ../../code
+TASK_ID: 89
+PYTHON_CODE_ROOT: /data/app/muliu_ws/workspace/code
+/data/app/muliu_ws/workspace/taskDir/task_89
+START
+bash ../../code/ok_/muliu_ai_ops.sh
+Running
+AI_OP_START task_id=89 path=/home/serverGeneralScript/batch_server_query.py
+AI_OP_START
+============================================================
+【批量查询】海外所有DEV环境
+目标服务器：5000、5001、6000、6001（共 4 台）
+------------------------------------------------------------
+汇总状态：全部成功（4/4）｜ 代码版本完全一致：hk_noversion_260928
+------------------------------------------------------------
+服号     | 状态 | IP主机           | 版本信息 / 错误详情
+------------------------------------------------------------
+5000     | ✅   | 10.202.28.150    | hk_noversion_260928
+5001     | ✅   | 10.202.28.144    | hk_noversion_260928
+============================================================
+AI_OP_END status=success
+END
+AI_OP_END status=success
+END"""
+    result = MuliuExecutionResult(
+        summary="批量查询海外所有DEV环境服务器代码版本",
+        step_results=[
+            MuliuStepResult(
+                step_number=1,
+                description="并发查询 5000、5001、6000、6001 服务器代码版本",
+                path="/home/serverGeneralScript/batch_server_query.py",
+                args=["--servers", "5000,5001,6000,6001", "--label", "海外所有DEV环境"],
+                succeeded=True,
+                log=raw_muliu_log,
+            )
+        ],
+    )
+
+    message = format_execution_result(result)
+
+    assert "查询结果：" in message
+    assert "【批量查询】海外所有DEV环境" in message
+    assert "汇总状态：全部成功（4/4）" in message
+    assert "5000     | ✅" in message
+    assert "MULIU_RUN_VERSION" not in message
+    assert "WORKSPACE_PATH" not in message
+    assert "AI_OP_START" not in message
+    assert "AI_OP_END" not in message
+    assert "bash ../../code/" not in message
+    assert "Running" not in message
+

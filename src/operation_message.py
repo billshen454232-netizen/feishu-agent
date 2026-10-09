@@ -10,6 +10,7 @@ MAX_LOG_CHARS = 3500
 SCRIPT_ROOT = "/home/serverGeneralScript"
 BASIC_INFO_SCRIPT_PATH = "{}/basic_info.sh".format(SCRIPT_ROOT)
 SERVER_LOG_QUERY_SCRIPT_PATH = "{}/server_log_query.py".format(SCRIPT_ROOT)
+BATCH_SERVER_QUERY_SCRIPT_PATH = "{}/batch_server_query.py".format(SCRIPT_ROOT)
 _EXECUTION_WRAPPER_PREFIXES = (
     "MULIU_RUN_VERSION:",
     "WORKSPACE_PATH:",
@@ -20,6 +21,8 @@ _EXECUTION_WRAPPER_PREFIXES = (
     "OUT_PUT_LOG_FILE:",
     "TASK_TO_CODE_PATH:",
     "TASK_ID:",
+    "PYTHON_CODE_ROOT:",
+    "/data/app/muliu_ws",
     "AI_OP_START",
     "AI_OP_END",
 )
@@ -237,7 +240,7 @@ def _display_script_path(path: str) -> str:
 
 
 def _result_label(step: MuliuStepResult) -> str:
-    if step.path == BASIC_INFO_SCRIPT_PATH and step.succeeded:
+    if step.path in (BASIC_INFO_SCRIPT_PATH, BATCH_SERVER_QUERY_SCRIPT_PATH) and step.succeeded:
         return "查询结果："
     if step.path == SERVER_LOG_QUERY_SCRIPT_PATH and step.succeeded:
         return "诊断结果："
@@ -250,7 +253,22 @@ def _format_step_log(step: MuliuStepResult) -> str:
         return _format_basic_info_result(log)
     if step.path == SERVER_LOG_QUERY_SCRIPT_PATH and step.succeeded:
         return _format_server_log_query_result(log)
+    if step.path == BATCH_SERVER_QUERY_SCRIPT_PATH and step.succeeded:
+        return _format_batch_server_query_result(log)
     return _truncate_log(log)
+
+
+def _format_batch_server_query_result(log: str) -> str:
+    visible_lines: list[str] = []
+    for raw_line in log.splitlines():
+        line = raw_line.strip()
+        if not line or _is_execution_wrapper_line(line):
+            continue
+        visible_lines.append(raw_line)
+
+    if not visible_lines:
+        return "未从 Muliu 返回日志中提取到可展示的批量查询结果。"
+    return _truncate_log("\n".join(visible_lines))
 
 
 def _format_basic_info_result(log: str) -> str:
