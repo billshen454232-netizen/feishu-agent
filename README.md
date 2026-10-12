@@ -165,6 +165,23 @@ logs/conversations/YYYY-MM-DD.md
 }
 ```
 
+### 执行结果 AI 研读（Gateway / local）
+
+成功的 Patch 查询、批量版本查询、日志诊断，以及包含“是否存在 / 是否包含 / 对比 / 分析 / 什么版本”等目标核实意图的请求，会在可信终态落库后由现有 AI 服务生成简短结论。失败、结果未知、无有效输出、AI 超时或 AI 异常时，机器人自动回退为原有执行明细，不影响任务终态。
+
+发送给 AI 前会先移除 Task 89 调度包装，并脱敏私网 IP、常见密钥/令牌/Cookie/密码字段、数据库连接串、敏感配置行及运行目录。环境参考只读取 `server_environments.json` 中的区域、环境和服号，不读取连接地址或凭据。
+
+```json
+"execution_interpretation": {
+  "enabled": true,
+  "timeout_seconds": 8,
+  "server_environments_path": "config/server_environments.json",
+  "max_execution_data_chars": 12000
+}
+```
+
+将 `enabled` 设为 `false` 可关闭此后处理层；`timeout_seconds` 必须大于 0。
+
 ## 启动
 
 ```bash

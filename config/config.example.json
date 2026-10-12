@@ -52,6 +52,12 @@
     "directory": "logs/conversations",
     "max_text_chars": 12000
   },
+  "execution_interpretation": {
+    "enabled": true,
+    "timeout_seconds": 8,
+    "server_environments_path": "config/server_environments.json",
+    "max_execution_data_chars": 12000
+  },
   "runtime": {
     "role": "local",
     "worker_token": "若部署为 gateway 或 worker，请填写两端一致的随机强密码令牌",

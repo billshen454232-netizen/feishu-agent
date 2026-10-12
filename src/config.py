@@ -144,6 +144,16 @@ class ConversationLogConfig:
 
 
 @dataclass(frozen=True)
+class ExecutionInterpretationConfig:
+    """Gateway-side AI interpretation settings for successful operation results."""
+
+    enabled: bool = True
+    timeout_seconds: float = 8.0
+    server_environments_path: str = "config/server_environments.json"
+    max_execution_data_chars: int = 12000
+
+
+@dataclass(frozen=True)
 class AppConfig:
     server: ServerConfig
     feishu: FeishuConfig
@@ -156,6 +166,7 @@ class AppConfig:
     muliu: MuliuConfig = field(default_factory=MuliuConfig)
     script_knowledge: ScriptKnowledgeConfig = field(default_factory=ScriptKnowledgeConfig)
     conversation_log: ConversationLogConfig = field(default_factory=ConversationLogConfig)
+    execution_interpretation: ExecutionInterpretationConfig = field(default_factory=ExecutionInterpretationConfig)
 
 
 def _require_str(data: dict[str, Any], key: str, section: str) -> str:
@@ -228,6 +239,7 @@ def load_config(path: str | Path = "config/config.json") -> AppConfig:
     runtime_raw = raw.get("runtime", {})
     script_knowledge_raw = raw.get("script_knowledge", {})
     conversation_log_raw = raw.get("conversation_log", {})
+    execution_interpretation_raw = raw.get("execution_interpretation", {})
 
     if not isinstance(server_raw, dict) or not isinstance(feishu_raw, dict) or not isinstance(ai_raw, dict):
         raise ConfigError("server, feishu, and ai sections must be JSON objects")
@@ -240,6 +252,8 @@ def load_config(path: str | Path = "config/config.json") -> AppConfig:
         raise ConfigError("script_knowledge section must be a JSON object")
     if not isinstance(conversation_log_raw, dict):
         raise ConfigError("conversation_log section must be a JSON object")
+    if not isinstance(execution_interpretation_raw, dict):
+        raise ConfigError("execution_interpretation section must be a JSON object")
 
     provider = (
         str(ai_raw.get("provider", "openai_compatible"))
@@ -369,6 +383,20 @@ def load_config(path: str | Path = "config/config.json") -> AppConfig:
             enabled=bool(conversation_log_raw.get("enabled", True)),
             directory=str(conversation_log_raw.get("directory", "logs/conversations")),
             max_text_chars=int(conversation_log_raw.get("max_text_chars", 12000)),
+        ),
+        execution_interpretation=ExecutionInterpretationConfig(
+            enabled=bool(execution_interpretation_raw.get("enabled", True)),
+            timeout_seconds=_require_positive_number(
+                float(execution_interpretation_raw.get("timeout_seconds", 8)),
+                "execution_interpretation.timeout_seconds",
+            ),
+            server_environments_path=str(
+                execution_interpretation_raw.get("server_environments_path", "config/server_environments.json")
+            ),
+            max_execution_data_chars=_require_positive_integer(
+                int(execution_interpretation_raw.get("max_execution_data_chars", 12000)),
+                "execution_interpretation.max_execution_data_chars",
+            ),
         ),
     )
     return config

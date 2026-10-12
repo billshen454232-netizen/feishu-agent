@@ -144,7 +144,7 @@
 ### 模式 H：管理 Patch 列表和热更
 
 - **用途**：查询或管理明确指定测试服的 `patch_order_list.json`，以及执行 Patch 热更。
-- **匹配的自然语言**：`查询 6001 服务器的 Patch 列表`、`对比 6001 和 6002 的 Patch`、`备份 6001 服 Patch 列表`、`恢复 6001 服 Patch 列表`、`清理 6001 服缺失 Patch 条目`、`热更 6001 服 Patch`。
+- **匹配的自然语言**：`查询 6001 服务器的 Patch 列表`、`检查 5010 是否存在 avatar_patch_79941 patch`、`核实 5010 服是否包含某个补丁`、`对比 6001 和 6002 的 Patch`、`备份 6001 服 Patch 列表`、`恢复 6001 服 Patch 列表`、`清理 6001 服缺失 Patch 条目`、`热更 6001 服 Patch`。
 - **精确脚本路径**：`/home/serverGeneralScript/cc_patch.py`
 - **已登记参数数组模板**：
   - 查询单服：`["-s", "<server_id>", "-ck"]`；

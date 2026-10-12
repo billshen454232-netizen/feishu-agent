@@ -7,6 +7,7 @@ import secrets
 import time
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from .config import AppConfig
@@ -21,8 +22,10 @@ from .operation_message import (
     build_execution_status_card,
     build_operation_status_card,
     build_plan_confirmation_card,
+    clean_muliu_execution_log,
     format_execution_result,
     format_rejection,
+    mask_sensitive_operation_data,
 )
 
 logger = logging.getLogger(__name__)
@@ -420,7 +423,7 @@ class MessageJobProcessor:
             if self._muliu_executor is None:
                 raise MuliuExecutionError("Muliu 执行器尚未初始化")
             execution_result = await self._muliu_executor.execute_plan(plan)
-            reply = format_execution_result(execution_result)
+            fallback_reply = format_execution_result(execution_result)
             if execution_result.succeeded:
                 self._store.mark_done(pending_job.message_id)
             elif execution_result.result_unknown:
@@ -430,6 +433,11 @@ class MessageJobProcessor:
                 )
             else:
                 self._store.mark_failed(pending_job.message_id, execution_result.failure_reason)
+            reply = await self.interpret_execution_result(
+                pending_job,
+                execution_result,
+                fallback_reply,
+            )
             await self.deliver_execution_result(
                 pending_job,
                 reply_message_id,
@@ -498,6 +506,68 @@ class MessageJobProcessor:
                 reply,
                 status_card=build_execution_status_card(result),
             )
+
+    async def interpret_execution_result(
+        self,
+        pending_job: Any,
+        result: MuliuExecutionResult,
+        fallback_reply: str,
+    ) -> str:
+        """Add a bounded AI reading of a trustworthy successful worker result.
+
+        The worker result has already been bound to the persisted plan before this
+        method is called. Interpretation is presentation-only: it never changes
+        terminal job state and every unavailable/unsafe AI outcome falls back to
+        the normal, auditable result text.
+        """
+        fallback_reply = mask_sensitive_operation_data(fallback_reply)
+        if (
+            not self._config.execution_interpretation.enabled
+            or not should_interpret_with_ai(pending_job.text, result)
+            or self._ai_client is None
+        ):
+            return fallback_reply
+
+        execution_data = _build_clean_execution_data(
+            result,
+            max_chars=self._config.execution_interpretation.max_execution_data_chars,
+        )
+        if not execution_data:
+            return fallback_reply
+
+        environment_context = _load_environment_context(
+            self._config.execution_interpretation.server_environments_path
+        )
+        prompt = _build_execution_interpretation_prompt(
+            user_text=pending_job.text,
+            environment_context=environment_context,
+            execution_data=execution_data,
+        )
+        try:
+            interpretation = await asyncio.wait_for(
+                self._ai_client.generate([], prompt),
+                timeout=self._config.execution_interpretation.timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("execution result interpretation timed out message_id=%s", pending_job.message_id)
+            return fallback_reply
+        except Exception:  # noqa: BLE001 - presentation must never hide a trusted result
+            logger.warning(
+                "execution result interpretation unavailable message_id=%s",
+                pending_job.message_id,
+                exc_info=True,
+            )
+            return fallback_reply
+
+        interpretation = mask_sensitive_operation_data(str(interpretation).strip())
+        if not interpretation:
+            return fallback_reply
+        return mask_sensitive_operation_data(
+            "🤖 AI 研读结论：\n{}\n\n---\n\n执行明细：\n{}".format(
+                interpretation,
+                fallback_reply,
+            )
+        )
 
     async def deliver_execution_result(
         self,
@@ -719,6 +789,121 @@ class MessageJobProcessor:
     @staticmethod
     def _elapsed_ms(started: float) -> int:
         return int((time.perf_counter() - started) * 1000)
+
+
+_INTERPRETATION_INTENT_KEYWORDS = (
+    "是否存在",
+    "有没有",
+    "是否有",
+    "是否包含",
+    "对比",
+    "分析",
+    "有哪些",
+    "哪个是",
+    "什么版本",
+)
+_INTERPRETATION_SCRIPT_NAMES = (
+    "batch_server_query.py",
+    "cc_patch.py",
+    "server_log_query.py",
+)
+
+
+def should_interpret_with_ai(job_text: str, result: MuliuExecutionResult) -> bool:
+    """Return whether a successful result benefits from a concise AI conclusion."""
+    if not result.succeeded or not result.step_results:
+        return False
+    if any(keyword in job_text for keyword in _INTERPRETATION_INTENT_KEYWORDS):
+        return True
+    return any(
+        step.path.rsplit("/", 1)[-1] in _INTERPRETATION_SCRIPT_NAMES
+        for step in result.step_results
+    )
+
+
+def _build_clean_execution_data(result: MuliuExecutionResult, *, max_chars: int) -> str:
+    """Prepare bounded, wrapper-free and sensitive-data-redacted execution facts."""
+    lines: list[str] = []
+    for index, step in enumerate(result.step_results, start=1):
+        log = mask_sensitive_operation_data(clean_muliu_execution_log(step.log))
+        if not log or log == "（无额外输出日志）":
+            continue
+        lines.extend([
+            "步骤 {}/{}：{}".format(
+                index,
+                len(result.step_results),
+                mask_sensitive_operation_data(step.description),
+            ),
+            "脚本：{}".format(step.path.rsplit("/", 1)[-1]),
+            "实际输出：",
+            log,
+            "",
+        ])
+    return "\n".join(lines).strip()[:max_chars]
+
+
+def _load_environment_context(path: str) -> str:
+    """Load only human-meaningful server ownership facts, never host connection data."""
+    try:
+        raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        logger.warning("execution interpretation environment context unavailable", exc_info=True)
+        return "（环境资产配置当前不可用；不要据此推断环境归属。）"
+
+    if not isinstance(raw, dict):
+        return "（环境资产配置格式无效；不要据此推断环境归属。）"
+    regions = raw.get("regions", {})
+    groups = raw.get("alias_groups", {})
+    if not isinstance(regions, dict) or not isinstance(groups, dict):
+        return "（环境资产配置格式无效；不要据此推断环境归属。）"
+
+    lines: list[str] = []
+    for region_key, region in regions.items():
+        if not isinstance(region_key, str) or not isinstance(region, dict):
+            continue
+        name = region.get("name")
+        environments = region.get("environments")
+        if not isinstance(name, str) or not isinstance(environments, dict):
+            continue
+        entries = []
+        for environment, server_ids in environments.items():
+            if isinstance(environment, str) and isinstance(server_ids, list):
+                safe_ids = [str(server_id) for server_id in server_ids if str(server_id).isdigit()]
+                if safe_ids:
+                    entries.append("{}：{}".format(environment, "、".join(safe_ids)))
+        if entries:
+            lines.append("{}（{}）：{}".format(name, region_key, "；".join(entries)))
+
+    for group in groups.values():
+        if not isinstance(group, dict):
+            continue
+        name = group.get("name")
+        server_ids = group.get("servers")
+        if isinstance(name, str) and isinstance(server_ids, list):
+            safe_ids = [str(server_id) for server_id in server_ids if str(server_id).isdigit()]
+            if safe_ids:
+                lines.append("{}：{}".format(name, "、".join(safe_ids)))
+    return mask_sensitive_operation_data("\n".join(lines) or "（未加载到环境资产。）")
+
+
+def _build_execution_interpretation_prompt(
+    *,
+    user_text: str,
+    environment_context: str,
+    execution_data: str,
+) -> str:
+    return (
+        "你是飞书测试服运维 AI 助手。用户发起的操作已执行完成；你只能依据下列脱敏后的真实结果生成结论。"
+        "\n\n【用户原始提问】\n{}"
+        "\n\n【环境资产参考】\n{}"
+        "\n\n【实际执行结果】\n{}"
+        "\n\n【输出约束】\n"
+        "1. 第一行直接回答用户问题的核心结论，例如【存在】、【不存在】、【版本完全一致】或【存在差异】。\n"
+        "2. 只陈述实际执行结果明确支持的事实；数据不足时明确说明无法确认，绝不猜测。\n"
+        "3. 用简洁的中文 Markdown 列出关键证据；不要复述整段原始日志。\n"
+        "4. 严禁输出私网 IP、主机地址、账号、凭据、Cookie、数据库连接、文件系统工作目录或执行命令。\n"
+        "5. 不要建议、触发或描述新的执行操作。"
+    ).format(mask_sensitive_operation_data(user_text), environment_context, execution_data)
 
 
 def _plan_to_json(plan: MuliuPlan) -> str:

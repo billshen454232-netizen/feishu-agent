@@ -5,6 +5,7 @@ from src.operation_message import (
     build_plan_confirmation_card,
     format_execution_result,
     format_plan_for_confirmation,
+    mask_sensitive_operation_data,
 )
 
 
@@ -308,6 +309,25 @@ END"""
     assert "Running" not in message
     assert "10.202.28.150" not in message
     assert "[内部主机]" in message
+
+
+def test_masks_sensitive_operation_data_before_external_output():
+    text = """password=super-secret
+Authorization: Bearer bearer-secret
+Cookie: session=secret-cookie
+mysql://root:db-secret@10.202.28.45:3306/game
+DATABASE_URL: postgresql://admin:pg-secret@192.168.1.10:5432/game
+loaded /data/app/muliu_ws/workspace/.env
+正常业务输出"""
+
+    masked = mask_sensitive_operation_data(text)
+
+    for secret in ("super-secret", "bearer-secret", "secret-cookie", "db-secret", "pg-secret", "10.202.28.45", "192.168.1.10", "/data/app"):
+        assert secret not in masked
+    assert "[已脱敏]" in masked
+    assert "[数据库连接已脱敏]" in masked
+    assert "[敏感配置行已脱敏]" in masked
+    assert "正常业务输出" in masked
 
 
 def test_successful_cc_patch_result_hides_muliu_wrapper_metadata():

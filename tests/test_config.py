@@ -49,6 +49,9 @@ def test_loads_openai_compatible_config(tmp_path):
     assert config.script_knowledge.path == "knowledge"
     assert config.conversation_log.enabled is True
     assert config.conversation_log.directory == "logs/conversations"
+    assert config.execution_interpretation.enabled is True
+    assert config.execution_interpretation.timeout_seconds == 8
+    assert config.execution_interpretation.server_environments_path == "config/server_environments.json"
 
 
 @pytest.mark.parametrize(
@@ -61,6 +64,8 @@ def test_loads_openai_compatible_config(tmp_path):
         ("muliu", "start_verification_wait_seconds", 0),
         ("muliu", "request_timeout_seconds", 0),
         ("muliu", "confirmation_timeout_seconds", 0),
+        ("execution_interpretation", "timeout_seconds", 0),
+        ("execution_interpretation", "max_execution_data_chars", 0),
     ],
 )
 def test_rejects_non_positive_operation_timeouts(tmp_path, section, field, value):
@@ -127,6 +132,27 @@ def test_loads_script_knowledge_config(tmp_path):
     assert config.script_knowledge.min_score == 4
     assert config.script_knowledge.max_results == 2
     assert config.script_knowledge.max_context_chars == 5000
+
+
+def test_loads_execution_interpretation_config(tmp_path):
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({
+        "feishu": {"app_id": "app", "app_secret": "secret"},
+        "ai": {"provider": "openai_compatible", "base_url": "https://api.example.com/v1", "api_key": "key", "model": "m"},
+        "execution_interpretation": {
+            "enabled": False,
+            "timeout_seconds": 3,
+            "server_environments_path": "custom-environments.json",
+            "max_execution_data_chars": 4567,
+        },
+    }), encoding="utf-8")
+
+    config = load_config(config_path)
+
+    assert config.execution_interpretation.enabled is False
+    assert config.execution_interpretation.timeout_seconds == 3
+    assert config.execution_interpretation.server_environments_path == "custom-environments.json"
+    assert config.execution_interpretation.max_execution_data_chars == 4567
 
 
 def test_loads_conversation_log_config(tmp_path):

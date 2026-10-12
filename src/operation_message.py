@@ -16,6 +16,22 @@ BATCH_SERVER_QUERY_SCRIPT_PATH = "{}/batch_server_query.py".format(SCRIPT_ROOT)
 _INTERNAL_IP_PATTERN = re.compile(
     r"\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3})\b"
 )
+_SENSITIVE_VALUE_PATTERN = re.compile(
+    r"(?im)([\"']?(?:api[_-]?key|access[_-]?token|auth(?:orization)?|bearer|cookie|csrf(?:[_-]?token)?|"
+    r"password|passwd|pwd|secret|username|user(?:name)?|database(?:_url)?|db(?:_url)?|"
+    r"connection(?:_string)?|dsn|token|密码|口令|密钥|令牌|凭据|连接串|数据库连接)[\"']?\s*[:=]\s*)"
+    r"[^\r\n,;]+"
+)
+_BEARER_TOKEN_PATTERN = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+")
+_COOKIE_HEADER_PATTERN = re.compile(r"(?im)^\s*(?:set-)?cookie\s*:\s*.*$")
+_DATABASE_CONNECTION_PATTERN = re.compile(
+    r"(?i)\b(?:jdbc:)?(?:mysql|postgres(?:ql)?|mongodb(?:\+srv)?|redis|amqp|mssql|oracle)://[^\s'\"`]+"
+)
+_URL_CREDENTIAL_PATTERN = re.compile(r"\b([a-z][a-z0-9+.-]*://)[^\s/@:]+(?::[^\s/@]*)?@", re.IGNORECASE)
+_SENSITIVE_CONFIG_LINE_PATTERN = re.compile(
+    r"(?im)^.*(?:config\.ini|(?<![A-Za-z0-9_-])\.env(?:\.[A-Za-z0-9_-]+)?|settings\.ini).*$"
+)
+_RUNTIME_PATH_PATTERN = re.compile(r"(?:[A-Za-z]:)?/(?:data/app|home|var|tmp|opt)/[^\s'\"`]+")
 _EXECUTION_WRAPPER_PREFIXES = (
     "MULIU_RUN_VERSION:",
     "WORKSPACE_PATH:",
@@ -161,9 +177,9 @@ def build_operation_status_card(
             "title": {"tag": "plain_text", "content": title},
         },
         "elements": [
-            {"tag": "div", "text": {"tag": "plain_text", "content": summary}},
+            {"tag": "div", "text": {"tag": "plain_text", "content": mask_sensitive_operation_data(summary)}},
             {"tag": "hr"},
-            {"tag": "div", "text": {"tag": "plain_text", "content": detail}},
+            {"tag": "div", "text": {"tag": "plain_text", "content": mask_sensitive_operation_data(detail)}},
         ],
     }
 
@@ -230,16 +246,33 @@ def format_execution_result(result: MuliuExecutionResult) -> str:
     if not result.step_results and not result.succeeded and not result.result_unknown:
         lines.append("Muliu 尚未开始执行任何步骤。")
 
-    return _mask_internal_ips("\n".join(lines).rstrip())
+    return mask_sensitive_operation_data("\n".join(lines).rstrip())
 
 
 def format_rejection(reason: str) -> str:
-    return _mask_internal_ips("❌ 未执行\n原因：{}".format(reason))
+    return mask_sensitive_operation_data("❌ 未执行\n原因：{}".format(reason))
+
+
+def mask_sensitive_operation_data(text: str) -> str:
+    """Redact operational secrets and local runtime details before external output."""
+    text = _SENSITIVE_CONFIG_LINE_PATTERN.sub("[敏感配置行已脱敏]", text)
+    text = _COOKIE_HEADER_PATTERN.sub("Cookie: [已脱敏]", text)
+    text = _BEARER_TOKEN_PATTERN.sub("Bearer [已脱敏]", text)
+    text = _DATABASE_CONNECTION_PATTERN.sub("[数据库连接已脱敏]", text)
+    text = _INTERNAL_IP_PATTERN.sub("[内部主机]", text)
+    text = _URL_CREDENTIAL_PATTERN.sub(r"\1[已脱敏]@", text)
+    text = _SENSITIVE_VALUE_PATTERN.sub(r"\1[已脱敏]", text)
+    return _RUNTIME_PATH_PATTERN.sub("[运行目录]", text)
+
+
+def mask_internal_ips(text: str) -> str:
+    """Mask private IPv4 addresses before any external AI or Feishu output."""
+    return _INTERNAL_IP_PATTERN.sub("[内部主机]", text)
 
 
 def _mask_internal_ips(text: str) -> str:
-    """Mask private IPv4 addresses (10.x, 172.16-31.x, 192.168.x) from Feishu replies."""
-    return _INTERNAL_IP_PATTERN.sub("[内部主机]", text)
+    """Compatibility wrapper for the existing reply-formatting call sites."""
+    return mask_internal_ips(text)
 
 
 def _display_script_path(path: str) -> str:

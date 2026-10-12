@@ -48,6 +48,12 @@
     "directory": "logs/conversations",
     "max_text_chars": 12000
   },
+  "execution_interpretation": {
+    "enabled": true,
+    "timeout_seconds": 8,
+    "server_environments_path": "config/server_environments.json",
+    "max_execution_data_chars": 12000
+  },
   "muliu": {
     "enabled": true,
     "script_root": "/home/serverGeneralScript",

@@ -247,7 +247,12 @@ def _add_gateway_worker_routes(
         )
         if pending_job is None:
             raise HTTPException(status_code=404, detail="worker lease not found")
-        reply = format_execution_result(result)
+        fallback_reply = format_execution_result(result)
+        reply = await job_processor.interpret_execution_result(
+            pending_job,
+            result,
+            fallback_reply,
+        )
         await job_processor.deliver_execution_result(
             pending_job,
             pending_job.confirmation_message_id,
