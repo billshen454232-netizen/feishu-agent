@@ -563,7 +563,7 @@ class MessageJobProcessor:
         if not interpretation:
             return fallback_reply
         return mask_sensitive_operation_data(
-            "🤖 AI 研读结论：\n{}\n\n---\n\n执行明细：\n{}".format(
+            "{}\n\n---\n\n执行明细：\n{}".format(
                 interpretation,
                 fallback_reply,
             )
@@ -902,7 +902,8 @@ def _build_execution_interpretation_prompt(
         "2. 只陈述实际执行结果明确支持的事实；数据不足时明确说明无法确认，绝不猜测。\n"
         "3. 用简洁的中文 Markdown 列出关键证据；不要复述整段原始日志。\n"
         "4. 严禁输出私网 IP、主机地址、账号、凭据、Cookie、数据库连接、文件系统工作目录或执行命令。\n"
-        "5. 不要建议、触发或描述新的执行操作。"
+        "5. 不要建议、触发或描述新的执行操作。\n"
+        "6. 严禁添加任何多余前缀、说明性标题或客套话（如‘AI 研读结论：’、‘分析结果：’等），直接输出结论。"
     ).format(mask_sensitive_operation_data(user_text), environment_context, execution_data)
 
 

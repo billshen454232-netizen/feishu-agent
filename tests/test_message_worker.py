@@ -251,7 +251,7 @@ END"""
 
     reply = await processor.interpret_execution_result(job, result, fallback)
 
-    assert reply.startswith("🤖 AI 研读结论：\n【存在】")
+    assert reply.startswith("【存在】")
     assert "执行明细：" in reply
     assert len(ai.calls) == 1
     prompt = ai.calls[0][1]

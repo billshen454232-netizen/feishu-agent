@@ -285,7 +285,7 @@ def test_gateway_worker_result_route_persists_and_interprets_patch_query(monkeyp
     assert len(feishu.replies) == 1
     reply_target, reply_text = feishu.replies[0]
     assert reply_target == "card_1"
-    assert reply_text.startswith("🤖 AI 研读结论：\n【存在】已在 5010 服找到该补丁")
+    assert reply_text.startswith("【存在】已在 5010 服找到该补丁")
     assert "执行明细：" in reply_text
     assert "✅ 执行完成：查询 5010 服 Patch 列表" in reply_text
 
