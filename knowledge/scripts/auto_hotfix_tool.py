@@ -267,12 +267,11 @@ class AutoHotfixTool(object):
                 ssh_cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
-                text=True,
                 check=False,
-                encoding="utf-8",
                 timeout=60,
             )
-            return res.returncode, res.stdout.strip()
+            output = res.stdout.decode("utf-8", "replace").strip() if res.stdout else ""
+            return res.returncode, output
         except subprocess.TimeoutExpired:
             return -1, "SSH 执行超时（60s）"
 
@@ -287,12 +286,11 @@ class AutoHotfixTool(object):
                 scp_cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
-                text=True,
                 check=False,
-                encoding="utf-8",
                 timeout=30,
             )
-            return res.returncode, res.stdout.strip()
+            output = res.stdout.decode("utf-8", "replace").strip() if res.stdout else ""
+            return res.returncode, output
         except subprocess.TimeoutExpired:
             return -1, "SCP 传输超时（30s）"
 
