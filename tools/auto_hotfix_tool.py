@@ -4,9 +4,8 @@
 
 通过动态生成 Lua Patch、挂载 patch_order_list.json 并触发 run_patch_game.sh，
 实现对游戏测试服各种人数、名额、开启条件等阈值的秒级免重启热更与一键回滚。
+兼容 Python 3.6+ / 3.7+ 运行环境。
 """
-
-from __future__ import annotations
 
 import argparse
 import configparser
@@ -17,9 +16,7 @@ import re
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
 
 logging.basicConfig(
     level=logging.INFO,
@@ -29,22 +26,32 @@ logging.basicConfig(
 logger = logging.getLogger("auto_hotfix")
 
 
-@dataclass(frozen=True)
-class ThresholdDefinition:
+class ThresholdDefinition(object):
     """阈值配置项元数据定义."""
 
-    key: str
-    name: str
-    table_name: str
-    field_name: str
-    default_scenarios: tuple[int, ...] = ()
-    description: str = ""
-    is_client: bool = True
-    is_server: bool = True
+    def __init__(
+        self,
+        key,
+        name,
+        table_name,
+        field_name,
+        default_scenarios=(),
+        description="",
+        is_client=True,
+        is_server=True,
+    ):
+        self.key = key
+        self.name = name
+        self.table_name = table_name
+        self.field_name = field_name
+        self.default_scenarios = tuple(default_scenarios)
+        self.description = description
+        self.is_client = is_client
+        self.is_server = is_server
 
 
 # 从 Excel《游戏服改配置.xlsx》提炼出的已知高频配置映射表
-KNOWN_THRESHOLDS: dict[str, ThresholdDefinition] = {
+KNOWN_THRESHOLDS = {
     # 1. 同盟与弹劾
     "union_impeach_min": ThresholdDefinition(
         key="union_impeach_min",
@@ -214,12 +221,12 @@ KNOWN_THRESHOLDS: dict[str, ThresholdDefinition] = {
 }
 
 # 增加字段名直通匹配（如果用户直接传 field_name 也能精准命中）
-FIELD_NAME_TO_DEFINITION: dict[str, ThresholdDefinition] = {
+FIELD_NAME_TO_DEFINITION = {
     item.field_name: item for item in KNOWN_THRESHOLDS.values()
 }
 
 
-class AutoHotfixTool:
+class AutoHotfixTool(object):
     """自动生成 Patch、安装到目标服、挂载清单并触发热更的完整控制器."""
 
     REMOTE_HOTFIX_ROOT = "/data/app/game-server/server_common/hotfix"
@@ -227,11 +234,11 @@ class AutoHotfixTool:
     REMOTE_PATCH_LIST = "/data/app/game-server/server_common/hotfix/patch_order_list.json"
     REMOTE_RUN_PATCH_CMD = "cd /data/app/game-server && bash release_bin/run_patch_game.sh"
 
-    def __init__(self, ini_file: str = "config.ini", dry_run: bool = False):
+    def __init__(self, ini_file="config.ini", dry_run=False):
         self.ini_file = ini_file
         self.dry_run = dry_run
 
-    def resolve_server_ip(self, server_id: str) -> str:
+    def resolve_server_ip(self, server_id):
         """从 config.ini 解析目标服务器 IP."""
         if not os.path.exists(self.ini_file):
             raise FileNotFoundError(f"配置文件不存在: {self.ini_file}")
@@ -249,7 +256,7 @@ class AutoHotfixTool:
         except configparser.NoOptionError as err:
             raise ValueError(f"未在 config.ini 找到 {target_key} 的 IP 配置") from err
 
-    def run_remote_cmd(self, host: str, cmd: str) -> tuple[int, str]:
+    def run_remote_cmd(self, host, cmd):
         """通过 SSH 在远端执行命令并返回输出."""
         ssh_cmd = ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10", f"root@{host}", cmd]
         if self.dry_run:
@@ -269,7 +276,7 @@ class AutoHotfixTool:
         except subprocess.TimeoutExpired:
             return -1, "SSH 执行超时（60s）"
 
-    def scp_to_remote(self, host: str, local_file: str, remote_file: str) -> tuple[int, str]:
+    def scp_to_remote(self, host, local_file, remote_file):
         """通过 SCP 传输文件到远程服务器."""
         scp_cmd = ["scp", "-o", "StrictHostKeyChecking=no", local_file, f"root@{host}:{remote_file}"]
         if self.dry_run:
@@ -289,7 +296,7 @@ class AutoHotfixTool:
         except subprocess.TimeoutExpired:
             return -1, "SCP 传输超时（30s）"
 
-    def detect_server_scenario(self, host: str) -> int:
+    def detect_server_scenario(self, host):
         """从目标服 /data/app/etc/nslg_game.lua 检测当前剧本编号."""
         cmd = "awk -F'=' '/NSLG_SCENARIO/ {gsub(/[^0-9]/, \"\", $2); print $2}' /data/app/etc/nslg_game.lua"
         code, out = self.run_remote_cmd(host, cmd)
@@ -302,16 +309,15 @@ class AutoHotfixTool:
 
     def generate_lua_patch_content(
         self,
-        table_name: str,
-        field_name: str,
-        value: str,
-        scenarios: tuple[int, ...] = (),
-    ) -> str:
+        table_name,
+        field_name,
+        value,
+        scenarios=(),
+    ):
         """生成安全严密的双端 Lua Patch 脚本文本."""
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         scenario_array_str = "{" + ", ".join(str(s) for s in scenarios) + "}" if scenarios else "{}"
 
-        # 针对 table_name[ [=[field]=] ].content = [=[value]=] 的标准热更语法
         return f"""-- ======================================================================
 -- [Auto-Generated Hotfix Patch]
 -- Target Field : {table_name}.{field_name} = {value}
@@ -353,12 +359,12 @@ end
 
     def apply_patch(
         self,
-        server_id: str,
-        key_or_field: str,
-        value: str,
-        scenario: int | None = None,
-        custom_table: str | None = None,
-    ) -> bool:
+        server_id,
+        key_or_field,
+        value,
+        scenario=None,
+        custom_table=None,
+    ):
         """主入口：生成补丁 -> 上传 -> 挂载 -> 热更验证."""
         # 1. 查找定义
         definition = KNOWN_THRESHOLDS.get(key_or_field) or FIELD_NAME_TO_DEFINITION.get(key_or_field)
@@ -380,7 +386,7 @@ end
         logger.info("准备对服务器 %s (%s) 打补丁: %s = %s", server_id, host, field_name, value)
 
         # 3. 确定剧本限制
-        scenarios: tuple[int, ...] = ()
+        scenarios = ()
         if scenario is not None:
             scenarios = (scenario,)
         elif definition and definition.default_scenarios:
@@ -435,7 +441,7 @@ end
             logger.error("❌ 远端热更执行异常，请检查上述日志！")
             return False
 
-    def rollback_patch(self, server_id: str, patch_file_name: str) -> bool:
+    def rollback_patch(self, server_id, patch_file_name):
         """回滚指定补丁：从清单中移除 -> 重新热更."""
         host = self.resolve_server_ip(server_id)
         logger.info("准备回滚服务器 %s 上的补丁: %s", server_id, patch_file_name)
@@ -458,7 +464,7 @@ end
             logger.error("❌ 重新热更执行失败！")
             return False
 
-    def list_installed_patches(self, server_id: str) -> list[dict[str, Any]]:
+    def list_installed_patches(self, server_id):
         """查询目标服务器当前挂载的所有补丁."""
         host = self.resolve_server_ip(server_id)
         code, out = self.run_remote_cmd(host, f"cat {self.REMOTE_PATCH_LIST}")
@@ -474,7 +480,7 @@ end
             logger.error("远端 patch_order_list.json 不是有效的 JSON 格式")
             return []
 
-    def _mount_patch_to_remote_json(self, host: str, patch_file_name: str) -> bool:
+    def _mount_patch_to_remote_json(self, host, patch_file_name):
         """从远端获取 patch_order_list.json，追加补丁后写回."""
         if self.dry_run:
             logger.info("[DryRun] 模拟将补丁 %s 追加到 %s", patch_file_name, self.REMOTE_PATCH_LIST)
@@ -524,7 +530,7 @@ end
             return False
         return True
 
-    def _unmount_patch_from_remote_json(self, host: str, patch_file_name: str) -> bool:
+    def _unmount_patch_from_remote_json(self, host, patch_file_name):
         """从远端 patch_order_list.json 中删除指定 patch 并重新排序."""
         if self.dry_run:
             logger.info("[DryRun] 模拟从 %s 卸载补丁 %s", self.REMOTE_PATCH_LIST, patch_file_name)
