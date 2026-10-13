@@ -156,3 +156,37 @@ def test_rejects_configured_keyword():
 
     with pytest.raises(MuliuFirewallError, match="拦截关键词"):
         firewall.validate(plan)
+
+
+def test_validates_hotfix_server_threshold_contract():
+    from pathlib import Path
+    from src.muliu_script_catalog import MuliuScriptCatalog
+    catalog = MuliuScriptCatalog(Path(__file__).parents[1] / "config" / "muliu_script_catalog.md")
+    firewall = MuliuFirewall(MuliuConfig(script_root="/home/serverGeneralScript"), call_contracts=catalog.read_call_contracts())
+
+    valid_plan = MuliuPlan(
+        summary="热更 5010 服弹劾发起同盟人数为 1",
+        kind=MuliuPlanKind.OPERATION,
+        steps=[
+            MuliuStep(
+                path="/home/serverGeneralScript/auto_hotfix_tool.py",
+                args=["-s", "5010", "-k", "union_impeach_min", "-v", "1"],
+                description="热更 5010 服弹劾发起同盟人数阈值为 1",
+            )
+        ],
+    )
+    firewall.validate(valid_plan)
+
+    invalid_plan = MuliuPlan(
+        summary="非法调用",
+        kind=MuliuPlanKind.OPERATION,
+        steps=[
+            MuliuStep(
+                path="/home/serverGeneralScript/auto_hotfix_tool.py",
+                args=["-s", "5010; rm -rf /", "-k", "union_impeach_min", "-v", "1"],
+                description="注入攻击",
+            )
+        ],
+    )
+    with pytest.raises(MuliuFirewallError):
+        firewall.validate(invalid_plan)

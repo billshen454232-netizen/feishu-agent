@@ -243,6 +243,39 @@
 - **精确参数数组模板**：`["<server_id>"]`
 - **远端影响**：清理数据库，破坏性操作，必须群内确认。
 
+### 模式 M：免重启热更服务器阈值配置（auto_hotfix_tool.py）
+
+- **用途**：通过自动生成内存 Patch 并触发热更，免重启秒级修改测试服的人数限制、开启阈值、名额等数值配置。
+- **匹配的自然语言**：
+  - `给 5010 服热更弹劾人数为 1`
+  - `帮我设置 5010 服霸业名额为 1`
+  - `修改 5010 服弹劾发起同盟人数为 1`
+  - `热更 5010 服务器同盟令人数为 1`
+  - `把 5010 服 S7 专属建筑开启人数改为 1`
+- **精确脚本路径**：`/home/serverGeneralScript/auto_hotfix_tool.py`
+- **精确参数数组模板**：`["-s", "<server_id>", "-k", "<key>", "-v", "<value>"]`
+- **变量规则**：
+  - `<server_id>`：目标测试服编号（3-8位数字，如 `"5010"`）。
+  - `<key>`：配置项别名或真实字段名（如 `"union_impeach_min"`、`"capital_city_extra_quota"`、`"union_token_least_member"`、`"faction_building_member_limit"` 等）。
+  - `<value>`：目标数值（数字字符串，如 `"1"`、`"20"`）。
+- **远端影响**：生成 Patch 并执行远端热更，会修改目标服运行时配置，高风险操作，必须群内卡片确认。
+
+标准计划示例：
+
+```json
+{
+  "kind": "operation",
+  "summary": "热更 5010 服弹劾发起同盟人数为 1",
+  "steps": [
+    {
+      "path": "/home/serverGeneralScript/auto_hotfix_tool.py",
+      "args": ["-s", "5010", "-k", "union_impeach_min", "-v", "1"],
+      "description": "热更 5010 服弹劾发起同盟人数阈值为 1"
+    }
+  ]
+}
+```
+
 ## 维护要求
 
 新增可执行模式时，在同一次修改中更新本文件的自然语言映射、精确模板和文件末尾的机器可校验合同，并为该模式及其与其他已登记动作的组合补充本地测试。本地资料和调用合同负责让 AI 生成合规 `path + args`；任务入口脚本只负责根目录、普通文件、固定 argv 与 `shell=False`，不应再维护第二份服务器端业务白名单或按扩展名决定能否执行。脚本必须已放入本机 `knowledge/scripts/` 作为阅读参考，并确认实际部署在 GS-1 的相同路径；通过本地测试后才可供机器人执行。
@@ -624,6 +657,25 @@
       ],
       "variables": {
         "server_id": "[0-9]{3,8}"
+      },
+      "runner": "python3.7",
+      "risk": "write"
+    },
+    {
+      "name": "hotfix-server-threshold",
+      "path": "/home/serverGeneralScript/auto_hotfix_tool.py",
+      "args": [
+        "-s",
+        "{server_id}",
+        "-k",
+        "{key}",
+        "-v",
+        "{value}"
+      ],
+      "variables": {
+        "server_id": "[0-9]{3,8}",
+        "key": "[A-Za-z0-9_]{1,64}",
+        "value": "[0-9]{1,16}"
       },
       "runner": "python3.7",
       "risk": "write"

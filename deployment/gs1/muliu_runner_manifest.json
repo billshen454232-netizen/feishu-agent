@@ -431,6 +431,27 @@
         "python3.7"
       ],
       "risk": "write"
+    },
+    {
+      "name": "hotfix-server-threshold",
+      "path": "/home/serverGeneralScript/auto_hotfix_tool.py",
+      "args": [
+        "-s",
+        "{server_id}",
+        "-k",
+        "{key}",
+        "-v",
+        "{value}"
+      ],
+      "variables": {
+        "key": "[A-Za-z0-9_]{1,64}",
+        "server_id": "[0-9]{3,8}",
+        "value": "[0-9]{1,16}"
+      },
+      "runner": [
+        "python3.7"
+      ],
+      "risk": "write"
     }
   ]
 }
