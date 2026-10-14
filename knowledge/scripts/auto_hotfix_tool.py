@@ -394,9 +394,11 @@ end
             if detected > 0:
                 scenarios = (detected,)
 
-        # 4. 生成本地 Patch 文件
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        patch_file_name = f"auto_patch_{field_name}_{server_id}_{timestamp}.lua"
+        # 4. 同服同字段复用已有 Patch；仅首次创建时使用固定文件名。
+        #    先读取清单再上传，避免把新文件写进远端目录后才发现已有同类 Patch。
+        patch_file_name = self._select_patch_file_name(host, server_id, field_name)
+        if not patch_file_name:
+            return False
         local_temp_patch = f"/tmp/{patch_file_name}" if os.name != "nt" else os.path.join(os.environ.get("TEMP", "."), patch_file_name)
 
         patch_content = self.generate_lua_patch_content(
@@ -422,7 +424,7 @@ end
 
         # 6. 更新远程 patch_order_list.json
         logger.info("更新远端热更清单: %s", self.REMOTE_PATCH_LIST)
-        mount_success = self._mount_patch_to_remote_json(host, patch_file_name)
+        mount_success = self._mount_patch_to_remote_json(host, patch_file_name, field_name)
         if not mount_success:
             return False
 
@@ -433,15 +435,35 @@ end
 
         if code == 0:
             logger.info("✅ 热更成功生效！配置 [%s] 已覆盖为 [%s]", desc, value)
-            logger.info("💡 后续如需还原，请运行: python auto_hotfix_tool.py -s %s --rollback %s", server_id, patch_file_name)
             return True
         else:
             logger.error("❌ 远端热更执行异常，请检查上述日志！")
             return False
 
-    def rollback_patch(self, server_id, patch_file_name):
-        """回滚指定补丁：从清单中移除 -> 重新热更."""
+    def rollback_patch(self, server_id, patch_target):
+        """回滚指定补丁：支持补丁文件名 (auto_patch_xxx.lua) 或直接传字段别名/字段名 (如 capital_city_extra_quota)."""
         host = self.resolve_server_ip(server_id)
+
+        patch_file_name = patch_target
+        desc = patch_target
+
+        if not patch_target.endswith(".lua"):
+            definition = KNOWN_THRESHOLDS.get(patch_target) or FIELD_NAME_TO_DEFINITION.get(patch_target)
+            target_field = definition.field_name if definition else patch_target
+            desc = definition.name if definition else target_field
+
+            installed = self.list_installed_patches(server_id)
+            matched_file = None
+            for p in reversed(installed):
+                fname = p.get("file", "")
+                if fname.startswith("auto_patch_") and f"_{target_field}_" in fname:
+                    matched_file = fname
+                    break
+            if not matched_file and not self.dry_run:
+                logger.error("❌ 未在服务器 %s 找到与配置 [%s] 相关的自动热更补丁", server_id, desc)
+                return False
+            patch_file_name = matched_file or f"auto_patch_{target_field}_mock.lua"
+
         logger.info("准备回滚服务器 %s 上的补丁: %s", server_id, patch_file_name)
 
         # 从远端下载清单进行安全移除
@@ -456,7 +478,7 @@ end
         logger.info("热更执行返回 (Exit Code: %d):\n%s", code, out)
 
         if code == 0:
-            logger.info("✅ 补丁 [%s] 已成功回滚！", patch_file_name)
+            logger.info("✅ 配置 [%s] 已成功回滚还原！", desc)
             return True
         else:
             logger.error("❌ 重新热更执行失败！")
@@ -478,49 +500,115 @@ end
             logger.error("远端 patch_order_list.json 不是有效的 JSON 格式")
             return []
 
-    def _mount_patch_to_remote_json(self, host, patch_file_name):
-        """从远端获取 patch_order_list.json，追加补丁后写回."""
-        if self.dry_run:
-            logger.info("[DryRun] 模拟将补丁 %s 追加到 %s", patch_file_name, self.REMOTE_PATCH_LIST)
-            return True
-
+    def _read_remote_patch_data(self, host):
+        """读取并校验远端 Patch 清单；失败时不做任何写入。"""
         code, out = self.run_remote_cmd(host, f"cat {self.REMOTE_PATCH_LIST}")
         if code != 0:
             logger.error("无法读取远端清单: %s", out)
-            return False
-
+            return None
         try:
             data = json.loads(out)
         except json.JSONDecodeError:
             logger.error("远端清单不是合法的 JSON")
-            return False
+            return None
+        if not isinstance(data, dict):
+            logger.error("远端清单根节点必须是对象")
+            return None
+        patch_list = data.get("list")
+        if not isinstance(patch_list, dict):
+            logger.error("远端清单缺少对象类型的 list 字段")
+            return None
+        return data
 
-        patch_list = data.setdefault("list", {})
+    @staticmethod
+    def _patch_order(item):
+        """将清单 order 转为可排序数值，异常条目排在最后。"""
+        try:
+            return int(item.get("order", -1))
+        except (AttributeError, TypeError, ValueError):
+            return -1
+
+    def _select_patch_file_name(self, host, server_id, field_name):
+        """为同服同字段选择唯一的既有 Patch 文件，或返回首次创建的稳定文件名。"""
+        stable_name = "auto_patch_{}_{}.lua".format(field_name, server_id)
+        if self.dry_run:
+            return stable_name
+
+        data = self._read_remote_patch_data(host)
+        if data is None:
+            return None
+
+        pattern = re.compile(
+            r"^auto_patch_{}_{}(?:_\d{{8}}_\d{{6}})?\.lua$".format(
+                re.escape(str(field_name)), re.escape(str(server_id))
+            )
+        )
+        matched = []
+        for item in data["list"].values():
+            if not isinstance(item, dict):
+                continue
+            file_name = item.get("file")
+            if isinstance(file_name, str) and pattern.match(file_name):
+                matched.append((self._patch_order(item), file_name))
+
+        if not matched:
+            return stable_name
+
+        # 历史时间戳 Patch 可能已有多个。始终复用执行顺序最高的一个，
+        # 以保证本次覆盖值会在其他历史条目之后生效；不隐式清理旧条目。
+        matched.sort(key=lambda entry: (entry[0], entry[1]))
+        selected = matched[-1][1]
+        if len(matched) > 1:
+            logger.warning(
+                "检测到服务器 %s 的字段 %s 已有 %d 个历史自动 Patch；"
+                "本次复用执行顺序最高的 %s，不会自动清理其他条目",
+                server_id,
+                field_name,
+                len(matched),
+                selected,
+            )
+        else:
+            logger.info("复用已挂载的自动 Patch: %s", selected)
+        return selected
+
+    def _mount_patch_to_remote_json(self, host, patch_file_name, field_name=None):
+        """幂等挂载 Patch：已有同名条目时不改写清单、不新增顺序。"""
+        if self.dry_run:
+            logger.info("[DryRun] 模拟确认补丁 %s 已挂载到 %s", patch_file_name, self.REMOTE_PATCH_LIST)
+            return True
+
+        data = self._read_remote_patch_data(host)
+        if data is None:
+            return False
+        patch_list = data["list"]
+
+        for item in patch_list.values():
+            if isinstance(item, dict) and item.get("file") == patch_file_name:
+                logger.info("补丁已在远端清单中挂载，不新增条目: %s", patch_file_name)
+                return True
+
         # 寻找当前最大的 key 和 order
-        max_order = 0
+        max_order = -1
         max_key = -1
-        for k, v in patch_list.items():
-            if str(k).isdigit():
-                max_key = max(max_key, int(k))
-            if isinstance(v, dict) and "order" in v:
-                max_order = max(max_order, int(v["order"]))
+        for key, item in patch_list.items():
+            if str(key).isdigit():
+                max_key = max(max_key, int(key))
+            if isinstance(item, dict):
+                max_order = max(max_order, self._patch_order(item))
 
         next_key = str(max_key + 1)
         next_order = max_order + 1
-
         patch_list[next_key] = {
             "patch_type": "client_avatar",
             "order": next_order,
             "file": patch_file_name,
         }
 
-        # 备份远端文件
+        # 仅首次挂载才需要备份并改写清单。
         backup_cmd = f"cp {self.REMOTE_PATCH_LIST} {self.REMOTE_PATCH_LIST}.bak_{int(time.time())}"
         self.run_remote_cmd(host, backup_cmd)
 
-        # 写回远端
         new_json_str = json.dumps(data, indent=2, ensure_ascii=False)
-        # 用 base64 或安全 EOF 管道写入远端，避免特殊字符转义问题
         write_cmd = f"cat << 'EOF' > {self.REMOTE_PATCH_LIST}\n{new_json_str}\nEOF"
         code, out = self.run_remote_cmd(host, write_cmd)
         if code != 0:

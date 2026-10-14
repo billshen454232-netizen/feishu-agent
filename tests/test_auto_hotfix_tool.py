@@ -117,3 +117,67 @@ def test_mount_and_unmount_patch_json_logic():
     assert len(items_unmount) == 2
     assert all(v["file"] != "auto_patch_impeach.lua" for v in items_unmount.values())
 
+
+def test_reuses_latest_existing_patch_without_rewriting_list():
+    tool = AutoHotfixTool(dry_run=False)
+    stored_json = json.dumps(
+        {
+            "version": "1.0",
+            "list": {
+                "17": {
+                    "patch_type": "client_avatar",
+                    "order": 7,
+                    "file": "auto_patch_capital_city_extra_quota_5010_20261013_195607.lua",
+                },
+                "18": {
+                    "patch_type": "client_avatar",
+                    "order": 8,
+                    "file": "auto_patch_capital_city_extra_quota_5010_20261013_195804.lua",
+                },
+            },
+        }
+    )
+    remote_commands = []
+    uploaded_paths = []
+
+    tool.resolve_server_ip = lambda server_id: "10.0.0.1"
+    tool.detect_server_scenario = lambda host: 2001
+
+    def mock_run_cmd(host, cmd):
+        remote_commands.append(cmd)
+        if f"cat {tool.REMOTE_PATCH_LIST}" in cmd:
+            return 0, stored_json
+        return 0, ""
+
+    def mock_scp(host, local_file, remote_file):
+        uploaded_paths.append(remote_file)
+        return 0, ""
+
+    tool.run_remote_cmd = mock_run_cmd
+    tool.scp_to_remote = mock_scp
+
+    assert tool.apply_patch("5010", "capital_city_extra_quota", "2") is True
+    assert uploaded_paths == [
+        tool.REMOTE_PATCH_DIR + "/auto_patch_capital_city_extra_quota_5010_20261013_195804.lua"
+    ]
+    assert not any("cat << 'EOF'" in cmd for cmd in remote_commands)
+
+
+def test_selects_stable_name_for_first_patch():
+    tool = AutoHotfixTool(dry_run=False)
+    tool.run_remote_cmd = lambda host, cmd: (0, json.dumps({"list": {}}))
+
+    assert tool._select_patch_file_name("10.0.0.1", "5010", "capital_city_extra_quota") == (
+        "auto_patch_capital_city_extra_quota_5010.lua"
+    )
+
+
+def test_rollback_by_key_or_alias():
+    tool = AutoHotfixTool(dry_run=True)
+    tool.resolve_server_ip = lambda server_id: "10.0.0.1"
+    tool.list_installed_patches = lambda server_id: [
+        {"order": 0, "file": "auto_patch_capital_city_extra_quota_5010_20261013_195804.lua"}
+    ]
+
+    success = tool.rollback_patch("5010", "capital_city_extra_quota")
+    assert success is True
