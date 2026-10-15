@@ -252,13 +252,23 @@
   - `修改 5010 服弹劾发起同盟人数为 1`
   - `热更 5010 服务器同盟令人数为 1`
   - `把 5010 服 S7 专属建筑开启人数改为 1`
+  - `给 5010 服以 common 类型热更霸业名额为 1`
+  - `以 battle 类型给 5010 服热更弹劾人数为 1`
+  - `清理 5010 服霸业名额的旧版自动补丁`
+  - `还原 5010 服霸业名额的自动热更`
 - **精确脚本路径**：`/home/serverGeneralScript/auto_hotfix_tool.py`
-- **精确参数数组模板**：`["-s", "<server_id>", "-k", "<key>", "-v", "<value>"]`
+- **精确参数数组模板**：
+  - 默认类型：`["-s", "<server_id>", "-k", "<key>", "-v", "<value>"]`，阈值配置默认写入 `common` 类型。
+  - 显式类型：`["-s", "<server_id>", "-k", "<key>", "-v", "<value>", "--patch-type", "<patch_type>"]`。
+  - 清理旧版：`["-s", "<server_id>", "--cleanup-legacy", "<key>"]`，仅移除早期误挂在 `client_avatar` 类型的旧命名自动 Patch，保留当前 `common` Patch。
+  - 完整还原：`["-s", "<server_id>", "--restore-auto", "<key>"]`，移除该服该字段的全部自动 Patch，让原始配置重新加载。
 - **变量规则**：
   - `<server_id>`：目标测试服编号（3-8位数字，如 `"5010"`）。
   - `<key>`：配置项别名或真实字段名（如 `"union_impeach_min"`、`"capital_city_extra_quota"`、`"union_token_least_member"`、`"faction_building_member_limit"` 等）。
   - `<value>`：目标数值（数字字符串，如 `"1"`、`"20"`）。
-- **远端影响**：生成 Patch 并执行远端热更，会修改目标服运行时配置，高风险操作，必须群内卡片确认。
+  - `<patch_type>`：仅在明确指定类型时填写，只允许 `avatar`、`battle`、`center`、`client_account`、`client_avatar`、`common`、`login`、`scene`、`test`、`union`、`unionmirror`。类型决定远端目录和清单 `patch_type`，不能填写路径或任意文本。
+- **清理与还原规则**：执行前按服号和字段精确筛选清单中的自动 Patch，先备份清单；清理旧版只处理历史 `client_avatar/auto_patch_...` 文件，完整还原才会移除该字段的所有自动 Patch。两种动作都会更新清单、删除对应自动 `.lua` 文件并重新触发热更。
+- **远端影响**：生成、清理或还原 Patch 都会修改目标服运行时配置，高风险操作，必须群内卡片确认。
 
 标准计划示例：
 
@@ -271,6 +281,22 @@
       "path": "/home/serverGeneralScript/auto_hotfix_tool.py",
       "args": ["-s", "5010", "-k", "union_impeach_min", "-v", "1"],
       "description": "热更 5010 服弹劾发起同盟人数阈值为 1"
+    }
+  ]
+}
+```
+
+显式类型标准计划示例：
+
+```json
+{
+  "kind": "operation",
+  "summary": "以 common 类型热更 5010 服霸业名额为 1",
+  "steps": [
+    {
+      "path": "/home/serverGeneralScript/auto_hotfix_tool.py",
+      "args": ["-s", "5010", "-k", "capital_city_extra_quota", "-v", "1", "--patch-type", "common"],
+      "description": "以 common 类型热更 5010 服霸业名额为 1"
     }
   ]
 }
@@ -676,6 +702,60 @@
         "server_id": "[0-9]{3,8}",
         "key": "[A-Za-z0-9_]{1,64}",
         "value": "[0-9]{1,16}"
+      },
+      "runner": "python3.7",
+      "risk": "write"
+    },
+    {
+      "name": "cleanup-legacy-auto-hotfix",
+      "path": "/home/serverGeneralScript/auto_hotfix_tool.py",
+      "args": [
+        "-s",
+        "{server_id}",
+        "--cleanup-legacy",
+        "{key}"
+      ],
+      "variables": {
+        "server_id": "[0-9]{3,8}",
+        "key": "[A-Za-z0-9_]{1,64}"
+      },
+      "runner": "python3.7",
+      "risk": "write"
+    },
+    {
+      "name": "restore-auto-hotfix",
+      "path": "/home/serverGeneralScript/auto_hotfix_tool.py",
+      "args": [
+        "-s",
+        "{server_id}",
+        "--restore-auto",
+        "{key}"
+      ],
+      "variables": {
+        "server_id": "[0-9]{3,8}",
+        "key": "[A-Za-z0-9_]{1,64}"
+      },
+      "runner": "python3.7",
+      "risk": "write"
+    },
+    {
+      "name": "hotfix-server-threshold-with-patch-type",
+      "path": "/home/serverGeneralScript/auto_hotfix_tool.py",
+      "args": [
+        "-s",
+        "{server_id}",
+        "-k",
+        "{key}",
+        "-v",
+        "{value}",
+        "--patch-type",
+        "{patch_type}"
+      ],
+      "variables": {
+        "server_id": "[0-9]{3,8}",
+        "key": "[A-Za-z0-9_]{1,64}",
+        "value": "[0-9]{1,16}",
+        "patch_type": "avatar|battle|center|client_account|client_avatar|common|login|scene|test|union|unionmirror"
       },
       "runner": "python3.7",
       "risk": "write"

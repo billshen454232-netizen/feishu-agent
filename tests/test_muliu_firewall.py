@@ -177,6 +177,48 @@ def test_validates_hotfix_server_threshold_contract():
     )
     firewall.validate(valid_plan)
 
+    typed_valid_plan = MuliuPlan(
+        summary="以 common 类型热更 5010 服弹劾发起同盟人数为 1",
+        kind=MuliuPlanKind.OPERATION,
+        steps=[
+            MuliuStep(
+                path="/home/serverGeneralScript/auto_hotfix_tool.py",
+                args=[
+                    "-s", "5010", "-k", "union_impeach_min", "-v", "1",
+                    "--patch-type", "common",
+                ],
+                description="以 common 类型热更 5010 服弹劾发起同盟人数阈值为 1",
+            )
+        ],
+    )
+    firewall.validate(typed_valid_plan)
+
+    cleanup_valid_plan = MuliuPlan(
+        summary="清理 5010 服霸业名额的旧版自动补丁",
+        kind=MuliuPlanKind.OPERATION,
+        steps=[
+            MuliuStep(
+                path="/home/serverGeneralScript/auto_hotfix_tool.py",
+                args=["-s", "5010", "--cleanup-legacy", "capital_city_extra_quota"],
+                description="清理 5010 服霸业名额的旧版自动补丁",
+            )
+        ],
+    )
+    firewall.validate(cleanup_valid_plan)
+
+    restore_valid_plan = MuliuPlan(
+        summary="还原 5010 服霸业名额的自动热更",
+        kind=MuliuPlanKind.OPERATION,
+        steps=[
+            MuliuStep(
+                path="/home/serverGeneralScript/auto_hotfix_tool.py",
+                args=["-s", "5010", "--restore-auto", "capital_city_extra_quota"],
+                description="还原 5010 服霸业名额的自动热更",
+            )
+        ],
+    )
+    firewall.validate(restore_valid_plan)
+
     invalid_plan = MuliuPlan(
         summary="非法调用",
         kind=MuliuPlanKind.OPERATION,
@@ -190,3 +232,20 @@ def test_validates_hotfix_server_threshold_contract():
     )
     with pytest.raises(MuliuFirewallError):
         firewall.validate(invalid_plan)
+
+    invalid_patch_type_plan = MuliuPlan(
+        summary="非法补丁类型",
+        kind=MuliuPlanKind.OPERATION,
+        steps=[
+            MuliuStep(
+                path="/home/serverGeneralScript/auto_hotfix_tool.py",
+                args=[
+                    "-s", "5010", "-k", "union_impeach_min", "-v", "1",
+                    "--patch-type", "../../etc",
+                ],
+                description="尝试写入非白名单目录",
+            )
+        ],
+    )
+    with pytest.raises(MuliuFirewallError):
+        firewall.validate(invalid_patch_type_plan)

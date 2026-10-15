@@ -452,6 +452,66 @@
         "python3.7"
       ],
       "risk": "write"
+    },
+    {
+      "name": "cleanup-legacy-auto-hotfix",
+      "path": "/home/serverGeneralScript/auto_hotfix_tool.py",
+      "args": [
+        "-s",
+        "{server_id}",
+        "--cleanup-legacy",
+        "{key}"
+      ],
+      "variables": {
+        "key": "[A-Za-z0-9_]{1,64}",
+        "server_id": "[0-9]{3,8}"
+      },
+      "runner": [
+        "python3.7"
+      ],
+      "risk": "write"
+    },
+    {
+      "name": "restore-auto-hotfix",
+      "path": "/home/serverGeneralScript/auto_hotfix_tool.py",
+      "args": [
+        "-s",
+        "{server_id}",
+        "--restore-auto",
+        "{key}"
+      ],
+      "variables": {
+        "key": "[A-Za-z0-9_]{1,64}",
+        "server_id": "[0-9]{3,8}"
+      },
+      "runner": [
+        "python3.7"
+      ],
+      "risk": "write"
+    },
+    {
+      "name": "hotfix-server-threshold-with-patch-type",
+      "path": "/home/serverGeneralScript/auto_hotfix_tool.py",
+      "args": [
+        "-s",
+        "{server_id}",
+        "-k",
+        "{key}",
+        "-v",
+        "{value}",
+        "--patch-type",
+        "{patch_type}"
+      ],
+      "variables": {
+        "key": "[A-Za-z0-9_]{1,64}",
+        "patch_type": "avatar|battle|center|client_account|client_avatar|common|login|scene|test|union|unionmirror",
+        "server_id": "[0-9]{3,8}",
+        "value": "[0-9]{1,16}"
+      },
+      "runner": [
+        "python3.7"
+      ],
+      "risk": "write"
     }
   ]
 }

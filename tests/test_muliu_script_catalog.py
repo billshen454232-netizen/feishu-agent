@@ -179,6 +179,25 @@ def test_production_catalog_accepts_ordered_registered_steps():
             "/home/serverGeneralScript/batch_server_query.py",
             ["--servers", "5000,5001,6000,6001", "--label", "海外所有DEV环境"],
         ),
+        (
+            "/home/serverGeneralScript/auto_hotfix_tool.py",
+            ["-s", "5000", "-k", "capital_city_extra_quota", "-v", "1"],
+        ),
+        (
+            "/home/serverGeneralScript/auto_hotfix_tool.py",
+            [
+                "-s", "5000", "-k", "capital_city_extra_quota", "-v", "1",
+                "--patch-type", "common",
+            ],
+        ),
+        (
+            "/home/serverGeneralScript/auto_hotfix_tool.py",
+            ["-s", "5000", "--cleanup-legacy", "capital_city_extra_quota"],
+        ),
+        (
+            "/home/serverGeneralScript/auto_hotfix_tool.py",
+            ["-s", "5000", "--restore-auto", "capital_city_extra_quota"],
+        ),
     ],
 )
 def test_production_catalog_accepts_every_registered_operation_shape(path, args):
