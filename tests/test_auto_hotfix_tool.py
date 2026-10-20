@@ -1,13 +1,59 @@
 import json
 import pytest
 
+from tools.auto_hotfix_registry import (
+    FIELD_NAME_TO_DEFINITION as REGISTRY_FIELD_NAME_TO_DEFINITION,
+)
+from tools.auto_hotfix_registry import KNOWN_THRESHOLDS as REGISTRY_KNOWN_THRESHOLDS
+from tools.auto_hotfix_registry import ThresholdDefinition as RegistryThresholdDefinition
 from tools.auto_hotfix_tool import (
     AutoHotfixTool,
     DEFAULT_PATCH_TYPE,
     FIELD_NAME_TO_DEFINITION,
     KNOWN_THRESHOLDS,
     SUPPORTED_PATCH_TYPES,
+    ThresholdDefinition,
 )
+
+
+def test_known_thresholds_are_reexported_from_registry_without_changes():
+    assert ThresholdDefinition is RegistryThresholdDefinition
+    assert KNOWN_THRESHOLDS is REGISTRY_KNOWN_THRESHOLDS
+    assert FIELD_NAME_TO_DEFINITION is REGISTRY_FIELD_NAME_TO_DEFINITION
+
+    exported_records = {
+        key: (
+            definition.key,
+            definition.name,
+            definition.table_name,
+            definition.field_name,
+            definition.default_scenarios,
+            definition.description,
+            definition.default_patch_type,
+            definition.is_client,
+            definition.is_server,
+        )
+        for key, definition in KNOWN_THRESHOLDS.items()
+    }
+    registry_records = {
+        key: (
+            definition.key,
+            definition.name,
+            definition.table_name,
+            definition.field_name,
+            definition.default_scenarios,
+            definition.description,
+            definition.default_patch_type,
+            definition.is_client,
+            definition.is_server,
+        )
+        for key, definition in REGISTRY_KNOWN_THRESHOLDS.items()
+    }
+    assert exported_records == registry_records
+
+    for key, definition in KNOWN_THRESHOLDS.items():
+        assert definition.key == key
+        assert FIELD_NAME_TO_DEFINITION[definition.field_name] is definition
 
 
 def test_known_thresholds_registration():
