@@ -191,6 +191,20 @@ def make_plan():
     )
 
 
+def make_hotfix_plan(key, threshold_name):
+    return MuliuPlan(
+        summary="热更 5010 服{}为 1".format(threshold_name),
+        steps=[
+            MuliuStep(
+                path="/home/serverGeneralScript/auto_hotfix_tool.py",
+                args=["-s", "5010", "-k", key, "-v", "1"],
+                description="热更 5010 服{}为 1".format(threshold_name),
+            )
+        ],
+        kind=MuliuPlanKind.OPERATION,
+    )
+
+
 def make_shutdown_plan():
     return MuliuPlan(
         summary="正常关闭 5000 服",
@@ -297,6 +311,42 @@ async def test_request_creates_plan_and_waits_for_group_confirmation(tmp_path):
     }
     assert json.loads(job.plan_json)["kind"] == "operation"
     assert json.loads(job.plan_json)["steps"][0]["args"] == ["6001"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("request", "key"),
+    [
+        ("给 5010 服热更剧本预选州战队人数显示阈值为 1", "faction_team_show_member_limit"),
+        ("给 5010 服热更战队交换人数为 1", "faction_swap_team_member_min"),
+    ],
+)
+async def test_registered_chinese_hotfix_routes_wait_for_card_confirmation(tmp_path, request, key):
+    config = make_config()
+    store = MessageJobStore(tmp_path / "jobs.sqlite3")
+    store.initialize()
+    store.create_if_new("om_hotfix", "evt_hotfix", "oc_group", "ou_user", request, chat_type="group")
+    feishu = FakeFeishuClient()
+    executor = FakeExecutor()
+    processor = MessageJobProcessor(
+        config,
+        store,
+        ConversationStore(4),
+        ai_client=None,
+        feishu_client=feishu,
+        operation_planner=FakePlanner(make_hotfix_plan(key, request.split("热更", 1)[1].rsplit("为", 1)[0])),
+        muliu_firewall=production_firewall(config),
+        muliu_executor=executor,
+    )
+
+    await processor.process_one("om_hotfix")
+
+    job = store.get("om_hotfix")
+    assert job is not None
+    assert job.status == "awaiting_confirmation"
+    assert executor.plans == []
+    assert json.loads(job.plan_json)["steps"][0]["args"] == ["-s", "5010", "-k", key, "-v", "1"]
+    assert request in str(feishu.cards[0][1])
 
 
 @pytest.mark.asyncio

@@ -233,6 +233,20 @@ def test_validates_hotfix_server_threshold_contract():
     with pytest.raises(MuliuFirewallError):
         firewall.validate(invalid_plan)
 
+    unknown_key_plan = MuliuPlan(
+        summary="未登记热更 key",
+        kind=MuliuPlanKind.OPERATION,
+        steps=[
+            MuliuStep(
+                path="/home/serverGeneralScript/auto_hotfix_tool.py",
+                args=["-s", "5010", "-k", "unknown_threshold", "-v", "1"],
+                description="尝试使用格式合法但未登记的 key",
+            )
+        ],
+    )
+    with pytest.raises(MuliuFirewallError, match="不符合任何已登记调用合同"):
+        firewall.validate(unknown_key_plan)
+
     invalid_patch_type_plan = MuliuPlan(
         summary="非法补丁类型",
         kind=MuliuPlanKind.OPERATION,

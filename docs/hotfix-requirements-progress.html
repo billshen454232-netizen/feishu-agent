@@ -619,8 +619,8 @@
           id: "06",
           status: "active",
           statusText: "当前步骤",
-          title: "按原始 Excel 扩展新字段",
-          desc: "仅处理 Excel 有、当前注册表没有的配置和专用模板"
+          title: "统一注册表并完成本地确认链路验证",
+          desc: "中文别名、ASCII key 与 Patch 元数据已合并；待飞书验收"
         },
         {
           id: "07",
@@ -632,9 +632,9 @@
       ],
       currentAction: {
         label: "现在要做",
-        html: `执行 <span class="step-chip">STEP 06</span>：以原始 Excel 为唯一字段依据，盘点当前注册表缺少的条目，并按数据形态逐条实现受控模板与本地测试。每条通过 Patch 链路后，再进入 <span class="step-chip">STEP 07</span> 游戏内效果验证。`
+        html: `执行 <span class="step-chip">STEP 06</span>：统一注册表已生成中文别名 → ASCII key → 受控合同；本地已覆盖确认卡前不执行。下一步由你在飞书验收“剧本预选州战队人数显示阈值”和“战队交换人数”两条请求。<br><br>支线记录：原始 Lua 文件路径作为审计元数据后续补齐，不阻塞当前主链路。`
       },
-      principle: "某一条资料不足，只阻塞那一条，不能关闭其他热更能力。"
+      principle: "主链路优先：中文请求必须先可靠进入人工确认卡；路径审计信息后续独立完善。"
     };
 
     let selectedStepId = null;

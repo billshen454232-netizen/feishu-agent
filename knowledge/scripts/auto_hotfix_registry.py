@@ -1,13 +1,20 @@
 # -*- coding: utf-8 -*-
-"""当前 ``auto_hotfix_tool`` 内嵌阈值定义的原样迁移注册表。
+"""测试服热更阈值的唯一注册表。
 
-本模块仅承载既有脚本行为基线：不新增、删除或校正字段语义。
-原始 Excel 的新增条目及字段核对不属于本阶段。
+每一项同时定义：
+- 执行端使用的 ASCII ``key`` 与 Lua Patch 目标；
+- Planner 可见的中文标准名与受控别名。
+
+Planner 不在运行时导入本模块。部署前由
+``tools/sync_hotfix_planner_catalog.py`` 将本模块生成的中文路由和严格
+key 白名单写入静态调用资料，确保 Gateway / Worker 只依赖已部署的资料。
 """
+
+import re
 
 
 class ThresholdDefinition(object):
-    """阈值配置项元数据定义."""
+    """一个可热更阈值的执行与中文路由元数据。"""
 
     def __init__(
         self,
@@ -20,7 +27,10 @@ class ThresholdDefinition(object):
         default_patch_type="common",
         is_client=True,
         is_server=True,
+        aliases=(),
     ):
+        if isinstance(aliases, str):
+            raise ValueError("aliases 必须是字符串序列，不能是单个字符串")
         self.key = key
         self.name = name
         self.table_name = table_name
@@ -30,9 +40,11 @@ class ThresholdDefinition(object):
         self.default_patch_type = default_patch_type
         self.is_client = is_client
         self.is_server = is_server
+        self.aliases = tuple(aliases)
 
 
-# 从原 auto_hotfix_tool.py 的内嵌映射原样迁移；本阶段不以 Excel 纠正或扩展。
+# 从原 auto_hotfix_tool.py 的内嵌映射迁入；执行端的 key、table、field 与
+# Patch 语义均以本表为准。中文 aliases 仅负责受控意图路由，不参与 Lua 写入。
 KNOWN_THRESHOLDS = {
     # 1. 同盟与弹劾
     "union_impeach_min": ThresholdDefinition(
@@ -41,6 +53,7 @@ KNOWN_THRESHOLDS = {
         table_name="union_config_setting",
         field_name="union_impeach_union_member_min",
         description="发起弹劾所需的同盟最低人数（原值通常为50）",
+        aliases=("弹劾人数", "弹劾发起同盟人数"),
     ),
     "union_impeach_power_min": ThresholdDefinition(
         key="union_impeach_power_min",
@@ -76,6 +89,7 @@ KNOWN_THRESHOLDS = {
         table_name="game_config_common_config",
         field_name="union_token_least_member_num",
         description="获得同盟令所需的同盟人数（原值20）",
+        aliases=("同盟令人数",),
     ),
     "union_max_member_init": ThresholdDefinition(
         key="union_max_member_init",
@@ -106,6 +120,7 @@ KNOWN_THRESHOLDS = {
         table_name="game_config_common_config",
         field_name="faction_building_union_membernum_limit",
         description="S7阵营专属建筑烽火台和黄天纸马开启人数（原值180，改1方便测试）",
+        aliases=("S7专属建筑开启人数", "S7 专属建筑开启人数"),
     ),
     "faction_building_palace_level": ThresholdDefinition(
         key="faction_building_palace_level",
@@ -127,6 +142,7 @@ KNOWN_THRESHOLDS = {
         table_name="season_process_season_config",
         field_name="capital_city_extra_quota",
         description="占领州府/国都额外奖励的霸业名额",
+        aliases=("霸业名额", "国都霸业名额", "州府霸业名额"),
     ),
     "rank_quota": ThresholdDefinition(
         key="rank_quota",
@@ -155,6 +171,7 @@ KNOWN_THRESHOLDS = {
         table_name="season_process_season_config",
         field_name="faction_team_show_member_num_limit",
         description="预选州阶段可显示的战队最低人数（原值50）",
+        aliases=("剧本预选州战队人数显示阈值", "预选州战队人数显示阈值"),
     ),
     "faction_swap_team_member_min": ThresholdDefinition(
         key="faction_swap_team_member_min",
@@ -162,6 +179,7 @@ KNOWN_THRESHOLDS = {
         table_name="season_process_season_config",
         field_name="faction_swap_team_member_num_min",
         description="战队交换所需的最低成员人数（本地配置副本原值150）",
+        aliases=("战队交换人数阈值",),
     ),
     "team_reward_member_count": ThresholdDefinition(
         key="team_reward_member_count",
@@ -209,7 +227,85 @@ KNOWN_THRESHOLDS = {
     ),
 }
 
-# 增加字段名直通匹配（如果用户直接传 field_name 也能精准命中）
+# 允许用户或已有脚本直接传真实 Lua field_name；中文名只在 Planner 侧解析，
+# 不进入执行脚本。
 FIELD_NAME_TO_DEFINITION = {
     item.field_name: item for item in KNOWN_THRESHOLDS.values()
 }
+
+
+def planner_term_to_key(thresholds=None):
+    """返回中文标准名 / 别名到 ASCII key 的闭合映射。
+
+    任一名称、别名或 key 重复都会立即报错，避免 Planner 将同一句中文路由到
+    不确定的 Lua 字段。
+    """
+    if thresholds is None:
+        thresholds = KNOWN_THRESHOLDS
+
+    terms = {}
+    seen_keys = set()
+    for registered_key, definition in thresholds.items():
+        if definition.key != registered_key:
+            raise ValueError(
+                "注册表 key 与定义不一致：{} != {}".format(registered_key, definition.key)
+            )
+        if definition.key in seen_keys:
+            raise ValueError("热更 key 重复：{}".format(definition.key))
+        seen_keys.add(definition.key)
+        if re.fullmatch(r"[A-Za-z0-9_]{1,64}", definition.key) is None:
+            raise ValueError("热更 key 不合法：{}".format(definition.key))
+
+        for term in (definition.name,) + definition.aliases:
+            if not isinstance(term, str) or not term or term != term.strip():
+                raise ValueError("中文标准名或别名不能为空且不能含首尾空白：{}".format(definition.key))
+            previous_key = terms.get(term)
+            if previous_key is not None:
+                raise ValueError(
+                    "中文标准名或别名重复：{} 同时映射到 {} 和 {}".format(
+                        term,
+                        previous_key,
+                        definition.key,
+                    )
+                )
+            terms[term] = definition.key
+    return terms
+
+
+def hotfix_key_pattern(thresholds=None):
+    """返回适用于调用合同的严格 ASCII key 正则。"""
+    if thresholds is None:
+        thresholds = KNOWN_THRESHOLDS
+    planner_term_to_key(thresholds)
+    return "(?:{})".format("|".join(re.escape(key) for key in sorted(thresholds)))
+
+
+def render_planner_catalog_section(thresholds=None):
+    """渲染给 Planner 读取的中文热更能力表，不泄露 Lua 内部结构。"""
+    if thresholds is None:
+        thresholds = KNOWN_THRESHOLDS
+    planner_term_to_key(thresholds)
+
+    lines = [
+        "#### 已登记热更阈值中文路由（自动生成）",
+        "",
+        "> 唯一来源：`tools/auto_hotfix_registry.py`。仅本表中的中文标准名和别名可以映射到对应 `-k`；不得按相近词义创建别名。",
+        "",
+    ]
+    for definition in thresholds.values():
+        aliases = ""
+        if definition.aliases:
+            aliases = "；别名：{}".format("、".join("`{}`".format(item) for item in definition.aliases))
+        lines.append(
+            "- 中文标准名：`{}`{}；执行：`-k {}`；默认 Patch 类型：`{}`".format(
+                definition.name,
+                aliases,
+                definition.key,
+                definition.default_patch_type,
+            )
+        )
+    return "\n".join(lines)
+
+
+# 模块加载即校验，阻止带歧义的中文路由进入构建或部署流程。
+PLANNER_TERM_TO_KEY = planner_term_to_key()

@@ -131,16 +131,23 @@ class MuliuCallContracts:
 class MuliuScriptCatalog:
     def __init__(self, path: str | Path) -> None:
         self._path = Path(path)
+        self._content: str | None = None
+
+    @classmethod
+    def from_text(cls, content: str) -> "MuliuScriptCatalog":
+        """Construct an in-memory catalog for deterministic artifact generation."""
+        catalog = cls("<generated-catalog>")
+        catalog._content = _require_catalog_content(content, "内存 Muliu 脚本资料")
+        return catalog
 
     def read(self) -> str:
+        if self._content is not None:
+            return self._content
         try:
             content = self._path.read_text(encoding="utf-8").strip()
         except FileNotFoundError as exc:
             raise MuliuScriptCatalogError("找不到 Muliu 脚本资料文件：{}".format(self._path)) from exc
-
-        if not content:
-            raise MuliuScriptCatalogError("Muliu 脚本资料文件为空：{}".format(self._path))
-        return content
+        return _require_catalog_content(content, "Muliu 脚本资料文件：{}".format(self._path))
 
     def read_call_contracts(self) -> MuliuCallContracts:
         return parse_call_contracts(self.read())
@@ -183,6 +190,13 @@ class MuliuScriptCatalog:
                 )
             )
         return "\n".join(lines)
+
+
+def _require_catalog_content(content: str, label: str) -> str:
+    normalized = content.strip()
+    if not normalized:
+        raise MuliuScriptCatalogError("{}为空".format(label))
+    return normalized
 
 
 def parse_call_contracts(catalog_text: str) -> MuliuCallContracts:

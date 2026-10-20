@@ -5,7 +5,8 @@ from tools.auto_hotfix_registry import (
     FIELD_NAME_TO_DEFINITION as REGISTRY_FIELD_NAME_TO_DEFINITION,
 )
 from tools.auto_hotfix_registry import KNOWN_THRESHOLDS as REGISTRY_KNOWN_THRESHOLDS
-from tools.auto_hotfix_registry import ThresholdDefinition as RegistryThresholdDefinition
+from tools.auto_hotfix_registry import PLANNER_TERM_TO_KEY, ThresholdDefinition as RegistryThresholdDefinition
+from tools.auto_hotfix_registry import hotfix_key_pattern, planner_term_to_key
 from tools.auto_hotfix_tool import (
     AutoHotfixTool,
     DEFAULT_PATCH_TYPE,
@@ -32,6 +33,7 @@ def test_known_thresholds_are_reexported_from_registry_without_changes():
             definition.default_patch_type,
             definition.is_client,
             definition.is_server,
+            definition.aliases,
         )
         for key, definition in KNOWN_THRESHOLDS.items()
     }
@@ -46,6 +48,7 @@ def test_known_thresholds_are_reexported_from_registry_without_changes():
             definition.default_patch_type,
             definition.is_client,
             definition.is_server,
+            definition.aliases,
         )
         for key, definition in REGISTRY_KNOWN_THRESHOLDS.items()
     }
@@ -67,6 +70,28 @@ def test_known_thresholds_registration():
     assert "union_impeach_union_member_min" in FIELD_NAME_TO_DEFINITION
     assert DEFAULT_PATCH_TYPE == "common"
     assert {"common", "client_avatar", "battle"}.issubset(SUPPORTED_PATCH_TYPES)
+
+
+def test_planner_routes_chinese_threshold_names_from_execution_registry():
+    assert PLANNER_TERM_TO_KEY["剧本预选州战队人数显示阈值"] == "faction_team_show_member_limit"
+    assert PLANNER_TERM_TO_KEY["战队交换人数"] == "faction_swap_team_member_min"
+    assert "faction_team_show_member_limit" in hotfix_key_pattern()
+    assert "faction_swap_team_member_min" in hotfix_key_pattern()
+
+
+def test_planner_registry_rejects_duplicate_chinese_aliases():
+    duplicate_alias = RegistryThresholdDefinition(
+        key="another_threshold",
+        name="另一个阈值",
+        table_name="test_table",
+        field_name="another_field",
+        aliases=("剧本预选州战队人数显示阈值",),
+    )
+    thresholds = dict(REGISTRY_KNOWN_THRESHOLDS)
+    thresholds[duplicate_alias.key] = duplicate_alias
+
+    with pytest.raises(ValueError, match="中文标准名或别名重复"):
+        planner_term_to_key(thresholds)
 
 
 def test_team_swap_member_threshold_registration_and_patch_content():

@@ -230,6 +230,44 @@ async def test_targeted_live_scenario_query_uses_basic_info_contract(user_text):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("user_text", "key"),
+    [
+        ("给 5010 服热更剧本预选州战队人数显示阈值为 1", "faction_team_show_member_limit"),
+        ("给 5010 服热更战队交换人数为 1", "faction_swap_team_member_min"),
+    ],
+)
+async def test_production_catalog_exposes_generated_chinese_hotfix_routes(user_text, key):
+    from pathlib import Path
+
+    catalog_path = Path(__file__).parents[1] / "config" / "muliu_script_catalog.md"
+
+    class ProductionCatalog:
+        def read(self):
+            return catalog_path.read_text(encoding="utf-8")
+
+        def read_call_contracts(self):
+            return parse_call_contracts(self.read())
+
+    response = json.dumps({
+        "kind": "operation",
+        "summary": user_text,
+        "steps": [{
+            "path": "/home/serverGeneralScript/auto_hotfix_tool.py",
+            "args": ["-s", "5010", "-k", key, "-v", "1"],
+            "description": user_text,
+        }],
+    }, ensure_ascii=False)
+    ai = FakeAIClient([response])
+    planner = MuliuPlanner(ai, ProductionCatalog(), max_steps=1)
+
+    plan = await planner.create_plan(user_text)
+
+    assert plan.steps[0].args == ["-s", "5010", "-k", key, "-v", "1"]
+    assert "HOTFIX_THRESHOLD_REGISTRY:BEGIN" in ai.prompts[0][1]
+    assert user_text.split("为")[0].split("热更")[-1] in ai.prompts[0][1]
+
+
 async def test_production_catalog_accepts_ordered_clear_then_config_plan():
     from pathlib import Path
 
