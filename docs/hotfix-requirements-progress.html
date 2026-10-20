@@ -1,0 +1,783 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>执行计划工作台</title>
+  <style>
+    /* ==================== 主题变量系统（支持深色/浅色一键切换） ==================== */
+    :root[data-theme="dark"] {
+      --bg-canvas: #090a0f;
+      --bg-dot: rgba(255, 255, 255, 0.06);
+      --bg-shell: #11131a;
+      --bg-surface: #171a24;
+      --bg-surface-hover: #1c202c;
+      --bg- spotlight: linear-gradient(135deg, rgba(59, 130, 246, 0.14) 0%, rgba(17, 19, 26, 0.95) 65%);
+
+      --border-subtle: rgba(255, 255, 255, 0.07);
+      --border-default: rgba(255, 255, 255, 0.11);
+      --border-active: #3b82f6;
+
+      --text-main: #f4f6fb;
+      --text-sub: #9ba3b8;
+      --text-muted: #5e667a;
+
+      --emerald: #10b981;
+      --emerald-soft: rgba(16, 185, 129, 0.14);
+      --blue: #3b82f6;
+      --blue-bright: #60a5fa;
+      --blue-soft: rgba(59, 130, 246, 0.16);
+      --amber: #f59e0b;
+      --amber-soft: rgba(245, 158, 11, 0.12);
+
+      --shadow-shell: 0 32px 64px -16px rgba(0, 0, 0, 0.75);
+    }
+
+    :root[data-theme="light"] {
+      --bg-canvas: #f1f5f9;
+      --bg-dot: rgba(15, 23, 42, 0.07);
+      --bg-shell: #ffffff;
+      --bg-surface: #f8fafc;
+      --bg-surface-hover: #f1f5f9;
+      --bg-spotlight: linear-gradient(135deg, rgba(37, 99, 235, 0.08) 0%, rgba(255, 255, 255, 0.98) 70%);
+
+      --border-subtle: #e2e8f0;
+      --border-default: #cbd5e1;
+      --border-active: #2563eb;
+
+      --text-main: #0f172a;
+      --text-sub: #475569;
+      --text-muted: #94a3b8;
+
+      --emerald: #059669;
+      --emerald-soft: rgba(16, 185, 129, 0.12);
+      --blue: #2563eb;
+      --blue-bright: #1d4ed8;
+      --blue-soft: rgba(37, 99, 235, 0.1);
+      --amber: #d97706;
+      --amber-soft: rgba(245, 158, 11, 0.12);
+
+      --shadow-shell: 0 20px 45px -15px rgba(15, 23, 42, 0.1);
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      min-height: 100vh;
+      background-color: var(--bg-canvas);
+      background-image: radial-gradient(var(--bg-dot) 1px, transparent 1px);
+      background-size: 20px 20px;
+      color: var(--text-main);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 32px 24px;
+      -webkit-font-smoothing: antialiased;
+      transition: background-color 0.25s ease, color 0.25s ease;
+    }
+
+    .workbench {
+      width: 100%;
+      max-width: 1180px;
+      background: var(--bg-shell);
+      border: 1px solid var(--border-default);
+      border-radius: 20px;
+      box-shadow: var(--shadow-shell);
+      overflow: hidden;
+    }
+
+    /* 顶部栏 */
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 22px 32px;
+      border-bottom: 1px solid var(--border-subtle);
+      background: var(--bg-surface);
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+
+    .topbar-left {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+
+    .project-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      padding: 5px 10px;
+      border-radius: 6px;
+      background: var(--blue-soft);
+      color: var(--blue-bright);
+    }
+
+    .topbar-title {
+      font-size: 22px;
+      font-weight: 700;
+      letter-spacing: -0.01em;
+    }
+
+    .topbar-right {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+
+    .progress-pill {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      background: var(--bg-shell);
+      border: 1px solid var(--border-subtle);
+      padding: 7px 14px;
+      border-radius: 999px;
+      font-size: 13px;
+    }
+
+    .progress-pill-label {
+      color: var(--text-sub);
+    }
+
+    .progress-pill-value {
+      font-weight: 700;
+      color: var(--text-main);
+      font-variant-numeric: tabular-nums;
+    }
+
+    .mini-bar {
+      width: 72px;
+      height: 6px;
+      background: var(--border-subtle);
+      border-radius: 999px;
+      overflow: hidden;
+    }
+
+    .mini-bar-fill {
+      height: 100%;
+      background: linear-gradient(90deg, var(--emerald), var(--blue));
+      border-radius: 999px;
+    }
+
+    .theme-btn {
+      cursor: pointer;
+      background: var(--bg-shell);
+      border: 1px solid var(--border-default);
+      color: var(--text-sub);
+      padding: 7px 12px;
+      border-radius: 8px;
+      font-size: 12.5px;
+      font-weight: 600;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      transition: all 0.15s ease;
+    }
+
+    .theme-btn:hover {
+      color: var(--text-main);
+      border-color: var(--blue);
+    }
+
+    /* 主体：左轴右台双栏架构 */
+    .workbench-body {
+      display: grid;
+      grid-template-columns: 440px 1fr;
+      min-height: 470px;
+    }
+
+    /* 左栏：垂直时间轴流水线 */
+    .timeline-pane {
+      padding: 28px 28px 28px 32px;
+      border-right: 1px solid var(--border-subtle);
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+    }
+
+    .pane-section-title {
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--text-muted);
+      margin-bottom: 18px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .timeline-list {
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .timeline-item {
+      position: relative;
+      display: flex;
+      align-items: flex-start;
+      gap: 14px;
+      padding: 13px 16px;
+      border-radius: 12px;
+      border: 1px solid transparent;
+      cursor: pointer;
+      transition: all 0.18s ease;
+    }
+
+    .timeline-item:hover {
+      background: var(--bg-surface-hover);
+    }
+
+    .timeline-item:not(:last-child)::after {
+      content: "";
+      position: absolute;
+      left: 29px;
+      top: 42px;
+      bottom: -14px;
+      width: 2px;
+      background: var(--border-subtle);
+      z-index: 1;
+    }
+
+    .timeline-item.status-done:not(:last-child)::after {
+      background: rgba(16, 185, 129, 0.35);
+    }
+
+    .node-circle {
+      position: relative;
+      z-index: 2;
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 12px;
+      font-weight: 700;
+      flex-shrink: 0;
+      margin-top: 1px;
+    }
+
+    .status-done .node-circle {
+      background: var(--emerald-soft);
+      color: var(--emerald);
+      border: 1.5px solid var(--emerald);
+    }
+
+    .status-active .node-circle {
+      background: var(--blue);
+      color: #ffffff;
+      box-shadow: 0 0 0 4px var(--blue-soft);
+    }
+
+    .status-next .node-circle {
+      background: var(--bg-surface);
+      color: var(--text-main);
+      border: 1.5px dashed var(--text-sub);
+    }
+
+    .status-pending .node-circle {
+      background: var(--bg-surface);
+      color: var(--text-muted);
+      border: 1px solid var(--border-default);
+    }
+
+    .timeline-item.status-active {
+      background: var(--bg-surface);
+      border-color: var(--border-active);
+      box-shadow: 0 8px 20px -8px rgba(59, 130, 246, 0.25);
+    }
+
+    .timeline-item.is-selected:not(.status-active) {
+      background: var(--bg-surface);
+      border-color: var(--border-default);
+    }
+
+    .timeline-item.status-pending {
+      opacity: 0.65;
+    }
+
+    .timeline-item.status-pending:hover {
+      opacity: 0.95;
+    }
+
+    .item-content {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .item-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 4px;
+    }
+
+    .item-title {
+      font-size: 15px;
+      font-weight: 700;
+      color: var(--text-main);
+      line-height: 1.3;
+    }
+
+    .item-tag {
+      font-size: 11px;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: 999px;
+      white-space: nowrap;
+    }
+
+    .status-done .item-tag {
+      background: var(--emerald-soft);
+      color: var(--emerald);
+    }
+
+    .status-active .item-tag {
+      background: var(--blue-soft);
+      color: var(--blue-bright);
+    }
+
+    .status-next .item-tag {
+      background: rgba(148, 163, 184, 0.14);
+      color: var(--text-sub);
+    }
+
+    .status-pending .item-tag {
+      color: var(--text-muted);
+    }
+
+    .item-desc {
+      font-size: 13px;
+      color: var(--text-sub);
+      line-height: 1.45;
+    }
+
+    /* 右栏：聚焦执行舱 */
+    .console-pane {
+      padding: 28px 32px;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+      background: var(--bg-shell);
+    }
+
+    .spotlight-card {
+      background: var(--bg-spotlight);
+      border: 1px solid var(--border-active);
+      border-radius: 16px;
+      padding: 24px 26px;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .spotlight-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 12px;
+    }
+
+    .spotlight-step-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12.5px;
+      font-weight: 700;
+      color: var(--blue-bright);
+    }
+
+    .pulse-ring {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--blue-bright);
+      box-shadow: 0 0 0 0 rgba(96, 165, 250, 0.7);
+      animation: pulse 1.8s infinite;
+    }
+
+    @keyframes pulse {
+      0% { box-shadow: 0 0 0 0 rgba(96, 165, 250, 0.7); }
+      70% { box-shadow: 0 0 0 7px rgba(96, 165, 250, 0); }
+      100% { box-shadow: 0 0 0 0 rgba(96, 165, 250, 0); }
+    }
+
+    .spotlight-title {
+      font-size: 22px;
+      font-weight: 800;
+      color: var(--text-main);
+      margin-bottom: 6px;
+    }
+
+    .spotlight-subtitle {
+      font-size: 14px;
+      color: var(--text-sub);
+      margin-bottom: 18px;
+    }
+
+    .command-box {
+      background: var(--bg-shell);
+      border: 1px solid var(--border-default);
+      border-left: 4px solid var(--blue);
+      border-radius: 10px;
+      padding: 14px 16px;
+    }
+
+    .command-label {
+      font-size: 11.5px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--blue-bright);
+      margin-bottom: 6px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .command-text {
+      font-size: 14.5px;
+      line-height: 1.6;
+      color: var(--text-main);
+    }
+
+    .step-chip {
+      display: inline-block;
+      background: var(--blue-soft);
+      color: var(--blue-bright);
+      font-weight: 700;
+      padding: 1px 7px;
+      border-radius: 5px;
+      font-size: 13px;
+      margin: 0 2px;
+    }
+
+    .pipeline-card {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+      border-radius: 14px;
+      padding: 18px 20px;
+    }
+
+    .pipeline-Flow {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    .pipeline-node {
+      position: relative;
+      background: var(--bg-shell);
+      border: 1px solid var(--border-subtle);
+      border-radius: 10px;
+      padding: 10px 10px;
+      text-align: center;
+    }
+
+    .pipeline-node-num {
+      font-size: 10px;
+      font-weight: 700;
+      color: var(--text-muted);
+      margin-bottom: 4px;
+      display: block;
+    }
+
+    .pipeline-node-name {
+      font-size: 12.5px;
+      font-weight: 600;
+      color: var(--text-main);
+      line-height: 1.3;
+    }
+
+    .bottom-grid {
+      display: grid;
+      grid-template-columns: 1fr 1.25fr;
+      gap: 14px;
+    }
+
+    .info-box {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+      border-radius: 12px;
+      padding: 14px 16px;
+    }
+
+    .info-box.guardrail {
+      background: var(--amber-soft);
+      border-color: rgba(245, 158, 11, 0.28);
+    }
+
+    .info-box-header {
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--text-sub);
+      margin-bottom: 6px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .info-box.guardrail .info-box-header {
+      color: var(--amber);
+    }
+
+    .info-box-body {
+      font-size: 13px;
+      line-height: 1.5;
+      color: var(--text-main);
+    }
+
+    @media (max-width: 960px) {
+      .workbench-body {
+        grid-template-columns: 1fr;
+      }
+      .timeline-pane {
+        border-right: none;
+        border-bottom: 1px solid var(--border-subtle);
+      }
+      .pipeline-Flow {
+        grid-template-columns: repeat(2, 1fr);
+      }
+      .bottom-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+
+  <main class="workbench" id="app"></main>
+
+  <script>
+    /**
+     * ============================================================
+     * 数据配置区（AI 每次只需修改此 PLAN_DATA 对象即可更新视图）
+     * status 可选值: "done" | "active" | "next" | "pending"
+     * ============================================================
+     */
+    const PLAN_DATA = {
+      projectTag: "HOTFIX PIPELINE",
+      title: "测试服热更需求推进",
+      goalSteps: [
+        "Excel 全部条目",
+        "中文识别",
+        "受控 key",
+        "人工确认",
+        "可执行 Patch"
+      ],
+      steps: [
+        {
+          id: "01",
+          status: "done",
+          statusText: "已完成",
+          title: "需求范围确认",
+          desc: "全部 Excel 条目均已纳入范围内"
+        },
+        {
+          id: "02",
+          status: "done",
+          statusText: "已完成",
+          title: "恢复此前可用链路",
+          desc: "9 个已跟踪文件已恢复至 Git HEAD"
+        },
+        {
+          id: "03",
+          status: "done",
+          statusText: "已完成",
+          title: "霸业名额 Patch 链路触达确认",
+          desc: "已确认生成 / 挂载；游戏内实际效果尚未验证"
+        },
+        {
+          id: "04",
+          status: "done",
+          statusText: "已完成",
+          title: "原样迁移现有脚本配置",
+          desc: "已有映射已迁入独立注册表；本地测试通过"
+        },
+        {
+          id: "05",
+          status: "done",
+          statusText: "已完成",
+          title: "人工回归验证迁移",
+          desc: "已确认迁移未影响当前 Patch 链路"
+        },
+        {
+          id: "06",
+          status: "active",
+          statusText: "当前步骤",
+          title: "按原始 Excel 扩展新字段",
+          desc: "仅处理 Excel 有、当前注册表没有的配置和专用模板"
+        },
+        {
+          id: "07",
+          status: "next",
+          statusText: "下一步",
+          title: "游戏内生效与全量验收",
+          desc: "逐条验证真实效果、确认卡与审计记录"
+        }
+      ],
+      currentAction: {
+        label: "现在要做",
+        html: `执行 <span class="step-chip">STEP 06</span>：以原始 Excel 为唯一字段依据，盘点当前注册表缺少的条目，并按数据形态逐条实现受控模板与本地测试。每条通过 Patch 链路后，再进入 <span class="step-chip">STEP 07</span> 游戏内效果验证。`
+      },
+      principle: "某一条资料不足，只阻塞那一条，不能关闭其他热更能力。"
+    };
+
+    let selectedStepId = null;
+
+    function getNodeSymbol(step) {
+      if (step.status === "done") return "✓";
+      if (step.status === "active") return "●";
+      return step.id;
+    }
+
+    function toggleTheme() {
+      const root = document.documentElement;
+      const next = root.getAttribute("data-theme") === "dark" ? "light" : "dark";
+      root.setAttribute("data-theme", next);
+      render();
+    }
+
+    function selectStep(id) {
+      selectedStepId = id;
+      render();
+    }
+
+    function render() {
+      const data = PLAN_DATA;
+      const doneCount = data.steps.filter(s => s.status === "done").length;
+      const activeStep = data.steps.find(s => s.status === "active") || data.steps[0];
+      const nextStep = data.steps.find(s => s.status === "next");
+      const focusedStep = data.steps.find(s => s.id === selectedStepId) || activeStep;
+      const progressPercent = Math.round(((doneCount + 0.5) / data.steps.length) * 100);
+      const isDark = document.documentElement.getAttribute("data-theme") === "dark";
+
+      const timelineHtml = data.steps.map(step => {
+        const isSelected = focusedStep.id === step.id;
+        return `
+          <div class="timeline-item status-${step.status} ${isSelected ? 'is-selected' : ''}" onclick="selectStep('${step.id}')">
+            <div class="node-circle">${getNodeSymbol(step)}</div>
+            <div class="item-content">
+              <div class="item-header">
+                <span class="item-title">STEP ${step.id} · ${step.title}</span>
+                <span class="item-tag">${step.statusText}</span>
+              </div>
+              <p class="item-desc">${step.desc}</p>
+            </div>
+          </div>
+        `;
+      }).join("");
+
+      const pipelineHtml = data.goalSteps.map((node, i) => `
+        <div class="pipeline-node">
+          <span class="pipeline-node-num">STAGE 0${i + 1}</span>
+          <div class="pipeline-node-name">${node}</div>
+        </div>
+      `).join("");
+
+      document.getElementById("app").innerHTML = `
+        <header class="topbar">
+          <div class="topbar-left">
+            <span class="project-badge">⚡ ${data.projectTag}</span>
+            <h1 class="topbar-title">${data.title}</h1>
+          </div>
+          <div class="topbar-right">
+            <div class="progress-pill">
+              <span class="progress-pill-label">推进进度</span>
+              <div class="mini-bar">
+                <div class="mini-bar-fill" style="width: ${progressPercent}%"></div>
+              </div>
+              <span class="progress-pill-value">${doneCount}/${data.steps.length} (${progressPercent}%)</span>
+            </div>
+            <button class="theme-btn" onclick="toggleTheme()">
+              ${isDark ? "☀️ 切换浅色" : "🌙 切换深色"}
+            </button>
+          </div>
+        </header>
+
+        <div class="workbench-body">
+          <aside class="timeline-pane">
+            <div>
+              <div class="pane-section-title">
+                <span>执行步骤时间轴（点击可查看）</span>
+                <span>共 ${data.steps.length} 步</span>
+              </div>
+              <div class="timeline-list">
+                ${timelineHtml}
+              </div>
+            </div>
+          </aside>
+
+          <section class="console-pane">
+            <div class="spotlight-card">
+              <div class="spotlight-top">
+                <span class="spotlight-step-badge">
+                  <span class="pulse-ring"></span>
+                  当前聚焦：STEP ${focusedStep.id}（${focusedStep.statusText}）
+                </span>
+              </div>
+              <h2 class="spotlight-title">${focusedStep.title}</h2>
+              <p class="spotlight-subtitle">状态说明：${focusedStep.desc}</p>
+
+              <div class="command-box">
+                <div class="command-label">
+                  <span>▶ ${data.currentAction.label}</span>
+                </div>
+                <div class="command-text">
+                  ${data.currentAction.html}
+                </div>
+              </div>
+            </div>
+
+            <div class="pipeline-card">
+              <div class="pane-section-title" style="margin-bottom: 0;">
+                <span>目标转化链路（Target Data Pipeline）</span>
+                <span>5 阶段闭环</span>
+              </div>
+              <div class="pipeline-Flow">
+                ${pipelineHtml}
+              </div>
+            </div>
+
+            <div class="bottom-grid">
+              <div class="info-box">
+                <div class="info-box-header">
+                  <span>⏭ 下一步衔接预览</span>
+                </div>
+                <div class="info-box-body">
+                  ${nextStep ? `<strong>STEP ${nextStep.id} ${nextStep.title}</strong>：${nextStep.desc}` : "全部步骤已进入收尾阶段"}
+                </div>
+              </div>
+
+              <div class="info-box guardrail">
+                <div class="info-box-header">
+                  <span>🛡️ 固定原则（防阻塞红线）</span>
+                </div>
+                <div class="info-box-body">
+                  ${data.principle}
+                </div>
+              </div>
+            </div>
+          </section>
+        </div>
+      `;
+    }
+
+    render();
+  </script>
+</body>
+</html>

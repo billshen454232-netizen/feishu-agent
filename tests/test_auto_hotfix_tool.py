@@ -69,6 +69,25 @@ def test_known_thresholds_registration():
     assert {"common", "client_avatar", "battle"}.issubset(SUPPORTED_PATCH_TYPES)
 
 
+def test_team_swap_member_threshold_registration_and_patch_content():
+    definition = KNOWN_THRESHOLDS["faction_swap_team_member_min"]
+    assert definition.table_name == "season_process_season_config"
+    assert definition.field_name == "faction_swap_team_member_num_min"
+    assert FIELD_NAME_TO_DEFINITION[definition.field_name] is definition
+
+    tool = AutoHotfixTool(dry_run=True)
+    lua_code = tool.generate_lua_patch_content(
+        table_name=definition.table_name,
+        field_name=definition.field_name,
+        value="1",
+        scenarios=(),
+    )
+    assert (
+        "season_process_season_config[ [=[faction_swap_team_member_num_min]=] ].content = [=[1]=]"
+        in lua_code
+    )
+
+
 def test_generate_lua_patch_content_with_specific_scenario():
     tool = AutoHotfixTool(dry_run=True)
     lua_code = tool.generate_lua_patch_content(

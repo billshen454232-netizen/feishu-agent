@@ -156,6 +156,13 @@ KNOWN_THRESHOLDS = {
         field_name="faction_team_show_member_num_limit",
         description="预选州阶段可显示的战队最低人数（原值50）",
     ),
+    "faction_swap_team_member_min": ThresholdDefinition(
+        key="faction_swap_team_member_min",
+        name="战队交换人数",
+        table_name="season_process_season_config",
+        field_name="faction_swap_team_member_num_min",
+        description="战队交换所需的最低成员人数（本地配置副本原值150）",
+    ),
     "team_reward_member_count": ThresholdDefinition(
         key="team_reward_member_count",
         name="跨赛季组队成团人数阈值",
