@@ -7,7 +7,6 @@ import secrets
 import time
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
 from typing import Any
 
 from .config import AppConfig
@@ -27,6 +26,7 @@ from .operation_message import (
     format_rejection,
     mask_sensitive_operation_data,
 )
+from .server_environments import ServerEnvironments, ServerEnvironmentsError
 
 logger = logging.getLogger(__name__)
 
@@ -843,46 +843,18 @@ def _build_clean_execution_data(result: MuliuExecutionResult, *, max_chars: int)
 
 
 def _load_environment_context(path: str) -> str:
-    """Load only human-meaningful server ownership facts, never host connection data."""
+    """Load only validated environment ownership facts, never connection data."""
     try:
-        raw = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        environments = ServerEnvironments.load(path)
+    except ServerEnvironmentsError:
         logger.warning("execution interpretation environment context unavailable", exc_info=True)
         return "（环境资产配置当前不可用；不要据此推断环境归属。）"
 
-    if not isinstance(raw, dict):
-        return "（环境资产配置格式无效；不要据此推断环境归属。）"
-    regions = raw.get("regions", {})
-    groups = raw.get("alias_groups", {})
-    if not isinstance(regions, dict) or not isinstance(groups, dict):
-        return "（环境资产配置格式无效；不要据此推断环境归属。）"
-
-    lines: list[str] = []
-    for region_key, region in regions.items():
-        if not isinstance(region_key, str) or not isinstance(region, dict):
-            continue
-        name = region.get("name")
-        environments = region.get("environments")
-        if not isinstance(name, str) or not isinstance(environments, dict):
-            continue
-        entries = []
-        for environment, server_ids in environments.items():
-            if isinstance(environment, str) and isinstance(server_ids, list):
-                safe_ids = [str(server_id) for server_id in server_ids if str(server_id).isdigit()]
-                if safe_ids:
-                    entries.append("{}：{}".format(environment, "、".join(safe_ids)))
-        if entries:
-            lines.append("{}（{}）：{}".format(name, region_key, "；".join(entries)))
-
-    for group in groups.values():
-        if not isinstance(group, dict):
-            continue
-        name = group.get("name")
-        server_ids = group.get("servers")
-        if isinstance(name, str) and isinstance(server_ids, list):
-            safe_ids = [str(server_id) for server_id in server_ids if str(server_id).isdigit()]
-            if safe_ids:
-                lines.append("{}：{}".format(name, "、".join(safe_ids)))
+    lines = list(environments.region_context_lines())
+    lines.extend(
+        "{}：{}".format(mapping.name, "、".join(mapping.server_ids))
+        for mapping in environments.group_mappings()
+    )
     return mask_sensitive_operation_data("\n".join(lines) or "（未加载到环境资产。）")
 
 

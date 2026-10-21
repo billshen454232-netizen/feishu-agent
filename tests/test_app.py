@@ -159,7 +159,7 @@ def test_gateway_worker_result_route_persists_and_interprets_patch_query(monkeyp
     env_path.write_text(
         json.dumps({
             "regions": {"hmt": {"name": "港澳台繁体", "environments": {"weekly": ["5010"]}}},
-            "alias_groups": {},
+            "groups": {},
         }),
         encoding="utf-8",
     )

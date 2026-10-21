@@ -209,7 +209,7 @@ def _successful_patch_result(log):
 async def test_interpret_execution_result_sends_only_cleaned_redacted_context(tmp_path):
     environment_path = tmp_path / "server_environments.json"
     environment_path.write_text(
-        '{"regions":{"hmt":{"name":"港澳台繁体","environments":{"weekly":["5010"]}}},"alias_groups":{}}',
+        '{"regions":{"hmt":{"name":"港澳台繁体","environments":{"weekly":["5010"]}}},"groups":{}}',
         encoding="utf-8",
     )
     store = MessageJobStore(tmp_path / "jobs.sqlite3")
