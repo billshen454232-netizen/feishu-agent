@@ -215,6 +215,24 @@ def test_confirmation_card_uses_only_pending_plan_identity_in_button_values():
     assert "5000" not in str(confirm_value)
 
 
+def test_confirmation_card_displays_derived_route_without_putting_it_in_button_values():
+    plan = MuliuPlan(
+        summary="查询 2003 服基础信息",
+        steps=[MuliuStep("/home/serverGeneralScript/basic_info.sh", ["2003"], "查询基础信息")],
+    )
+
+    card = build_plan_confirmation_card(
+        plan,
+        request_message_id="om_request",
+        confirmation_token="ABC123",
+        route_label="国服",
+        route_identifier="route-cn",
+    )
+
+    assert "目标环境：国服\n受控路由：route-cn" in str(card["elements"])
+    assert "route-cn" not in str(card["elements"][-1]["actions"])
+
+
 def test_execution_status_card_has_no_action_controls():
     card = build_execution_status_card(
         MuliuExecutionResult(summary="启动 5000 服", step_results=[])

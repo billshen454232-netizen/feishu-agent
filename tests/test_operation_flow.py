@@ -32,7 +32,8 @@ from src.muliu_firewall import MuliuFirewall
 from src.muliu_intent import MuliuIntentRouter
 from src.muliu_plan import MuliuPlan, MuliuPlanKind, MuliuStep
 from src.muliu_planner import MuliuPlanGeneration, MuliuPlanGenerationError
-from src.muliu_script_catalog import parse_call_contracts
+from src.muliu_routing import MuliuPlanRouteResolver
+from src.muliu_script_catalog import MuliuScriptCatalog, parse_call_contracts
 
 
 class FakePlanner:
@@ -276,6 +277,15 @@ def production_firewall(config):
     )
 
 
+def production_route_resolver():
+    repository_root = Path(__file__).parents[1]
+    catalog = MuliuScriptCatalog(repository_root / "config" / "muliu_script_catalog.md")
+    return MuliuPlanRouteResolver(
+        str(repository_root / "config" / "server_environments.json"),
+        catalog.read_call_contracts(),
+    )
+
+
 @pytest.mark.asyncio
 async def test_request_creates_plan_and_waits_for_group_confirmation(tmp_path):
     config = make_config()
@@ -293,6 +303,7 @@ async def test_request_creates_plan_and_waits_for_group_confirmation(tmp_path):
         feishu_client=feishu,
         operation_planner=planner,
         muliu_firewall=production_firewall(config),
+        route_resolver=production_route_resolver(),
         muliu_executor=executor,
     )
 
@@ -336,6 +347,7 @@ async def test_registered_chinese_hotfix_routes_wait_for_card_confirmation(tmp_p
         feishu_client=feishu,
         operation_planner=FakePlanner(make_hotfix_plan(key, request.split("热更", 1)[1].rsplit("为", 1)[0])),
         muliu_firewall=production_firewall(config),
+        route_resolver=production_route_resolver(),
         muliu_executor=executor,
     )
 
@@ -366,6 +378,7 @@ async def test_shutdown_request_waits_for_confirmation_without_executing(tmp_pat
         feishu_client=feishu,
         operation_planner=FakePlanner(make_shutdown_plan()),
         muliu_firewall=production_firewall(config),
+        route_resolver=production_route_resolver(),
         muliu_executor=executor,
     )
 
@@ -408,6 +421,7 @@ async def test_ordered_registered_operations_wait_for_one_confirmation(tmp_path)
         feishu_client=feishu,
         operation_planner=FakePlanner(plan),
         muliu_firewall=production_firewall(config),
+        route_resolver=production_route_resolver(),
         muliu_executor=executor,
     )
 
@@ -446,6 +460,7 @@ async def test_operation_plan_is_written_to_human_readable_log(tmp_path):
         feishu_client=feishu,
         operation_planner=planner,
         muliu_firewall=production_firewall(config),
+        route_resolver=production_route_resolver(),
         conversation_log=ConversationLog(log_directory),
     )
 
@@ -474,6 +489,7 @@ async def test_log_write_failure_does_not_fail_operation_reply(tmp_path):
         feishu_client=feishu,
         operation_planner=FakePlanner(make_plan()),
         muliu_firewall=production_firewall(config),
+        route_resolver=production_route_resolver(),
         conversation_log=FailingConversationLog(),
     )
 
@@ -499,6 +515,7 @@ async def test_rejected_plan_writes_raw_ai_outputs_and_validation_errors(tmp_pat
         feishu_client=feishu,
         operation_planner=TraceFailingPlanner(),
         muliu_firewall=production_firewall(config),
+        route_resolver=production_route_resolver(),
         conversation_log=ConversationLog(log_directory),
     )
 
@@ -535,6 +552,7 @@ async def test_registry_knowledge_decision_answers_without_confirmation(tmp_path
         feishu_client=feishu,
         operation_planner=planner,
         muliu_firewall=production_firewall(config),
+        route_resolver=production_route_resolver(),
         script_knowledge_base=script_knowledge,
         script_catalog=FakeCatalog(),
         intent_router=MuliuIntentRouter(),
@@ -571,6 +589,7 @@ async def test_registry_knowledge_decision_writes_sources_and_stages_to_log(tmp_
         feishu_client=feishu,
         operation_planner=FakeTracePlanner(make_knowledge_plan()),
         muliu_firewall=production_firewall(config),
+        route_resolver=production_route_resolver(),
         script_knowledge_base=FakeScriptKnowledgeBase(),
         script_catalog=FakeCatalog(),
         intent_router=MuliuIntentRouter(),
@@ -607,6 +626,7 @@ async def test_targeted_request_bypasses_script_knowledge_and_creates_plan(tmp_p
         feishu_client=feishu,
         operation_planner=planner,
         muliu_firewall=production_firewall(config),
+        route_resolver=production_route_resolver(),
         script_knowledge_base=script_knowledge,
         intent_router=MuliuIntentRouter(),
     )
@@ -641,6 +661,7 @@ async def test_targeted_live_scenario_question_bypasses_knowledge_and_waits_for_
         feishu_client=feishu,
         operation_planner=planner,
         muliu_firewall=production_firewall(config),
+        route_resolver=production_route_resolver(),
         script_knowledge_base=script_knowledge,
         intent_router=MuliuIntentRouter(),
     )
@@ -688,6 +709,7 @@ async def test_non_operation_decisions_do_not_create_confirmation_tokens(tmp_pat
         feishu_client=feishu,
         operation_planner=FakeTracePlanner(decision),
         muliu_firewall=production_firewall(config),
+        route_resolver=production_route_resolver(),
     )
 
     await processor.process_one("om_request")
@@ -714,6 +736,7 @@ async def test_private_operation_is_rejected_without_confirmation_token(tmp_path
         feishu_client=feishu,
         operation_planner=FakeTracePlanner(make_plan()),
         muliu_firewall=production_firewall(config),
+        route_resolver=production_route_resolver(),
     )
 
     await processor.process_one("om_private")
@@ -740,6 +763,7 @@ async def test_unknown_legacy_chat_type_is_rejected_without_confirmation_token(t
         feishu_client=feishu,
         operation_planner=FakeTracePlanner(make_plan()),
         muliu_firewall=production_firewall(config),
+        route_resolver=production_route_resolver(),
     )
 
     await processor.process_one("om_legacy")
@@ -855,6 +879,7 @@ async def test_text_confirmation_in_gateway_mode_acknowledges_queued_worker_plan
         confirmation_message_id="om_card",
         confirmation_token="ABC123",
         confirmation_method="text",
+        route_region="overseas",
     )
     feishu = FakeFeishuClient()
     processor = MessageJobProcessor(
@@ -869,9 +894,49 @@ async def test_text_confirmation_in_gateway_mode_acknowledges_queued_worker_plan
     assert await processor.process_confirmation("oc_group", "ABC123", "om_confirm") is True
 
     assert store.get("om_request").status == "queued_for_worker"
+    assert store.get("om_request").route_region == "overseas"
     assert len(feishu.replies) == 1
     assert feishu.replies[0][0] == "om_confirm"
     assert "已排入内网 Muliu Worker 队列" in feishu.replies[0][1]
+
+
+@pytest.mark.asyncio
+async def test_gateway_card_confirmation_with_missing_route_is_not_reported_as_submitted(tmp_path):
+    config = make_config(runtime=RuntimeConfig(role="gateway", worker_token="worker-token"))
+    store = MessageJobStore(tmp_path / "jobs.sqlite3")
+    store.initialize()
+    plan = make_plan()
+    store.create_if_new("om_request", "evt", "oc_group", "ou_requester", "查询 6001 服", chat_type="group")
+    store.mark_awaiting_confirmation(
+        "om_request",
+        plan_json=_plan_to_json(plan),
+        confirmation_message_id="om_card",
+        confirmation_token="ABC123",
+        confirmation_method="card",
+    )
+    feishu = FakeFeishuClient()
+    processor = MessageJobProcessor(
+        config,
+        store,
+        ConversationStore(4),
+        ai_client=None,
+        feishu_client=feishu,
+        muliu_executor=None,
+    )
+
+    card = await processor.process_card_action(
+        action="confirm_operation",
+        request_message_id="om_request",
+        confirmation_message_id="om_card",
+        chat_id="oc_group",
+        user_id="ou_requester",
+        confirmation_token="ABC123",
+    )
+
+    assert store.get("om_request").status == "failed"
+    assert card["header"]["title"]["content"] == "测试服操作未提交"
+    assert card["header"]["template"] == "red"
+    assert "未进入内网 Worker 队列" in str(card)
 
 
 @pytest.mark.asyncio
@@ -1195,6 +1260,7 @@ async def test_batch_environment_version_query_passes_firewall_and_waits_for_con
         feishu_client=feishu,
         operation_planner=FakePlanner(batch_plan),
         muliu_firewall=production_firewall(config),
+        route_resolver=production_route_resolver(),
         muliu_executor=executor,
     )
 

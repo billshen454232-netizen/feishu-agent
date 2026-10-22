@@ -100,6 +100,13 @@ def test_contract_rejects_invalid_server_id(server_id):
         contracts.validate(make_plan("/home/serverGeneralScript/basic_info.sh", [server_id]))
 
 
+def test_contract_extracts_only_contract_declared_target_server_ids():
+    contracts = parse_call_contracts(CATALOG)
+    plan = make_plan("/home/serverGeneralScript/cc_patch.py", ["-s", "6001", "-ck"])
+
+    assert contracts.extract_server_ids(plan) == ("6001",)
+
+
 def test_contract_rejects_multiple_steps_over_catalog_limit():
     contracts = parse_call_contracts(CATALOG)
     plan = MuliuPlan(
@@ -205,6 +212,17 @@ def test_production_catalog_accepts_every_registered_operation_shape(path, args)
     contracts = parse_call_contracts(catalog_path.read_text(encoding="utf-8"))
 
     contracts.validate(make_plan(path, args))
+
+
+def test_production_catalog_extracts_batch_server_ids_without_using_label_numbers():
+    catalog_path = Path(__file__).parents[1] / "config" / "muliu_script_catalog.md"
+    contracts = parse_call_contracts(catalog_path.read_text(encoding="utf-8"))
+    plan = make_plan(
+        "/home/serverGeneralScript/batch_server_query.py",
+        ["--servers", "5000,5001,6000,6001", "--label", "2026 年海外 DEV"],
+    )
+
+    assert contracts.extract_server_ids(plan) == ("5000", "5001", "6000", "6001")
 
 
 def test_production_catalog_exposes_database_scripts_as_registered_contracts():

@@ -17,6 +17,7 @@ from .muliu_executor import MuliuExecutionError, MuliuExecutionResult, MuliuSubm
 from .muliu_firewall import MuliuFirewallError
 from .muliu_plan import MuliuPlan, MuliuPlanError, MuliuPlanKind, parse_plan
 from .muliu_planner import MuliuPlanGeneration, MuliuPlanGenerationError
+from .muliu_routing import MuliuPlanRouteResolver, MuliuRouteSnapshot, MuliuRoutingError
 from .operation_message import (
     build_execution_status_card,
     build_operation_status_card,
@@ -88,6 +89,7 @@ class MessageJobProcessor:
         operation_planner: Any | None = None,
         muliu_firewall: Any | None = None,
         muliu_executor: Any | None = None,
+        route_resolver: MuliuPlanRouteResolver | None = None,
         script_knowledge_base: Any | None = None,
         script_catalog: Any | None = None,
         intent_router: Any | None = None,
@@ -103,6 +105,7 @@ class MessageJobProcessor:
         self._operation_planner = operation_planner
         self._muliu_firewall = muliu_firewall
         self._muliu_executor = muliu_executor
+        self._route_resolver = route_resolver
         self._script_knowledge_base = script_knowledge_base
         self._script_catalog = script_catalog
         # Retained as an optional observability hint. It must never choose the
@@ -209,11 +212,14 @@ class MessageJobProcessor:
                         self._append_conversation_log(job, "operation_rejected", reply, generation=generation)
                     else:
                         self._muliu_firewall.validate(plan)
+                        route_snapshot = self._resolve_route_snapshot(plan)
                         confirmation_token = self._new_confirmation_token()
                         card = build_plan_confirmation_card(
                             plan,
                             request_message_id=message_id,
                             confirmation_token=confirmation_token,
+                            route_label=route_snapshot.label,
+                            route_identifier=route_snapshot.identifier,
                         )
                         reply_started = time.perf_counter()
                         confirmation_message_id = await self._feishu_client.reply_card(message_id, card)
@@ -224,6 +230,7 @@ class MessageJobProcessor:
                             confirmation_message_id=confirmation_message_id,
                             confirmation_token=confirmation_token,
                             confirmation_method="card",
+                            route_region=route_snapshot.region,
                         )
                         self._append_conversation_log(
                             job,
@@ -235,7 +242,7 @@ class MessageJobProcessor:
                     reply = format_rejection(str(exc))
                     await self._reply_and_finish(message_id, reply)
                     self._append_conversation_log(job, "operation_rejected", reply, generation=exc)
-                except (MuliuPlanError, MuliuFirewallError) as exc:
+                except (MuliuPlanError, MuliuFirewallError, MuliuRoutingError) as exc:
                     reply = format_rejection(str(exc))
                     await self._reply_and_finish(message_id, reply)
                     self._append_conversation_log(job, "operation_rejected", reply, generation=generation)
@@ -340,10 +347,17 @@ class MessageJobProcessor:
         )
         if pending_job is None:
             return None
-        await self._start_claimed_confirmation(
+        accepted = await self._start_claimed_confirmation(
             pending_job,
             pending_job.confirmation_message_id,
         )
+        if not accepted:
+            return build_operation_status_card(
+                "测试服操作未提交",
+                pending_job.text,
+                "已拒绝该已确认计划，未进入内网 Worker 队列。",
+                template="red",
+            )
         return build_operation_status_card(
             "测试服操作已提交",
             pending_job.text,
@@ -355,7 +369,7 @@ class MessageJobProcessor:
             template="blue",
         )
 
-    async def _start_claimed_confirmation(self, pending_job: Any, reply_message_id: str) -> None:
+    async def _start_claimed_confirmation(self, pending_job: Any, reply_message_id: str) -> bool:
         """Parse the stored plan and launch it after an atomic confirmation claim."""
         try:
             plan = parse_plan(pending_job.plan_json, max_steps=self._config.muliu.max_steps)
@@ -375,9 +389,25 @@ class MessageJobProcessor:
                 reply,
                 status_card=build_execution_status_card(result),
             )
-            return
+            return False
 
         if self._config.runtime.role == "gateway":
+            if pending_job.route_region not in {"cn", "overseas"}:
+                error = "已确认计划缺少受控路由分类，不能进入内网 Worker 队列"
+                result = MuliuExecutionResult(
+                    summary=plan.summary,
+                    step_results=[],
+                    failed_step_number=1,
+                    failure_reason=error,
+                )
+                self._store.mark_failed(pending_job.message_id, error)
+                await self.deliver_execution_result(
+                    pending_job,
+                    reply_message_id,
+                    format_rejection(error),
+                    status_card=build_execution_status_card(result),
+                )
+                return False
             if not self._store.queue_for_worker(pending_job.message_id):
                 error = "确认计划无法进入内网 Worker 队列"
                 result = MuliuExecutionResult(
@@ -393,7 +423,8 @@ class MessageJobProcessor:
                     format_rejection(error),
                     status_card=build_execution_status_card(result),
                 )
-            return
+                return False
+            return True
 
         if self._muliu_executor is None:
             error = "Muliu 执行器尚未初始化"
@@ -410,12 +441,13 @@ class MessageJobProcessor:
                 format_rejection(error),
                 status_card=build_execution_status_card(result),
             )
-            return
+            return False
 
         self._store.mark_submission_in_progress(pending_job.message_id)
         task = asyncio.create_task(self._execute_confirmed_plan(pending_job, plan, reply_message_id))
         self._operation_tasks.add(task)
         task.add_done_callback(self._operation_tasks.discard)
+        return True
 
     async def _execute_confirmed_plan(self, pending_job: Any, plan: MuliuPlan, reply_message_id: str) -> None:
         """Wait for one Task 89 operation without blocking unrelated Feishu messages."""
@@ -635,6 +667,11 @@ class MessageJobProcessor:
             reply,
             tuple(source_paths),
         )
+
+    def _resolve_route_snapshot(self, plan: MuliuPlan) -> MuliuRouteSnapshot:
+        if self._route_resolver is None:
+            raise MuliuRoutingError("受控路由解析器尚未初始化")
+        return self._route_resolver.resolve(plan)
 
     def _capability_context(self) -> str:
         read_capability_context = getattr(self._script_catalog, "read_capability_context", None)

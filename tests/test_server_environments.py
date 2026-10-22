@@ -25,6 +25,15 @@ def test_checked_in_environment_registry_derives_global_and_overseas_dev_once():
     assert overseas_dev.server_ids == ("5000", "5001", "5500", "6000", "6001", "7001", "7002")
 
 
+def test_environment_registry_derives_closed_worker_route_from_registered_region():
+    environments = ServerEnvironments.load(ENVIRONMENT_PATH)
+
+    assert environments.route_region_for_server_ids(("2003",)) == "cn"
+    assert environments.route_region_for_server_ids(("5500", "6001")) == "overseas"
+    with pytest.raises(ServerEnvironmentsError, match="不能同时包含国服和海外服"):
+        environments.route_region_for_server_ids(("2003", "5500"))
+
+
 def test_environment_registry_rejects_duplicate_server_membership():
     raw = json.loads(ENVIRONMENT_PATH.read_text(encoding="utf-8"))
     raw["regions"]["global"]["environments"]["dev"].append("5000")

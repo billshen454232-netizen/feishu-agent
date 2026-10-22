@@ -227,6 +227,7 @@ def _queue_confirmed_worker_job(store, message_id, now=1000):
         ),
         confirmation_message_id="om_card_{}".format(message_id),
         confirmation_token="ABC123",
+        route_region="overseas",
         now=now,
     )
     claimed = store.claim_card_confirmation(
@@ -240,6 +241,42 @@ def _queue_confirmed_worker_job(store, message_id, now=1000):
     )
     assert claimed is not None
     assert store.queue_for_worker(message_id, now=now + 2)
+
+
+def test_worker_queue_rejects_confirmed_job_without_valid_route_region(tmp_path):
+    store = MessageJobStore(tmp_path / "jobs.sqlite3")
+    store.initialize()
+    store.create_if_new("missing-route", "evt", "oc", "ou", "查询", now=1000)
+    store.mark_awaiting_confirmation(
+        "missing-route",
+        plan_json='{"kind":"operation","summary":"查询","steps":[]}',
+        confirmation_message_id="om_card",
+        confirmation_token="ABC123",
+        now=1001,
+    )
+    store.claim_card_confirmation("missing-route", "om_card", "oc", "ou", "ABC123", 600, now=1002)
+
+    assert store.queue_for_worker("missing-route", now=1003) is False
+    assert store.get("missing-route").status == "confirmed"
+
+
+def test_confirmed_worker_route_region_persists_with_the_job(tmp_path):
+    store = MessageJobStore(tmp_path / "jobs.sqlite3")
+    store.initialize()
+    store.create_if_new("route", "evt_route", "oc", "ou", "查询 2003 服", now=1000)
+    store.mark_awaiting_confirmation(
+        "route",
+        plan_json='{"kind":"operation","summary":"查询","steps":[]}',
+        confirmation_message_id="om_card_route",
+        confirmation_token="ABC123",
+        route_region="cn",
+        now=1001,
+    )
+
+    job = store.get("route")
+
+    assert job is not None
+    assert job.route_region == "cn"
 
 
 def test_worker_claim_is_globally_serialized_and_owned_by_one_worker(tmp_path):
@@ -257,6 +294,7 @@ def test_worker_claim_is_globally_serialized_and_owned_by_one_worker(tmp_path):
 
     assert first is not None
     assert first.message_id == "first"
+    assert first.route_region == "overseas"
     assert blocked is None
     assert wrong_heartbeat is False
     assert wrong_result is None

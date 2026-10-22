@@ -127,6 +127,38 @@ class MuliuCallContracts:
                 )
         return MuliuRunnerManifest(contracts=self.contracts)
 
+    def extract_server_ids(self, plan: MuliuPlan) -> tuple[str, ...]:
+        """Extract only contract-declared target-server values from an exact plan.
+
+        This deliberately ignores free-form descriptions and ordinary numeric
+        arguments such as scenario, season, account, user id, or threshold value.
+        Any call shape that does not declare a target server is not routable.
+        """
+        server_ids: list[str] = []
+        for step_number, step in enumerate(plan.steps, start=1):
+            matching_contracts = [contract for contract in self.contracts if contract.matches(step)]
+            if len(matching_contracts) != 1:
+                raise MuliuCallContractError(
+                    "步骤 {} 无法唯一匹配调用合同，不能选择 Worker 路由".format(step_number)
+                )
+            contract = matching_contracts[0]
+            step_server_ids: list[str] = []
+            for actual_argument, template_argument in zip(step.args, contract.args):
+                variable_match = _VARIABLE_TEMPLATE_PATTERN.fullmatch(template_argument)
+                if variable_match is None:
+                    continue
+                variable_name = variable_match.group(1)
+                if variable_name == "server_id" or variable_name.startswith("server_id_"):
+                    step_server_ids.append(actual_argument)
+                elif variable_name == "server_ids":
+                    step_server_ids.extend(server_id.strip() for server_id in actual_argument.split(","))
+            if not step_server_ids or any(not server_id for server_id in step_server_ids):
+                raise MuliuCallContractError(
+                    "步骤 {} 的调用合同未声明有效目标服号，不能选择 Worker 路由".format(step_number)
+                )
+            server_ids.extend(step_server_ids)
+        return tuple(server_ids)
+
 
 class MuliuScriptCatalog:
     def __init__(self, path: str | Path) -> None:

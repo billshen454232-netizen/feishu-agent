@@ -95,10 +95,21 @@ def test_worker_role_exposes_only_worker_health_without_gateway_dependencies(tmp
         "feishu": {},
         "ai": {},
         "muliu": {
-            "base_url": "http://muliu.internal",
-            "username": "user",
-            "password": "secret",
             "script_catalog_path": str(catalog_path),
+            "routes": {
+                "cn": {
+                    "identifier": "route-cn",
+                    "base_url": "https://cn-muliu.internal",
+                    "username": "cn-user",
+                    "password": "cn-secret",
+                },
+                "overseas": {
+                    "identifier": "route-overseas",
+                    "base_url": "https://overseas-muliu.internal",
+                    "username": "overseas-user",
+                    "password": "overseas-secret",
+                },
+            },
         },
     }), encoding="utf-8")
 
@@ -235,6 +246,7 @@ def test_gateway_worker_result_route_persists_and_interprets_patch_query(monkeyp
         confirmation_message_id="card_1",
         confirmation_token="token_1",
         confirmation_method="card",
+        route_region="overseas",
     )
     store.claim_card_confirmation(
         request_message_id="om_worker_1",
@@ -245,9 +257,22 @@ def test_gateway_worker_result_route_persists_and_interprets_patch_query(monkeyp
         max_age_seconds=600,
     )
     store.queue_for_worker("om_worker_1")
-    store.claim_next_worker_job("jenkins-worker-1")
 
     with TestClient(app) as client:
+        claim_response = client.post(
+            "/internal/worker/jobs/claim",
+            headers={
+                "Authorization": "Bearer secret-token",
+                "X-Feishu-Worker-Id": "jenkins-worker-1",
+            },
+        )
+        assert claim_response.status_code == 200
+        assert claim_response.json() == {
+            "message_id": "om_worker_1",
+            "plan_json": _plan_to_json(plan),
+            "route_region": "overseas",
+        }
+
         exec_result = MuliuExecutionResult(
             summary="查询 5010 服 Patch 列表",
             step_results=[

@@ -14,9 +14,22 @@
   },
   "muliu": {
     "enabled": true,
-    "base_url": "http://10.x.x.x:8080或内网Muliu域名",
-    "username": "内网Muliu账号",
-    "password": "内网Muliu密码",
+    "routes": {
+      "cn": {
+        "identifier": "route-cn",
+        "enabled": true,
+        "base_url": "填写仅本机可见的国服 Muliu URL",
+        "username": "填写国服 Muliu 账号",
+        "password": "填写国服 Muliu 密码"
+      },
+      "overseas": {
+        "identifier": "route-overseas",
+        "enabled": true,
+        "base_url": "填写仅本机可见的海外 Muliu URL",
+        "username": "填写海外 Muliu 账号",
+        "password": "填写海外 Muliu 密码"
+      }
+    },
     "task_id": 89,
     "step": 11,
     "script_index": 0,

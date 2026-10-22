@@ -376,18 +376,35 @@
     }
 
     .spotlight-card {
-      background: var(--bg-spotlight);
-      border: 1px solid var(--border-active);
+      background: var(--bg-surface);
+      border: 1px solid var(--border-default);
       border-radius: 16px;
       padding: 24px 26px;
       position: relative;
       overflow: hidden;
     }
 
+    .spotlight-card.status-done {
+      background: linear-gradient(135deg, var(--emerald-soft) 0%, var(--bg-surface) 68%);
+      border-color: var(--emerald);
+    }
+
+    .spotlight-card.status-active {
+      background: var(--bg-spotlight);
+      border-color: var(--border-active);
+    }
+
+    .spotlight-card.status-next,
+    .spotlight-card.status-pending {
+      background: var(--bg-surface);
+      border-color: var(--border-default);
+    }
+
     .spotlight-top {
       display: flex;
       align-items: center;
       justify-content: space-between;
+      gap: 12px;
       margin-bottom: 12px;
     }
 
@@ -397,6 +414,14 @@
       gap: 8px;
       font-size: 12.5px;
       font-weight: 700;
+      color: var(--text-sub);
+    }
+
+    .spotlight-card.status-done .spotlight-step-badge {
+      color: var(--emerald);
+    }
+
+    .spotlight-card.status-active .spotlight-step-badge {
       color: var(--blue-bright);
     }
 
@@ -404,6 +429,14 @@
       width: 8px;
       height: 8px;
       border-radius: 50%;
+      background: var(--text-muted);
+    }
+
+    .spotlight-card.status-done .pulse-ring {
+      background: var(--emerald);
+    }
+
+    .spotlight-card.status-active .pulse-ring {
       background: var(--blue-bright);
       box-shadow: 0 0 0 0 rgba(96, 165, 250, 0.7);
       animation: pulse 1.8s infinite;
@@ -413,6 +446,24 @@
       0% { box-shadow: 0 0 0 0 rgba(96, 165, 250, 0.7); }
       70% { box-shadow: 0 0 0 7px rgba(96, 165, 250, 0); }
       100% { box-shadow: 0 0 0 0 rgba(96, 165, 250, 0); }
+    }
+
+    .return-active-btn {
+      cursor: pointer;
+      background: var(--bg-shell);
+      border: 1px solid var(--border-default);
+      color: var(--text-sub);
+      padding: 6px 9px;
+      border-radius: 7px;
+      font-size: 12px;
+      font-weight: 700;
+      white-space: nowrap;
+      transition: all 0.15s ease;
+    }
+
+    .return-active-btn:hover {
+      color: var(--blue-bright);
+      border-color: var(--blue);
     }
 
     .spotlight-title {
@@ -431,9 +482,17 @@
     .command-box {
       background: var(--bg-shell);
       border: 1px solid var(--border-default);
-      border-left: 4px solid var(--blue);
+      border-left: 4px solid var(--text-muted);
       border-radius: 10px;
       padding: 14px 16px;
+    }
+
+    .spotlight-card.status-done .command-box {
+      border-left-color: var(--emerald);
+    }
+
+    .spotlight-card.status-active .command-box {
+      border-left-color: var(--blue);
     }
 
     .command-label {
@@ -441,11 +500,19 @@
       font-weight: 700;
       text-transform: uppercase;
       letter-spacing: 0.06em;
-      color: var(--blue-bright);
+      color: var(--text-sub);
       margin-bottom: 6px;
       display: flex;
       align-items: center;
       gap: 6px;
+    }
+
+    .spotlight-card.status-done .command-label {
+      color: var(--emerald);
+    }
+
+    .spotlight-card.status-active .command-label {
+      color: var(--blue-bright);
     }
 
     .command-text {
@@ -585,54 +652,77 @@
           status: "done",
           statusText: "已完成",
           title: "需求范围确认",
-          desc: "全部 Excel 条目均已纳入范围内"
+          desc: "全部 Excel 条目均已纳入范围内",
+          detailLabel: "完成结论与范围",
+          detailHtml: `已明确：Excel 中的全部条目都在交付范围内；中文业务名只用于理解意图，必须映射到受控 ASCII key 和真实 Lua 字段。<br><br>不会因字段复杂、证据暂缺或尚未验证而关闭其他热更能力。`
         },
         {
           id: "02",
           status: "done",
           statusText: "已完成",
           title: "恢复此前可用链路",
-          desc: "9 个已跟踪文件已恢复至 Git HEAD"
+          desc: "已恢复到此前可跑通的版本基线",
+          detailLabel: "完成结论与产出",
+          detailHtml: `此前可跑通的飞书确认链路已恢复为基线：中文请求 → 确认卡 → Gateway / Worker → Muliu → GS-1 dispatcher。<br><br>后续改动必须在此基线之上推进，不能为扩展字段破坏已有通路。`
         },
         {
           id: "03",
           status: "done",
           statusText: "已完成",
           title: "霸业名额 Patch 链路触达确认",
-          desc: "已确认生成 / 挂载；游戏内实际效果尚未验证"
+          desc: "已确认生成与挂载；游戏内实际效果仍待核验",
+          detailLabel: "完成结论与证据",
+          detailHtml: `已确认霸业名额的 Patch 请求能够到达执行端，生成稳定 Patch 文件并更新远端清单。<br><br>这只证明热更链路触达，不等同于游戏内数值已生效；实际效果必须由游戏内验证确认。`
         },
         {
           id: "04",
           status: "done",
           statusText: "已完成",
           title: "原样迁移现有脚本配置",
-          desc: "已有映射已迁入独立注册表；本地测试通过"
+          desc: "已有映射已迁入统一注册表",
+          detailLabel: "完成结论与产出",
+          detailHtml: `执行端 ASCII key、真实 Lua table / field、默认 Patch 类型，以及 Planner 的中文标准名 / aliases 已统一到同一份注册表。<br><br>静态 catalog 与 GS-1 manifest 由注册表同步生成，未知 key 会在合同和防火墙层被拒绝。`
         },
         {
           id: "05",
           status: "done",
           statusText: "已完成",
           title: "人工回归验证迁移",
-          desc: "已确认迁移未影响当前 Patch 链路"
+          desc: "已确认迁移未影响当前 Patch 链路",
+          detailLabel: "完成结论与证据",
+          detailHtml: `人工真实链路已完成一次确认：Planner、确认卡、Gateway / Worker、Muliu、GS-1 和热更工具可以串通。<br><br>本步骤只确认迁移未中断现有链路；新字段是否在游戏内生效，仍由后续步骤核验。`
         },
         {
           id: "06",
           status: "active",
           statusText: "当前步骤",
-          title: "统一注册表并完成本地确认链路验证",
-          desc: "中文别名、ASCII key 与 Patch 元数据已合并；待飞书验收"
+          title: "游戏内核验当前 Patch",
+          desc: "先确认两项阈值是否实际生效",
+          detailLabel: "现在要做",
+          detailHtml: `在游戏内核验“剧本预选州战队人数显示阈值”和“战队交换人数”是否实际变为 1。<br><br>若核验目标为国服，且当前被 Worker 请求 URL 错误阻断，先完成 <span class="step-chip">STEP 07</span> 的受控路由切换，再重新发起同一条已确认操作。<br><br>待修支线：飞书未显式传入剧本号时，脚本不得自动探测当前剧本并把 Patch 写死为该编号；应改为默认不限剧本，或将剧本号作为确认卡中明确展示的受控参数。`
         },
         {
           id: "07",
           status: "next",
           statusText: "下一步",
+          title: "国服/海外服 Worker 路由自动切换",
+          desc: "以受控环境分类选择 Worker 私有请求路由",
+          detailLabel: "实施目标与安全边界",
+          detailHtml: `从目标服号的可信环境归属派生受控分类：<span class="step-chip">cn</span> 或 <span class="step-chip">overseas</span>；AI 不得填写或选择实际 URL。<br><br>确认卡与审计必须展示“国服 / 海外服”和无敏感路由标识；Worker 只在本地受保护配置中将分类映射到实际 URL。缺失或未知分类必须阻断，不得静默回退到海外路由。`
+        },
+        {
+          id: "08",
+          status: "pending",
+          statusText: "待完成",
           title: "游戏内生效与全量验收",
-          desc: "逐条验证真实效果、确认卡与审计记录"
+          desc: "待国服、海外服两套路由跑通后逐条验收",
+          detailLabel: "验收前提与范围",
+          detailHtml: `先分别验证国服与海外服的 Worker 路由均按确认卡展示的受控分类命中，并且未知分类已被阻断；随后逐条扩展 Excel 中其余配置项。<br><br>每条均验证：中文识别、确认卡展示、受控 key、正确 Patch 类型、游戏内真实效果及审计记录。复杂字段使用独立受控模板；单条证据不足只暂停该条，不影响其他条目推进。`
         }
       ],
       currentAction: {
         label: "现在要做",
-        html: `执行 <span class="step-chip">STEP 06</span>：统一注册表已生成中文别名 → ASCII key → 受控合同；本地已覆盖确认卡前不执行。下一步由你在飞书验收“剧本预选州战队人数显示阈值”和“战队交换人数”两条请求。<br><br>支线记录：原始 Lua 文件路径作为审计元数据后续补齐，不阻塞当前主链路。`
+        html: `执行 <span class="step-chip">STEP 06</span>：先在 1003 剧本内核验“剧本预选州战队人数显示阈值”和“战队交换人数”是否实际变为 1。<br><br>待修支线：飞书未显式传入剧本号时，脚本不得自动探测当前剧本并将 Patch 写死为该编号；需改为不限剧本或让剧本号进入确认卡。原始 Lua 文件路径审计元数据也后续补齐。`
       },
       principle: "主链路优先：中文请求必须先可靠进入人工确认卡；路径审计信息后续独立完善。"
     };
@@ -657,12 +747,21 @@
       render();
     }
 
+    function returnToActiveStep() {
+      selectedStepId = null;
+      render();
+    }
+
     function render() {
       const data = PLAN_DATA;
       const doneCount = data.steps.filter(s => s.status === "done").length;
       const activeStep = data.steps.find(s => s.status === "active") || data.steps[0];
-      const nextStep = data.steps.find(s => s.status === "next");
       const focusedStep = data.steps.find(s => s.id === selectedStepId) || activeStep;
+      const focusedIndex = data.steps.findIndex(s => s.id === focusedStep.id);
+      const followingStep = data.steps[focusedIndex + 1] || null;
+      const detailLabel = focusedStep.detailLabel || data.currentAction.label;
+      const detailHtml = focusedStep.detailHtml || data.currentAction.html;
+      const isViewingCurrent = focusedStep.id === activeStep.id;
       const progressPercent = Math.round(((doneCount + 0.5) / data.steps.length) * 100);
       const isDark = document.documentElement.getAttribute("data-theme") === "dark";
 
@@ -723,22 +822,23 @@
           </aside>
 
           <section class="console-pane">
-            <div class="spotlight-card">
+            <div class="spotlight-card status-${focusedStep.status}">
               <div class="spotlight-top">
                 <span class="spotlight-step-badge">
                   <span class="pulse-ring"></span>
-                  当前聚焦：STEP ${focusedStep.id}（${focusedStep.statusText}）
+                  ${isViewingCurrent ? "当前步骤" : "查看步骤"}：STEP ${focusedStep.id}（${focusedStep.statusText}）
                 </span>
+                ${isViewingCurrent ? "" : `<button class="return-active-btn" onclick="returnToActiveStep()">🎯 回到当前步骤（STEP ${activeStep.id}）</button>`}
               </div>
               <h2 class="spotlight-title">${focusedStep.title}</h2>
               <p class="spotlight-subtitle">状态说明：${focusedStep.desc}</p>
 
               <div class="command-box">
                 <div class="command-label">
-                  <span>▶ ${data.currentAction.label}</span>
+                  <span>▶ ${detailLabel}</span>
                 </div>
                 <div class="command-text">
-                  ${data.currentAction.html}
+                  ${detailHtml}
                 </div>
               </div>
             </div>
@@ -759,7 +859,7 @@
                   <span>⏭ 下一步衔接预览</span>
                 </div>
                 <div class="info-box-body">
-                  ${nextStep ? `<strong>STEP ${nextStep.id} ${nextStep.title}</strong>：${nextStep.desc}` : "全部步骤已进入收尾阶段"}
+                  ${followingStep ? `<strong>STEP ${followingStep.id} ${followingStep.title}</strong>：${followingStep.desc}` : "当前已是最后一步，暂无后续步骤"}
                 </div>
               </div>
 

@@ -9,10 +9,11 @@ from typing import Any
 
 import httpx
 
-from .config import AppConfig
+from .config import AppConfig, ConfigError, muliu_config_for_route
 from .muliu_executor import MuliuExecutionError, MuliuExecutionResult, MuliuExecutor, MuliuSubmittedError
 from .muliu_firewall import MuliuFirewall
 from .muliu_plan import MuliuPlanError, parse_plan
+from .muliu_routing import MuliuPlanRouteResolver, MuliuRouteSnapshot, MuliuRoutingError
 from .worker_protocol import serialize_execution_result
 
 logger = logging.getLogger(__name__)
@@ -26,6 +27,7 @@ class GatewayWorkerClientError(RuntimeError):
 class ClaimedWorkerJob:
     message_id: str
     plan_json: str
+    route_region: str
 
 
 class GatewayWorkerClient:
@@ -48,9 +50,20 @@ class GatewayWorkerClient:
         data = self._response_json(response)
         message_id = data.get("message_id")
         plan_json = data.get("plan_json")
-        if not isinstance(message_id, str) or not message_id or not isinstance(plan_json, str) or not plan_json:
+        route_region = data.get("route_region")
+        if (
+            not isinstance(message_id, str)
+            or not message_id
+            or not isinstance(plan_json, str)
+            or not plan_json
+            or not isinstance(route_region, str)
+        ):
             raise GatewayWorkerClientError("gateway 返回的领取任务格式无效")
-        return ClaimedWorkerJob(message_id=message_id, plan_json=plan_json)
+        return ClaimedWorkerJob(
+            message_id=message_id,
+            plan_json=plan_json,
+            route_region=route_region,
+        )
 
     async def heartbeat(self, message_id: str) -> bool:
         response = await self._request(
@@ -113,15 +126,15 @@ class MuliuWorker:
         self,
         config: AppConfig,
         firewall: MuliuFirewall,
-        executor: MuliuExecutor,
         gateway_client: GatewayWorkerClient,
+        route_resolver: MuliuPlanRouteResolver,
     ) -> None:
         if config.runtime.role != "worker":
             raise ValueError("MuliuWorker 只能在 runtime.role=worker 时运行")
         self._config = config
         self._firewall = firewall
-        self._executor = executor
         self._gateway_client = gateway_client
+        self._route_resolver = route_resolver
         self._stopping = False
 
     async def run_forever(self) -> None:
@@ -152,7 +165,16 @@ class MuliuWorker:
         try:
             plan = parse_plan(job.plan_json, max_steps=self._config.muliu.max_steps)
             self._firewall.validate(plan)
-        except (MuliuPlanError, ValueError) as exc:
+            gateway_snapshot = MuliuRouteSnapshot.from_region(job.route_region)
+            local_snapshot = self._route_resolver.resolve(plan)
+            if local_snapshot != gateway_snapshot:
+                raise MuliuRoutingError("Gateway 路由分类与 Worker 本地服号归属不一致")
+            routed_config = muliu_config_for_route(
+                self._config.muliu,
+                local_snapshot.region,
+                local_snapshot.identifier,
+            )
+        except (ConfigError, MuliuPlanError, MuliuRoutingError, ValueError) as exc:
             result = MuliuExecutionResult(
                 summary=_plan_summary_or_request_text(job.plan_json),
                 step_results=[],
@@ -164,7 +186,8 @@ class MuliuWorker:
                 logger.error("gateway no longer accepts invalid-plan result message_id=%s", job.message_id)
             return
 
-        execution_task = asyncio.create_task(self._executor.execute_plan(plan))
+        routed_executor = MuliuExecutor(routed_config)
+        execution_task = asyncio.create_task(routed_executor.execute_plan(plan))
         heartbeat_task = asyncio.create_task(self._heartbeat_until_done(job.message_id, execution_task))
         try:
             result = await execution_task

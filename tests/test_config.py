@@ -230,7 +230,22 @@ def test_worker_allows_empty_feishu_and_ai_but_requires_gateway_and_identity(tmp
         },
         "feishu": {},
         "ai": {},
-        "muliu": {"base_url": "http://muliu.internal", "username": "user", "password": "secret"},
+        "muliu": {
+            "routes": {
+                "cn": {
+                    "identifier": "route-cn",
+                    "base_url": "https://cn-muliu.internal",
+                    "username": "cn-user",
+                    "password": "cn-secret",
+                },
+                "overseas": {
+                    "identifier": "route-overseas",
+                    "base_url": "https://overseas-muliu.internal",
+                    "username": "overseas-user",
+                    "password": "overseas-secret",
+                },
+            },
+        },
     }), encoding="utf-8")
 
     config = load_config(config_path)
@@ -239,6 +254,8 @@ def test_worker_allows_empty_feishu_and_ai_but_requires_gateway_and_identity(tmp
     assert config.feishu.app_id == ""
     assert config.ai.api_key == ""
     assert config.runtime.gateway_base_url == "https://feishu.example.com"
+    assert config.muliu.routes["cn"].identifier == "route-cn"
+    assert config.muliu.routes["overseas"].identifier == "route-overseas"
 
 
 @pytest.mark.parametrize(
@@ -256,6 +273,43 @@ def test_rejects_invalid_runtime_configuration(tmp_path, runtime, pattern):
         "runtime": runtime,
         "feishu": {"app_id": "app", "app_secret": "secret"},
         "ai": {"provider": "openai_compatible", "base_url": "https://api.example.com/v1", "api_key": "key", "model": "m"},
+        "muliu": {
+            "routes": {
+                "cn": {"identifier": "route-cn", "base_url": "https://cn", "username": "u", "password": "p"},
+                "overseas": {"identifier": "route-overseas", "base_url": "https://overseas", "username": "u", "password": "p"},
+            },
+        },
+    }), encoding="utf-8")
+
+    with pytest.raises(ConfigError, match=pattern):
+        load_config(config_path)
+
+
+@pytest.mark.parametrize(
+    "routes, pattern",
+    [
+        ({}, "muliu.routes 必须且只能包含 cn 和 overseas"),
+        (
+            {
+                "cn": {"identifier": "cnmuliu", "base_url": "https://cn", "username": "u", "password": "p"},
+                "overseas": {"identifier": "route-overseas", "base_url": "https://overseas", "username": "u", "password": "p"},
+            },
+            "identifier 必须为 route-cn",
+        ),
+    ],
+)
+def test_worker_rejects_incomplete_or_uncontrolled_route_profiles(tmp_path, routes, pattern):
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({
+        "runtime": {
+            "role": "worker",
+            "worker_token": "shared-worker-token",
+            "worker_id": "jenkins-worker-1",
+            "gateway_base_url": "https://feishu.example.com",
+        },
+        "feishu": {},
+        "ai": {},
+        "muliu": {"routes": routes},
     }), encoding="utf-8")
 
     with pytest.raises(ConfigError, match=pattern):

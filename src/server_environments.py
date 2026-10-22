@@ -173,6 +173,28 @@ class ServerEnvironments:
     def all_mappings(self) -> tuple[EnvironmentMapping, ...]:
         return self.region_mappings() + self.group_mappings()
 
+    def route_region_for_server_ids(self, server_ids: tuple[str, ...]) -> str:
+        """Map registered servers to one closed Worker execution classification."""
+        if not server_ids:
+            raise ServerEnvironmentsError("计划未包含可路由的目标服号")
+
+        route_regions: set[str] = set()
+        for server_id in server_ids:
+            owning_region = self._owning_region_for_server_id(server_id)
+            route_regions.add("cn" if owning_region == "cn" else "overseas")
+
+        if len(route_regions) != 1:
+            raise ServerEnvironmentsError("同一计划不能同时包含国服和海外服目标")
+        return next(iter(route_regions))
+
+    def _owning_region_for_server_id(self, server_id: str) -> str:
+        if not isinstance(server_id, str) or _SERVER_ID_PATTERN.fullmatch(server_id) is None:
+            raise ServerEnvironmentsError("目标服号格式无效：{}".format(server_id))
+        for region_key, region in self.regions.items():
+            if any(server_id in server_ids for server_ids in region["environments"].values()):
+                return region_key
+        raise ServerEnvironmentsError("目标服号未在受控环境资产中登记：{}".format(server_id))
+
     def _environment_label(self, environment_key: str) -> str:
         return self.environment_labels.get(environment_key, environment_key)
 

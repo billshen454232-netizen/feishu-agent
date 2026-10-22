@@ -1,5 +1,7 @@
 import asyncio
 import json
+import re
+from pathlib import Path
 
 import httpx
 import pytest
@@ -13,11 +15,14 @@ from src.config import (
     JobQueueConfig,
     KnowledgeBaseConfig,
     MuliuConfig,
+    MuliuRouteConfig,
     RuntimeConfig,
     ServerConfig,
 )
 from src.muliu_executor import MuliuExecutionResult, MuliuStepResult
 from src.muliu_plan import MuliuPlan, MuliuPlanKind, MuliuStep
+from src.muliu_routing import MuliuPlanRouteResolver
+from src.muliu_script_catalog import MuliuCallContract, MuliuCallContracts
 from src.muliu_worker import ClaimedWorkerJob, GatewayWorkerClient, MuliuWorker
 from src.worker_protocol import (
     WorkerProtocolError,
@@ -44,8 +49,47 @@ def make_config():
             heartbeat_interval_seconds=0.01,
             lease_timeout_seconds=1,
         ),
-        muliu=MuliuConfig(script_root="/home/serverGeneralScript"),
+        muliu=MuliuConfig(
+            script_root="/home/serverGeneralScript",
+            routes={
+                "cn": MuliuRouteConfig("route-cn", base_url="https://cn.example.com", username="cn", password="secret"),
+                "overseas": MuliuRouteConfig(
+                    "route-overseas",
+                    base_url="https://overseas.example.com",
+                    username="overseas",
+                    password="secret",
+                ),
+            },
+        ),
     )
+
+
+def make_route_resolver(tmp_path):
+    environment_path = Path(tmp_path) / "server_environments.json"
+    environment_path.write_text(
+        json.dumps({
+            "regions": {
+                "cn": {"name": "国服", "environments": {"qa": ["2003"]}},
+                "global": {"name": "全球服", "environments": {"dev": ["6001"]}},
+            },
+            "groups": {},
+        }),
+        encoding="utf-8",
+    )
+    contracts = MuliuCallContracts(
+        max_plan_steps=10,
+        contracts=(
+            MuliuCallContract(
+                name="查询基础信息",
+                path="/home/serverGeneralScript/basic_info.sh",
+                args=("{server_id}",),
+                variable_patterns={"server_id": re.compile(r"[0-9]{4}")},
+                runner="bash",
+                risk="read",
+            ),
+        ),
+    )
+    return MuliuPlanRouteResolver(str(environment_path), contracts)
 
 
 def make_plan():
@@ -76,13 +120,16 @@ class RejectingFirewall:
 
 
 class RecordingExecutor:
-    def __init__(self, result):
-        self.result = result
+    instances = []
+
+    def __init__(self, config):
+        self.config = config
         self.plans = []
+        self.__class__.instances.append(self)
 
     async def execute_plan(self, plan):
         self.plans.append(plan)
-        return self.result
+        return success_result(plan)
 
 
 class RecordingGatewayClient:
@@ -121,44 +168,56 @@ def success_result(plan):
 
 
 @pytest.mark.asyncio
-async def test_worker_revalidates_claimed_plan_before_executing():
+async def test_worker_revalidates_claimed_plan_before_executing(tmp_path, monkeypatch):
     config = make_config()
     plan = make_plan()
     gateway = RecordingGatewayClient()
-    executor = RecordingExecutor(success_result(plan))
     firewall = AcceptAllFirewall()
-    worker = MuliuWorker(config, firewall, executor, gateway)
+    RecordingExecutor.instances = []
+    monkeypatch.setattr("src.muliu_worker.MuliuExecutor", RecordingExecutor)
+    worker = MuliuWorker(config, firewall, gateway, make_route_resolver(tmp_path))
 
     await worker._execute_claimed_job(
-        ClaimedWorkerJob("om_request", json.dumps({
-            "kind": "operation",
-            "summary": plan.summary,
-            "steps": [{"path": plan.steps[0].path, "args": plan.steps[0].args, "description": plan.steps[0].description}],
-        }))
+        ClaimedWorkerJob(
+            "om_request",
+            json.dumps({
+                "kind": "operation",
+                "summary": plan.summary,
+                "steps": [{"path": plan.steps[0].path, "args": plan.steps[0].args, "description": plan.steps[0].description}],
+            }),
+            "overseas",
+        )
     )
 
     assert len(firewall.plans) == 1
-    assert executor.plans == [plan]
+    assert len(RecordingExecutor.instances) == 1
+    assert RecordingExecutor.instances[0].config.base_url == "https://overseas.example.com"
+    assert RecordingExecutor.instances[0].plans == [plan]
     assert gateway.results == [("om_request", success_result(plan))]
 
 
 @pytest.mark.asyncio
-async def test_worker_reports_local_validation_failure_without_executing():
+async def test_worker_reports_local_validation_failure_without_executing(tmp_path, monkeypatch):
     config = make_config()
     plan = make_plan()
     gateway = RecordingGatewayClient()
-    executor = RecordingExecutor(success_result(plan))
-    worker = MuliuWorker(config, RejectingFirewall(), executor, gateway)
+    RecordingExecutor.instances = []
+    monkeypatch.setattr("src.muliu_worker.MuliuExecutor", RecordingExecutor)
+    worker = MuliuWorker(config, RejectingFirewall(), gateway, make_route_resolver(tmp_path))
 
     await worker._execute_claimed_job(
-        ClaimedWorkerJob("om_request", json.dumps({
-            "kind": "operation",
-            "summary": plan.summary,
-            "steps": [{"path": plan.steps[0].path, "args": plan.steps[0].args, "description": plan.steps[0].description}],
-        }))
+        ClaimedWorkerJob(
+            "om_request",
+            json.dumps({
+                "kind": "operation",
+                "summary": plan.summary,
+                "steps": [{"path": plan.steps[0].path, "args": plan.steps[0].args, "description": plan.steps[0].description}],
+            }),
+            "overseas",
+        )
     )
 
-    assert executor.plans == []
+    assert RecordingExecutor.instances == []
     assert len(gateway.results) == 1
     _, result = gateway.results[0]
     assert result.summary == plan.summary
@@ -167,13 +226,16 @@ async def test_worker_reports_local_validation_failure_without_executing():
 
 
 @pytest.mark.asyncio
-async def test_worker_does_not_claim_concurrently_while_execution_runs():
+async def test_worker_does_not_claim_concurrently_while_execution_runs(tmp_path, monkeypatch):
     config = make_config()
     started = asyncio.Event()
     release = asyncio.Event()
     plan = make_plan()
 
     class BlockingExecutor:
+        def __init__(self, _config):
+            pass
+
         async def execute_plan(self, _plan):
             started.set()
             await release.wait()
@@ -187,15 +249,20 @@ async def test_worker_does_not_claim_concurrently_while_execution_runs():
         async def claim(self):
             self.claims += 1
             if self.claims == 1:
-                return ClaimedWorkerJob("om_request", json.dumps({
-                    "kind": "operation",
-                    "summary": plan.summary,
-                    "steps": [{"path": plan.steps[0].path, "args": plan.steps[0].args, "description": plan.steps[0].description}],
-                }))
+                return ClaimedWorkerJob(
+                    "om_request",
+                    json.dumps({
+                        "kind": "operation",
+                        "summary": plan.summary,
+                        "steps": [{"path": plan.steps[0].path, "args": plan.steps[0].args, "description": plan.steps[0].description}],
+                    }),
+                    "overseas",
+                )
             return None
 
+    monkeypatch.setattr("src.muliu_worker.MuliuExecutor", BlockingExecutor)
     gateway = ClaimingGatewayClient()
-    worker = MuliuWorker(config, AcceptAllFirewall(), BlockingExecutor(), gateway)
+    worker = MuliuWorker(config, AcceptAllFirewall(), gateway, make_route_resolver(tmp_path))
     task = asyncio.create_task(worker.run_forever())
     await started.wait()
     await asyncio.sleep(0.03)
@@ -207,6 +274,58 @@ async def test_worker_does_not_claim_concurrently_while_execution_runs():
     worker.stop()
     await asyncio.wait_for(task, timeout=1)
     assert gateway.closed is True
+
+
+@pytest.mark.asyncio
+async def test_worker_rejects_gateway_route_that_differs_from_local_plan_route(tmp_path, monkeypatch):
+    config = make_config()
+    plan = make_plan()
+    gateway = RecordingGatewayClient()
+    RecordingExecutor.instances = []
+    monkeypatch.setattr("src.muliu_worker.MuliuExecutor", RecordingExecutor)
+    worker = MuliuWorker(config, AcceptAllFirewall(), gateway, make_route_resolver(tmp_path))
+
+    await worker._execute_claimed_job(
+        ClaimedWorkerJob(
+            "om_request",
+            json.dumps({
+                "kind": "operation",
+                "summary": plan.summary,
+                "steps": [{"path": plan.steps[0].path, "args": plan.steps[0].args, "description": plan.steps[0].description}],
+            }),
+            "cn",
+        )
+    )
+
+    assert RecordingExecutor.instances == []
+    assert len(gateway.results) == 1
+    assert "不一致" in gateway.results[0][1].failure_reason
+
+
+def test_gateway_client_accepts_only_the_minimal_route_region_claim_shape():
+    config = make_config()
+
+    async def handler(_request):
+        return httpx.Response(200, json={
+            "message_id": "om_request",
+            "plan_json": "{\"kind\":\"operation\",\"summary\":\"查询\",\"steps\":[]}",
+            "route_region": "cn",
+        })
+
+    async def exercise():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+            client = GatewayWorkerClient(config, http_client=http_client)
+            claimed = await client.claim()
+            await client.close()
+            return claimed
+
+    claimed = asyncio.run(exercise())
+
+    assert claimed == ClaimedWorkerJob(
+        "om_request",
+        '{"kind":"operation","summary":"查询","steps":[]}',
+        "cn",
+    )
 
 
 def test_gateway_client_sends_only_authenticated_protocol_headers():

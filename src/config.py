@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
 
@@ -82,11 +82,28 @@ class JobQueueConfig:
 
 
 @dataclass(frozen=True)
-class MuliuConfig:
+class MuliuRouteConfig:
+    """One Worker-local Muliu connection profile.
+
+    This profile is never sent to Gateway or Feishu.  Its identifier is a safe,
+    fixed route name; URL and credentials remain in the Worker configuration.
+    """
+
+    identifier: str
     enabled: bool = True
     base_url: str = ""
     username: str = ""
     password: str = ""
+
+
+@dataclass(frozen=True)
+class MuliuConfig:
+    enabled: bool = True
+    # Legacy local-mode connection fields. Worker mode must use ``routes`` only.
+    base_url: str = ""
+    username: str = ""
+    password: str = ""
+    routes: dict[str, MuliuRouteConfig] = field(default_factory=dict)
     task_id: int = 89
     step: int = 11
     script_index: int = 0
@@ -107,6 +124,26 @@ class MuliuConfig:
     confirmation_timeout_seconds: int = 600
     blocked_keywords: tuple[str, ...] = field(default_factory=tuple)
     blocked_patterns: tuple[str, ...] = field(default_factory=tuple)
+
+
+def muliu_config_for_route(config: MuliuConfig, region: str, identifier: str) -> MuliuConfig:
+    """Return one exact Worker-local Muliu profile; never fall back between routes."""
+    expected_identifiers = {"cn": "route-cn", "overseas": "route-overseas"}
+    if expected_identifiers.get(region) != identifier:
+        raise ConfigError("Worker 路由分类与路由标识不匹配")
+    profile = config.routes.get(region)
+    if profile is None or profile.identifier != identifier:
+        raise ConfigError("Worker 本地未配置受控路由 {}".format(identifier))
+    if not profile.enabled:
+        raise ConfigError("Worker 受控路由 {} 未启用".format(identifier))
+    if not profile.base_url or not profile.username or not profile.password:
+        raise ConfigError("Worker 受控路由 {} 缺少 URL 或登录凭据".format(identifier))
+    return replace(
+        config,
+        base_url=profile.base_url,
+        username=profile.username,
+        password=profile.password,
+    )
 
 
 @dataclass(frozen=True)
@@ -174,6 +211,43 @@ def _require_str(data: dict[str, Any], key: str, section: str) -> str:
     if not isinstance(value, str) or not value:
         raise ConfigError(f"Missing required {section}.{key}")
     return value
+
+
+def _load_muliu_routes(raw: Any, *, runtime_role: RuntimeRole) -> dict[str, MuliuRouteConfig]:
+    if raw is None:
+        if runtime_role == "worker":
+            raise ConfigError("Worker 必须配置 muliu.routes.cn 和 muliu.routes.overseas")
+        return {}
+    if not isinstance(raw, dict):
+        raise ConfigError("muliu.routes 必须是对象")
+    if set(raw) != {"cn", "overseas"}:
+        raise ConfigError("muliu.routes 必须且只能包含 cn 和 overseas")
+
+    expected_identifiers = {"cn": "route-cn", "overseas": "route-overseas"}
+    routes: dict[str, MuliuRouteConfig] = {}
+    for region, expected_identifier in expected_identifiers.items():
+        route_raw = raw.get(region)
+        if not isinstance(route_raw, dict):
+            raise ConfigError("muliu.routes.{} 必须是对象".format(region))
+        identifier = str(route_raw.get("identifier", "")).strip()
+        if identifier != expected_identifier:
+            raise ConfigError(
+                "muliu.routes.{}.identifier 必须为 {}".format(region, expected_identifier)
+            )
+        enabled = bool(route_raw.get("enabled", True))
+        base_url = str(route_raw.get("base_url", "")).rstrip("/")
+        username = str(route_raw.get("username", ""))
+        password = str(route_raw.get("password", ""))
+        if runtime_role == "worker" and (not enabled or not base_url or not username or not password):
+            raise ConfigError("Worker 的 muliu.routes.{} 必须启用且包含 URL、账号和密码".format(region))
+        routes[region] = MuliuRouteConfig(
+            identifier=identifier,
+            enabled=enabled,
+            base_url=base_url,
+            username=username,
+            password=password,
+        )
+    return routes
 
 
 def _load_runtime(raw: dict[str, Any]) -> RuntimeConfig:
@@ -248,6 +322,7 @@ def load_config(path: str | Path = "config/config.json") -> AppConfig:
     if not isinstance(runtime_raw, dict):
         raise ConfigError("runtime section must be a JSON object")
     runtime = _load_runtime(runtime_raw)
+    muliu_routes = _load_muliu_routes(muliu_raw.get("routes"), runtime_role=runtime.role)
     if not isinstance(script_knowledge_raw, dict):
         raise ConfigError("script_knowledge section must be a JSON object")
     if not isinstance(conversation_log_raw, dict):
@@ -339,6 +414,7 @@ def load_config(path: str | Path = "config/config.json") -> AppConfig:
             base_url=str(muliu_raw.get("base_url", "")).rstrip("/"),
             username=str(muliu_raw.get("username", "")),
             password=str(muliu_raw.get("password", "")),
+            routes=muliu_routes,
             task_id=int(muliu_raw.get("task_id", 89)),
             step=int(muliu_raw.get("step", 11)),
             script_index=int(muliu_raw.get("script_index", 0)),

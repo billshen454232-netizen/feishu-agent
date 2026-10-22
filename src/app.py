@@ -22,6 +22,7 @@ from .muliu_executor import MuliuExecutor
 from .muliu_firewall import MuliuFirewall
 from .muliu_intent import MuliuIntentRouter
 from .muliu_plan import MuliuPlanError, parse_plan
+from .muliu_routing import MuliuPlanRouteResolver
 from .muliu_planner import MuliuPlanner
 from .muliu_script_catalog import MuliuScriptCatalog
 from .muliu_worker import GatewayWorkerClient, MuliuWorker
@@ -59,6 +60,10 @@ def create_app(config_path: str | Path = "config/config.json") -> FastAPI:
         call_contracts=script_catalog.read_call_contracts(),
     )
     muliu_executor = MuliuExecutor(config.muliu) if config.runtime.role == "local" else None
+    route_resolver = MuliuPlanRouteResolver(
+        config.execution_interpretation.server_environments_path,
+        script_catalog.read_call_contracts(),
+    )
     script_knowledge_base = None
     if config.script_knowledge.enabled:
         script_knowledge_base = ScriptKnowledgeBase(
@@ -83,6 +88,7 @@ def create_app(config_path: str | Path = "config/config.json") -> FastAPI:
         operation_planner=operation_planner,
         muliu_firewall=muliu_firewall,
         muliu_executor=muliu_executor,
+        route_resolver=route_resolver,
         script_knowledge_base=script_knowledge_base,
         script_catalog=script_catalog,
         intent_router=MuliuIntentRouter(),
@@ -136,12 +142,16 @@ def create_app(config_path: str | Path = "config/config.json") -> FastAPI:
 def _create_worker_app(config: Any) -> FastAPI:
     """Run a worker as a process without exposing inbound operational endpoints."""
     script_catalog = MuliuScriptCatalog(config.muliu.script_catalog_path)
-    firewall = MuliuFirewall(config.muliu, call_contracts=script_catalog.read_call_contracts())
+    call_contracts = script_catalog.read_call_contracts()
+    firewall = MuliuFirewall(config.muliu, call_contracts=call_contracts)
     worker = MuliuWorker(
         config=config,
         firewall=firewall,
-        executor=MuliuExecutor(config.muliu),
         gateway_client=GatewayWorkerClient(config),
+        route_resolver=MuliuPlanRouteResolver(
+            config.execution_interpretation.server_environments_path,
+            call_contracts,
+        ),
     )
 
     @asynccontextmanager
@@ -196,7 +206,11 @@ def _add_gateway_worker_routes(
         job = job_store.claim_next_worker_job(worker_id)
         if job is None:
             return Response(status_code=204)
-        return {"message_id": job.message_id, "plan_json": job.plan_json}
+        return {
+            "message_id": job.message_id,
+            "plan_json": job.plan_json,
+            "route_region": job.route_region,
+        }
 
     @app.post("/internal/worker/jobs/{message_id}/heartbeat", include_in_schema=False)
     async def heartbeat_worker_job(

@@ -34,7 +34,7 @@ message_worker._start_claimed_confirmation()
 
 ## 不改的部分
 
-- `MuliuHttpClient`、`MuliuExecutor.execute_plan()`、起服后 60 秒核验、终态判断保持原样。
+- `MuliuHttpClient`、`MuliuExecutor.execute_plan()`、起服后 60 秒核验、终态判断保持原样；Worker 只在执行前按已确认的受控路由选择本地 Muliu profile。
 - AI、调用合同、防火墙、卡片按钮协议保持原样。
 - Worker 只接收 gateway 数据库里已确认的 `plan_json`，不接收飞书用户文本或 Shell。
 - 已领取但没有最终结果的任务不自动重放。
