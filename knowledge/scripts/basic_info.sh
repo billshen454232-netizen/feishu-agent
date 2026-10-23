@@ -68,37 +68,47 @@ echo "*************************"
 # 执行远程命令并获取输出
 output=$(ssh root@$REMOTE_HOST "tac /data/log/supervisor/supervisor_game_6.log|head -6")
 
-# 检查输出中是否包含 "SEVER START WORK"
+# 基础信息查询以当前 game / zone 进程状态为准；近期启动标记只作诊断。
 if echo "$output" | grep -q "SEVER START WORK"; then
     echo "************************"
     echo "开服成功"
     echo "************************"
-else
-    echo "未检测到开服成功信息"
-    ssh root@$REMOTE_HOST 'dir_path="/data/log/bglog/game"; if [ -z "$(ls -A "$dir_path")" ]; then echo "bglog/game文件夹为空";exit 1; else echo "文件夹不为空"; fi'
-    exit_code=$?
-    if [[ $exit_code -eq 1 ]]; then
-        exit 1
-    fi
-    trace_info=$(ssh -o ConnectTimeout=5 root@$REMOTE_HOST "cd /data/log/bglog/game && grep -i 'trace' \$(ls *.log | tail -100)")
-    # 简单的检查一下日志中是否包含对应字符 打印可能匹配的问题
-    if echo "$trace_info" | grep -q "run_patch error"; then
-        echo "************************"
-        echo "patch文件报错:"
-        echo "$trace_info" | grep "patch"
-        echo "************************"
-    # 服务器开关服太快，建议使用KILL杀进程重启
-    elif echo "$trace_info" | grep -q "Listen error"; then
-        echo "************************"
-        echo "服务器未正确关闭，端口占用报错文件报错"
-        echo ">>>服务器开关服太快，建议使用KILL杀进程重启"
-        echo "************************"
-    elif echo "$trace_info" | grep -q "game_6 start fail"; then
-        echo "************************"
-        echo "服务器启动失败,剧本沙盒场景拉起报错"
-        echo ">>> game_6 start fail"
-        echo "************************"
-    fi
+    exit 0
+fi
 
+if ! echo "$process_name" | grep -Eq '^(game|zone)$'; then
+    echo "未检测到 game 或 zone Skynet 进程，无法确认服务器处于运行状态"
     exit 1
 fi
+
+echo "警告：未检测到近期启动成功信息；当前已检测到 game 或 zone Skynet 进程，基础信息查询继续返回运行中状态。"
+ssh root@$REMOTE_HOST 'dir_path="/data/log/bglog/game"; if [ -z "$(ls -A "$dir_path")" ]; then echo "警告：bglog/game 文件夹为空，跳过 Trace 诊断。"; exit 1; else echo "文件夹不为空"; fi'
+exit_code=$?
+if [[ $exit_code -eq 1 ]]; then
+    exit 0
+fi
+
+trace_info=$(ssh -o ConnectTimeout=5 root@$REMOTE_HOST "cd /data/log/bglog/game && grep -i 'trace' \$(ls *.log | tail -100)")
+# 仅已识别的当前错误信号才使基础信息查询失败。
+if echo "$trace_info" | grep -q "run_patch error"; then
+    echo "************************"
+    echo "patch文件报错:"
+    echo "$trace_info" | grep "patch"
+    echo "************************"
+    exit 1
+# 服务器开关服太快，建议使用 KILL 杀进程重启。
+elif echo "$trace_info" | grep -q "Listen error"; then
+    echo "************************"
+    echo "服务器未正确关闭，端口占用报错文件报错"
+    echo ">>>服务器开关服太快，建议使用KILL杀进程重启"
+    echo "************************"
+    exit 1
+elif echo "$trace_info" | grep -q "game_6 start fail"; then
+    echo "************************"
+    echo "服务器启动失败,剧本沙盒场景拉起报错"
+    echo ">>> game_6 start fail"
+    echo "************************"
+    exit 1
+fi
+
+exit 0
