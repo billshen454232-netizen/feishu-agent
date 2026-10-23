@@ -139,7 +139,7 @@ def test_execution_result_shows_submitted_result_unknown_without_claiming_failur
     result = MuliuExecutionResult(
         summary="启动 5000 服",
         step_results=[],
-        result_unknown_reason="Task 89 在 1800 秒内未返回脚本终态；操作可能仍在运行，请勿重复确认或重试",
+        result_unknown_reason="受控 Muliu 任务在 1800 秒内未返回脚本终态；操作可能仍在运行，请勿重复确认或重试",
     )
 
     message = format_execution_result(result)

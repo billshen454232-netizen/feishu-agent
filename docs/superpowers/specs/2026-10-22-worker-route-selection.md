@@ -13,8 +13,8 @@
 → 固定派生：国服 | 海外服、route-cn | route-overseas
 → 确认卡、SQLite、Gateway claim
 → Worker 重新派生并比对
-→ Worker 私有 routes 配置中的 URL / 凭据
-→ Muliu Task 89
+→ Worker 私有 routes 配置中的 URL / 凭据 / task_id
+→ 对应 Muliu 任务
 ```
 
 AI、飞书卡片、`plan_json`、Gateway API、审计文本和 Git 都不得携带实际 URL、主机、账号、密码、Cookie 或 Token。
@@ -42,11 +42,11 @@ route_region: cn | overseas
 Worker 的 `muliu.routes` 必须精确包含两个 profile：
 
 ```text
-cn       → route-cn       → 本地国服 URL / 凭据
-overseas → route-overseas → 本地海外服 URL / 凭据
+cn       → route-cn       → 本地国服 URL / 凭据 / task_id
+overseas → route-overseas → 本地海外服 URL / 凭据 / task_id
 ```
 
-只允许精确命中，不允许默认值、`get(..., overseas)`、任意 profile key 或静默回退。profile 缺失、禁用、URL / 凭据缺失，均在构造 Muliu HTTP 请求前返回失败。
+只允许精确命中，不允许默认值、`get(..., overseas)`、任意 profile key 或静默回退。profile 缺失、禁用、URL / 凭据缺失或 `task_id` 非正整数，均在构造 Muliu HTTP 请求前返回失败。每个 profile 的 `task_id` 是对应 Muliu 实例中已人工创建、且步骤结构一致的受控任务 ID。
 
 ## 双端校验
 
@@ -54,7 +54,7 @@ overseas → route-overseas → 本地海外服 URL / 凭据
 2. Gateway 仅将 `route_region` 和已持久化 `plan_json` 下发给 Worker。
 3. Worker 重新解析 plan、重新执行防火墙校验、重新从本地环境资产派生 `route_region`。
 4. Worker 仅在“本地重新派生的 `route_region` == Gateway 下发的 `route_region`”时，才从固定映射得到 route identifier 并选择私有连接配置。
-5. 最终 `MuliuHttpClient` 继续只拼接固定 endpoint；其 `base_url` 只能来自 Worker 本地选择的 profile。
+5. 最终 `MuliuHttpClient` 继续只拼接固定 endpoint；其 `base_url` 和 `task_id` 只能来自 Worker 本地选择的 profile。
 
 ## 不在本次范围
 

@@ -308,7 +308,7 @@ def _format_step_log(step: MuliuStepResult) -> str:
 
 
 def clean_muliu_execution_log(log: str) -> str:
-    """Universally clean Muliu Task 89 wrapper noise for any script."""
+    """Universally clean Muliu task wrapper noise for any script."""
     lines = log.splitlines()
 
     start_idx = 0
@@ -359,7 +359,7 @@ def _format_batch_server_query_result(log: str) -> str:
 def _format_basic_info_result(log: str) -> str:
     """Show stable basic-info fields while retaining unrecognized diagnostics.
 
-    Task 89 prepends workspace metadata to every returned log. Basic-info output is
+    The selected Muliu task prepends workspace metadata to every returned log. Basic-info output is
     line-oriented and already contains the fields a group user needs, so remove only
     known wrapper lines and visual separators. Unknown lines remain visible rather
     than being silently discarded if the deployed shell script changes. The complete

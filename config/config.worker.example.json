@@ -17,6 +17,7 @@
     "routes": {
       "cn": {
         "identifier": "route-cn",
+        "task_id": 100,
         "enabled": true,
         "base_url": "填写仅本机可见的国服 Muliu URL",
         "username": "填写国服 Muliu 账号",
@@ -24,13 +25,13 @@
       },
       "overseas": {
         "identifier": "route-overseas",
+        "task_id": 89,
         "enabled": true,
         "base_url": "填写仅本机可见的海外 Muliu URL",
         "username": "填写海外 Muliu 账号",
         "password": "填写海外 Muliu 密码"
       }
     },
-    "task_id": 89,
     "step": 11,
     "script_index": 0,
     "parameter_index": 0,

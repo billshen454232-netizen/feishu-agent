@@ -157,7 +157,7 @@ class MessageJobStore:
         return updated.rowcount == 1
 
     def claim_next_worker_job(self, worker_id: str, now: int | None = None) -> MessageJob | None:
-        """Atomically lease the next plan while globally serializing Muliu Task 89."""
+        """Atomically lease the next plan while globally serializing Muliu execution."""
         timestamp = self._now(now)
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")

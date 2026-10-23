@@ -99,12 +99,14 @@ def test_worker_role_exposes_only_worker_health_without_gateway_dependencies(tmp
             "routes": {
                 "cn": {
                     "identifier": "route-cn",
+                    "task_id": 101,
                     "base_url": "https://cn-muliu.internal",
                     "username": "cn-user",
                     "password": "cn-secret",
                 },
                 "overseas": {
                     "identifier": "route-overseas",
+                    "task_id": 89,
                     "base_url": "https://overseas-muliu.internal",
                     "username": "overseas-user",
                     "password": "overseas-secret",

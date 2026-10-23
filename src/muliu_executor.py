@@ -32,7 +32,7 @@ class MuliuExecutionError(RuntimeError):
 
 
 class MuliuLogPendingError(MuliuExecutionError):
-    """Raised while Task 89 has not created a readable log for the new run yet."""
+    """Raised while the selected Muliu task has not created a readable log yet."""
 
 
 class MuliuResultUnknownError(MuliuExecutionError):
@@ -144,7 +144,7 @@ class MuliuHttpClient:
             raise MuliuSubmittedError(exc, submitted=accepted) from exc
 
     def wait_for_completed_step_log(self) -> str:
-        """Wait for the current Task 89 run to emit a dispatcher terminal marker.
+        """Wait for the selected Muliu task run to emit a dispatcher terminal marker.
 
         The Muliu log endpoint can return live ``Running`` output before the
         child script has ended. That is an in-progress state, not a failed script.
@@ -165,7 +165,7 @@ class MuliuHttpClient:
                 return latest_log
             if time.monotonic() >= deadline:
                 raise MuliuResultUnknownError(
-                    "Task 89 在 {} 秒内未返回脚本终态；操作可能仍在运行，请勿重复确认或重试".format(
+                    "受控 Muliu 任务在 {} 秒内未返回脚本终态；操作可能仍在运行，请勿重复确认或重试".format(
                         _format_seconds(timeout_seconds)
                     )
                 )
@@ -220,11 +220,11 @@ class MuliuHttpClient:
             )
         except (MuliuTransportError, MuliuHttpResponseError) as exc:
             raise MuliuSubmissionUnknownError(
-                "提交 Task 89 时未取得可确认的 Muliu 接受结果；远端可能已开始执行，请勿重复确认或重试：{}".format(exc)
+                "提交受控 Muliu 任务时未取得可确认的 Muliu 接受结果；远端可能已开始执行，请勿重复确认或重试：{}".format(exc)
             ) from exc
         if not 200 <= status < 300 or not isinstance(result, dict):
             raise MuliuSubmissionUnknownError(
-                "提交 Task 89 时返回格式异常；远端可能已开始执行，请勿重复确认或重试：{}".format(
+                "提交受控 Muliu 任务时返回格式异常；远端可能已开始执行，请勿重复确认或重试：{}".format(
                     _result_message(result)
                 )
             )
@@ -328,7 +328,7 @@ class MuliuHttpClient:
 
 
 class MuliuExecutor:
-    """Run plans one at a time so Task 89 parameters cannot overwrite each other."""
+    """Run plans one at a time so selected-task parameters cannot overwrite each other."""
 
     def __init__(self, config: MuliuConfig) -> None:
         self._config = config

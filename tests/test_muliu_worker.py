@@ -52,9 +52,16 @@ def make_config():
         muliu=MuliuConfig(
             script_root="/home/serverGeneralScript",
             routes={
-                "cn": MuliuRouteConfig("route-cn", base_url="https://cn.example.com", username="cn", password="secret"),
+                "cn": MuliuRouteConfig(
+                    "route-cn",
+                    task_id=101,
+                    base_url="https://cn.example.com",
+                    username="cn",
+                    password="secret",
+                ),
                 "overseas": MuliuRouteConfig(
                     "route-overseas",
+                    task_id=89,
                     base_url="https://overseas.example.com",
                     username="overseas",
                     password="secret",
@@ -101,6 +108,20 @@ def make_plan():
                 path="/home/serverGeneralScript/basic_info.sh",
                 args=["6001"],
                 description="查询 6001 服基础信息",
+            )
+        ],
+    )
+
+
+def make_cn_plan():
+    return MuliuPlan(
+        summary="查询 2003 服基础信息",
+        kind=MuliuPlanKind.OPERATION,
+        steps=[
+            MuliuStep(
+                path="/home/serverGeneralScript/basic_info.sh",
+                args=["2003"],
+                description="查询 2003 服基础信息",
             )
         ],
     )
@@ -192,8 +213,37 @@ async def test_worker_revalidates_claimed_plan_before_executing(tmp_path, monkey
     assert len(firewall.plans) == 1
     assert len(RecordingExecutor.instances) == 1
     assert RecordingExecutor.instances[0].config.base_url == "https://overseas.example.com"
+    assert RecordingExecutor.instances[0].config.task_id == 89
     assert RecordingExecutor.instances[0].plans == [plan]
     assert gateway.results == [("om_request", success_result(plan))]
+
+
+@pytest.mark.asyncio
+async def test_worker_selects_cn_profile_task_id_with_the_cn_muliu_url(tmp_path, monkeypatch):
+    config = make_config()
+    plan = make_cn_plan()
+    gateway = RecordingGatewayClient()
+    RecordingExecutor.instances = []
+    monkeypatch.setattr("src.muliu_worker.MuliuExecutor", RecordingExecutor)
+    worker = MuliuWorker(config, AcceptAllFirewall(), gateway, make_route_resolver(tmp_path))
+
+    await worker._execute_claimed_job(
+        ClaimedWorkerJob(
+            "om_cn_request",
+            json.dumps({
+                "kind": "operation",
+                "summary": plan.summary,
+                "steps": [{"path": plan.steps[0].path, "args": plan.steps[0].args, "description": plan.steps[0].description}],
+            }),
+            "cn",
+        )
+    )
+
+    assert len(RecordingExecutor.instances) == 1
+    assert RecordingExecutor.instances[0].config.base_url == "https://cn.example.com"
+    assert RecordingExecutor.instances[0].config.task_id == 101
+    assert RecordingExecutor.instances[0].plans == [plan]
+    assert gateway.results == [("om_cn_request", success_result(plan))]
 
 
 @pytest.mark.asyncio

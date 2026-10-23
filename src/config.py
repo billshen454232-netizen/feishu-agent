@@ -86,10 +86,12 @@ class MuliuRouteConfig:
     """One Worker-local Muliu connection profile.
 
     This profile is never sent to Gateway or Feishu.  Its identifier is a safe,
-    fixed route name; URL and credentials remain in the Worker configuration.
+    fixed route name; URL, credentials, and task id remain in the Worker
+    configuration.
     """
 
     identifier: str
+    task_id: int = 0
     enabled: bool = True
     base_url: str = ""
     username: str = ""
@@ -108,9 +110,9 @@ class MuliuConfig:
     step: int = 11
     script_index: int = 0
     parameter_index: int = 0
-    # Interval between Task 89 log polls after a confirmed operation is submitted.
+    # Interval between selected-task log polls after a confirmed operation is submitted.
     log_wait_seconds: float = 5.0
-    # Maximum time to wait for Task 89's AI_OP_END terminal marker.
+    # Maximum time to wait for the selected task's AI_OP_END terminal marker.
     log_completion_timeout_seconds: float = 1800.0
     # Delay after start exits before checking whether game processes finished initializing.
     start_verification_wait_seconds: float = 60.0
@@ -138,11 +140,14 @@ def muliu_config_for_route(config: MuliuConfig, region: str, identifier: str) ->
         raise ConfigError("Worker 受控路由 {} 未启用".format(identifier))
     if not profile.base_url or not profile.username or not profile.password:
         raise ConfigError("Worker 受控路由 {} 缺少 URL 或登录凭据".format(identifier))
+    if profile.task_id <= 0:
+        raise ConfigError("Worker 受控路由 {} 缺少有效任务 ID".format(identifier))
     return replace(
         config,
         base_url=profile.base_url,
         username=profile.username,
         password=profile.password,
+        task_id=profile.task_id,
     )
 
 
@@ -235,6 +240,9 @@ def _load_muliu_routes(raw: Any, *, runtime_role: RuntimeRole) -> dict[str, Muli
                 "muliu.routes.{}.identifier 必须为 {}".format(region, expected_identifier)
             )
         enabled = bool(route_raw.get("enabled", True))
+        task_id = route_raw.get("task_id", 0)
+        if isinstance(task_id, bool) or not isinstance(task_id, int) or task_id <= 0:
+            raise ConfigError("muliu.routes.{}.task_id 必须是正整数".format(region))
         base_url = str(route_raw.get("base_url", "")).rstrip("/")
         username = str(route_raw.get("username", ""))
         password = str(route_raw.get("password", ""))
@@ -242,6 +250,7 @@ def _load_muliu_routes(raw: Any, *, runtime_role: RuntimeRole) -> dict[str, Muli
             raise ConfigError("Worker 的 muliu.routes.{} 必须启用且包含 URL、账号和密码".format(region))
         routes[region] = MuliuRouteConfig(
             identifier=identifier,
+            task_id=task_id,
             enabled=enabled,
             base_url=base_url,
             username=username,

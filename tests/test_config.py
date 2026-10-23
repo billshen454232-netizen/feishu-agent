@@ -234,12 +234,14 @@ def test_worker_allows_empty_feishu_and_ai_but_requires_gateway_and_identity(tmp
             "routes": {
                 "cn": {
                     "identifier": "route-cn",
+                    "task_id": 101,
                     "base_url": "https://cn-muliu.internal",
                     "username": "cn-user",
                     "password": "cn-secret",
                 },
                 "overseas": {
                     "identifier": "route-overseas",
+                    "task_id": 89,
                     "base_url": "https://overseas-muliu.internal",
                     "username": "overseas-user",
                     "password": "overseas-secret",
@@ -255,7 +257,9 @@ def test_worker_allows_empty_feishu_and_ai_but_requires_gateway_and_identity(tmp
     assert config.ai.api_key == ""
     assert config.runtime.gateway_base_url == "https://feishu.example.com"
     assert config.muliu.routes["cn"].identifier == "route-cn"
+    assert config.muliu.routes["cn"].task_id == 101
     assert config.muliu.routes["overseas"].identifier == "route-overseas"
+    assert config.muliu.routes["overseas"].task_id == 89
 
 
 @pytest.mark.parametrize(
@@ -275,8 +279,8 @@ def test_rejects_invalid_runtime_configuration(tmp_path, runtime, pattern):
         "ai": {"provider": "openai_compatible", "base_url": "https://api.example.com/v1", "api_key": "key", "model": "m"},
         "muliu": {
             "routes": {
-                "cn": {"identifier": "route-cn", "base_url": "https://cn", "username": "u", "password": "p"},
-                "overseas": {"identifier": "route-overseas", "base_url": "https://overseas", "username": "u", "password": "p"},
+                "cn": {"identifier": "route-cn", "task_id": 101, "base_url": "https://cn", "username": "u", "password": "p"},
+                "overseas": {"identifier": "route-overseas", "task_id": 89, "base_url": "https://overseas", "username": "u", "password": "p"},
             },
         },
     }), encoding="utf-8")
@@ -291,10 +295,17 @@ def test_rejects_invalid_runtime_configuration(tmp_path, runtime, pattern):
         ({}, "muliu.routes 必须且只能包含 cn 和 overseas"),
         (
             {
-                "cn": {"identifier": "cnmuliu", "base_url": "https://cn", "username": "u", "password": "p"},
-                "overseas": {"identifier": "route-overseas", "base_url": "https://overseas", "username": "u", "password": "p"},
+                "cn": {"identifier": "cnmuliu", "task_id": 101, "base_url": "https://cn", "username": "u", "password": "p"},
+                "overseas": {"identifier": "route-overseas", "task_id": 89, "base_url": "https://overseas", "username": "u", "password": "p"},
             },
             "identifier 必须为 route-cn",
+        ),
+        (
+            {
+                "cn": {"identifier": "route-cn", "task_id": 0, "base_url": "https://cn", "username": "u", "password": "p"},
+                "overseas": {"identifier": "route-overseas", "task_id": 89, "base_url": "https://overseas", "username": "u", "password": "p"},
+            },
+            "task_id 必须是正整数",
         ),
     ],
 )

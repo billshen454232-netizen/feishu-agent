@@ -364,7 +364,7 @@ class MessageJobProcessor:
             (
                 "计划已排入内网 Muliu Worker 队列，等待受控 Worker 领取并回传可信终态。请勿重复确认或重试。"
                 if self._config.runtime.role == "gateway"
-                else "正在等待 Muliu Task 89 返回可信终态。请勿重复确认或重试。"
+                else "正在等待受控 Muliu 任务返回可信终态。请勿重复确认或重试。"
             ),
             template="blue",
         )
@@ -450,7 +450,7 @@ class MessageJobProcessor:
         return True
 
     async def _execute_confirmed_plan(self, pending_job: Any, plan: MuliuPlan, reply_message_id: str) -> None:
-        """Wait for one Task 89 operation without blocking unrelated Feishu messages."""
+        """Wait for one Muliu operation without blocking unrelated Feishu messages."""
         try:
             if self._muliu_executor is None:
                 raise MuliuExecutionError("Muliu 执行器尚未初始化")

@@ -21,12 +21,12 @@ from src.muliu_executor import (
 from src.muliu_plan import MuliuPlan, MuliuStep
 
 
-def make_config():
+def make_config(*, task_id=89):
     return MuliuConfig(
         base_url="https://muliu.example.com",
         username="user",
         password="password",
-        task_id=89,
+        task_id=task_id,
         step=11,
         script_index=0,
         parameter_index=0,
@@ -63,6 +63,35 @@ def test_save_arguments_uses_dynamic_path_and_args(monkeypatch):
         "path": "/home/serverGeneralScript/cc_patch.py",
         "args": ["-s", "6001", "-ck"],
     }
+
+
+def test_client_uses_the_selected_route_task_id_for_every_task_endpoint(monkeypatch):
+    client = MuliuHttpClient(make_config(task_id=101))
+    captured = []
+
+    def fake_request_json(method, path, **kwargs):
+        captured.append((method, path, kwargs))
+        if path.startswith("/muliu/api/task/detail"):
+            return 200, {"code": 0, "data": {"version": 19}}
+        if path.startswith("/muliu/api/task/log"):
+            return 200, {"code": 0, "data": [{"content": "AI_OP_END status=success\nEND"}]}
+        return 200, {"code": 0}
+
+    monkeypatch.setattr(client, "request_json", fake_request_json)
+
+    assert client.get_current_version() == 19
+    client.save_arguments(19, MuliuStep("/home/serverGeneralScript/cc_patch.py", ["-s", "2003"], "写入补丁"))
+    client.execute_task(19)
+    assert client.get_latest_step_log() == "AI_OP_END status=success\nEND"
+
+    assert [path for _method, path, _kwargs in captured] == [
+        "/muliu/api/task/detail?id=101",
+        "/muliu/api/task/argument/save",
+        "/muliu/api/task/execute",
+        "/muliu/api/task/log?id=101&step=11&num=0",
+    ]
+    assert captured[1][2]["form_data"]["id"] == 101
+    assert captured[2][2]["form_data"]["id"] == 101
 
 
 def test_interprets_dispatcher_failure_marker_as_failed_script():
