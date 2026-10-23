@@ -74,6 +74,36 @@ def format_plan_for_confirmation(plan: MuliuPlan, confirmation_text: str) -> str
     return "\n".join(lines)
 
 
+def build_plan_display_card(
+    plan: MuliuPlan,
+    *,
+    route_label: str = "",
+    route_identifier: str = "",
+) -> dict[str, object]:
+    """Build a group-visible, non-actionable audit card for an operation plan."""
+    elements = _plan_card_elements(plan, route_label=route_label, route_identifier=route_identifier)
+    elements.extend([
+        {"tag": "hr"},
+        {
+            "tag": "note",
+            "elements": [
+                {
+                    "tag": "plain_text",
+                    "content": "仅展示：可操作确认卡已私发给原请求人。未确认前不会提交给 Muliu。",
+                }
+            ],
+        },
+    ])
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "template": "orange",
+            "title": {"tag": "plain_text", "content": "待确认的测试服操作"},
+        },
+        "elements": elements,
+    }
+
+
 def build_plan_confirmation_card(
     plan: MuliuPlan,
     *,
@@ -82,43 +112,12 @@ def build_plan_confirmation_card(
     route_label: str = "",
     route_identifier: str = "",
 ) -> dict[str, object]:
-    """Build a card whose buttons only identify a stored pending plan.
+    """Build a private confirmation card whose buttons identify one stored plan.
 
     The card never carries script paths or arguments as executable callback data.
     The server re-loads and validates the persisted plan before any Muliu submission.
     """
-    elements: list[dict[str, object]] = [
-        {
-            "tag": "div",
-            "text": {"tag": "plain_text", "content": plan.summary},
-        },
-    ]
-    if route_label or route_identifier:
-        elements.append({
-            "tag": "div",
-            "text": {
-                "tag": "plain_text",
-                "content": "目标环境：{}\n受控路由：{}".format(
-                    route_label or "（未确定）",
-                    route_identifier or "（未确定）",
-                ),
-            },
-        })
-    elements.append({"tag": "hr"})
-    for step_number, step in enumerate(plan.steps, start=1):
-        elements.append({
-            "tag": "div",
-            "text": {
-                "tag": "plain_text",
-                "content": "{}/{} {}\n脚本：{}\n参数：{}".format(
-                    step_number,
-                    len(plan.steps),
-                    step.description,
-                    _display_script_path(step.path),
-                    " ".join(step.args) if step.args else "（无）",
-                ),
-            },
-        })
+    elements = _plan_card_elements(plan, route_label=route_label, route_identifier=route_identifier)
     callback_reference = {
         "request_message_id": request_message_id,
         "confirmation_token": confirmation_token,
@@ -130,7 +129,7 @@ def build_plan_confirmation_card(
             "elements": [
                 {
                     "tag": "plain_text",
-                    "content": "仅发起该请求的成员可以确认或取消。确认后将提交已展示的完整计划。",
+                    "content": "这是仅发送给原请求人的确认卡。确认后将提交已展示的完整计划。",
                 }
             ],
         },
@@ -171,6 +170,47 @@ def build_plan_confirmation_card(
         },
         "elements": elements,
     }
+
+
+def _plan_card_elements(
+    plan: MuliuPlan,
+    *,
+    route_label: str,
+    route_identifier: str,
+) -> list[dict[str, object]]:
+    elements: list[dict[str, object]] = [
+        {
+            "tag": "div",
+            "text": {"tag": "plain_text", "content": plan.summary},
+        },
+    ]
+    if route_label or route_identifier:
+        elements.append({
+            "tag": "div",
+            "text": {
+                "tag": "plain_text",
+                "content": "目标环境：{}\n受控路由：{}".format(
+                    route_label or "（未确定）",
+                    route_identifier or "（未确定）",
+                ),
+            },
+        })
+    elements.append({"tag": "hr"})
+    for step_number, step in enumerate(plan.steps, start=1):
+        elements.append({
+            "tag": "div",
+            "text": {
+                "tag": "plain_text",
+                "content": "{}/{} {}\n脚本：{}\n参数：{}".format(
+                    step_number,
+                    len(plan.steps),
+                    step.description,
+                    _display_script_path(step.path),
+                    " ".join(step.args) if step.args else "（无）",
+                ),
+            },
+        })
+    return elements
 
 
 def build_operation_status_card(

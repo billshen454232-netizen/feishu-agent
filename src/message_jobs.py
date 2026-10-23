@@ -37,6 +37,8 @@ class MessageJob:
     last_error: str
     plan_json: str
     confirmation_message_id: str
+    confirmation_chat_id: str
+    group_status_message_id: str
     confirmation_token: str
     confirmation_method: str
     route_region: str
@@ -67,6 +69,8 @@ class MessageJobStore:
                     last_error TEXT NOT NULL,
                     plan_json TEXT NOT NULL DEFAULT '',
                     confirmation_message_id TEXT NOT NULL DEFAULT '',
+                    confirmation_chat_id TEXT NOT NULL DEFAULT '',
+                    group_status_message_id TEXT NOT NULL DEFAULT '',
                     confirmation_token TEXT NOT NULL DEFAULT '',
                     confirmation_method TEXT NOT NULL DEFAULT 'text',
                     route_region TEXT NOT NULL DEFAULT '',
@@ -78,6 +82,8 @@ class MessageJobStore:
             self._add_column_if_missing(conn, "chat_type", "TEXT NOT NULL DEFAULT ''")
             self._add_column_if_missing(conn, "plan_json", "TEXT NOT NULL DEFAULT ''")
             self._add_column_if_missing(conn, "confirmation_message_id", "TEXT NOT NULL DEFAULT ''")
+            self._add_column_if_missing(conn, "confirmation_chat_id", "TEXT NOT NULL DEFAULT ''")
+            self._add_column_if_missing(conn, "group_status_message_id", "TEXT NOT NULL DEFAULT ''")
             self._add_column_if_missing(conn, "confirmation_token", "TEXT NOT NULL DEFAULT ''")
             self._add_column_if_missing(conn, "confirmation_method", "TEXT NOT NULL DEFAULT 'text'")
             self._add_column_if_missing(conn, "route_region", "TEXT NOT NULL DEFAULT ''")
@@ -123,7 +129,8 @@ class MessageJobStore:
                 """
                 SELECT message_id, event_id, chat_id, chat_type, user_id, text,
                        status, attempts, created_at, updated_at, last_error,
-                       plan_json, confirmation_message_id, confirmation_token, confirmation_method,
+                       plan_json, confirmation_message_id, confirmation_chat_id, group_status_message_id,
+                       confirmation_token, confirmation_method,
                        route_region, worker_id, worker_leased_at
                 FROM message_jobs
                 WHERE message_id = ?
@@ -171,7 +178,8 @@ class MessageJobStore:
                 """
                 SELECT message_id, event_id, chat_id, chat_type, user_id, text,
                        status, attempts, created_at, updated_at, last_error,
-                       plan_json, confirmation_message_id, confirmation_token, confirmation_method,
+                       plan_json, confirmation_message_id, confirmation_chat_id, group_status_message_id,
+                       confirmation_token, confirmation_method,
                        route_region, worker_id, worker_leased_at
                 FROM message_jobs
                 WHERE status = 'queued_for_worker'
@@ -319,7 +327,8 @@ class MessageJobStore:
                 """
                 SELECT message_id, event_id, chat_id, chat_type, user_id, text,
                        status, attempts, created_at, updated_at, last_error,
-                       plan_json, confirmation_message_id, confirmation_token, confirmation_method,
+                       plan_json, confirmation_message_id, confirmation_chat_id, group_status_message_id,
+                       confirmation_token, confirmation_method,
                        route_region, worker_id, worker_leased_at
                 FROM message_jobs
                 WHERE chat_id = ? AND confirmation_token = ?
@@ -368,11 +377,12 @@ class MessageJobStore:
                 """
                 SELECT message_id, event_id, chat_id, chat_type, user_id, text,
                        status, attempts, created_at, updated_at, last_error,
-                       plan_json, confirmation_message_id, confirmation_token, confirmation_method,
+                       plan_json, confirmation_message_id, confirmation_chat_id, group_status_message_id,
+                       confirmation_token, confirmation_method,
                        route_region, worker_id, worker_leased_at
                 FROM message_jobs
                 WHERE message_id = ? AND confirmation_message_id = ?
-                      AND chat_id = ? AND user_id = ?
+                      AND confirmation_chat_id = ? AND user_id = ?
                       AND confirmation_token = ?
                       AND status = 'awaiting_confirmation' AND created_at >= ?
                 """,
@@ -418,11 +428,12 @@ class MessageJobStore:
                 """
                 SELECT message_id, event_id, chat_id, chat_type, user_id, text,
                        status, attempts, created_at, updated_at, last_error,
-                       plan_json, confirmation_message_id, confirmation_token, confirmation_method,
+                       plan_json, confirmation_message_id, confirmation_chat_id, group_status_message_id,
+                       confirmation_token, confirmation_method,
                        route_region, worker_id, worker_leased_at
                 FROM message_jobs
                 WHERE message_id = ? AND confirmation_message_id = ?
-                      AND chat_id = ? AND user_id = ?
+                      AND confirmation_chat_id = ? AND user_id = ?
                       AND confirmation_token = ?
                       AND status = 'awaiting_confirmation' AND created_at >= ?
                 """,
@@ -457,6 +468,8 @@ class MessageJobStore:
         confirmation_message_id: str,
         confirmation_token: str,
         confirmation_method: str = "text",
+        confirmation_chat_id: str = "",
+        group_status_message_id: str = "",
         route_region: str = "",
         now: int | None = None,
     ) -> None:
@@ -466,13 +479,17 @@ class MessageJobStore:
                 """
                 UPDATE message_jobs
                 SET status = 'awaiting_confirmation', plan_json = ?,
-                    confirmation_message_id = ?, confirmation_token = ?,
+                    confirmation_message_id = ?,
+                    confirmation_chat_id = COALESCE(NULLIF(?, ''), chat_id),
+                    group_status_message_id = ?, confirmation_token = ?,
                     confirmation_method = ?, route_region = ?, updated_at = ?
                 WHERE message_id = ?
                 """,
                 (
                     plan_json,
                     confirmation_message_id,
+                    confirmation_chat_id,
+                    group_status_message_id,
                     confirmation_token,
                     confirmation_method,
                     route_region,
@@ -503,7 +520,8 @@ class MessageJobStore:
                 """
                 SELECT message_id, event_id, chat_id, chat_type, user_id, text,
                        status, attempts, created_at, updated_at, last_error,
-                       plan_json, confirmation_message_id, confirmation_token, confirmation_method,
+                       plan_json, confirmation_message_id, confirmation_chat_id, group_status_message_id,
+                       confirmation_token, confirmation_method,
                        route_region, worker_id, worker_leased_at
                 FROM message_jobs
                 WHERE status IN ('queued', 'processing') AND created_at >= ?
@@ -521,7 +539,8 @@ class MessageJobStore:
                 """
                 SELECT message_id, event_id, chat_id, chat_type, user_id, text,
                        status, attempts, created_at, updated_at, last_error,
-                       plan_json, confirmation_message_id, confirmation_token, confirmation_method,
+                       plan_json, confirmation_message_id, confirmation_chat_id, group_status_message_id,
+                       confirmation_token, confirmation_method,
                        route_region, worker_id, worker_leased_at
                 FROM message_jobs
                 WHERE status IN ('queued', 'processing', 'awaiting_confirmation') AND created_at < ?
@@ -588,6 +607,8 @@ class MessageJobStore:
             last_error=str(row["last_error"]),
             plan_json=str(row["plan_json"]),
             confirmation_message_id=str(row["confirmation_message_id"]),
+            confirmation_chat_id=str(row["confirmation_chat_id"]),
+            group_status_message_id=str(row["group_status_message_id"]),
             confirmation_token=str(row["confirmation_token"]),
             confirmation_method=str(row["confirmation_method"]),
             route_region=str(row["route_region"]),

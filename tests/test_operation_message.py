@@ -3,6 +3,7 @@ from src.muliu_plan import MuliuPlan, MuliuStep
 from src.operation_message import (
     build_execution_status_card,
     build_plan_confirmation_card,
+    build_plan_display_card,
     format_execution_result,
     format_plan_for_confirmation,
     mask_sensitive_operation_data,
@@ -229,8 +230,22 @@ def test_confirmation_card_displays_derived_route_without_putting_it_in_button_v
         route_identifier="route-cn",
     )
 
-    assert "目标环境：国服\n受控路由：route-cn" in str(card["elements"])
+    assert card["elements"][1]["text"]["content"] == "目标环境：国服\n受控路由：route-cn"
     assert "route-cn" not in str(card["elements"][-1]["actions"])
+
+
+def test_group_plan_display_card_has_no_action_controls():
+    plan = MuliuPlan(
+        summary="关闭 5000 服",
+        steps=[MuliuStep("/home/serverGeneralScript/shutdown", ["5000"], "关闭 5000 服")],
+    )
+
+    card = build_plan_display_card(plan, route_label="海外服", route_identifier="route-overseas")
+
+    assert card["header"]["title"]["content"] == "待确认的测试服操作"
+    assert "可操作确认卡已私发给原请求人" in str(card)
+    assert "action" not in str(card["elements"])
+    assert "button" not in str(card["elements"])
 
 
 def test_execution_status_card_has_no_action_controls():

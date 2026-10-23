@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+from dataclasses import dataclass
 
 import httpx
 
@@ -10,6 +11,14 @@ from .config import FeishuConfig
 
 class FeishuAPIError(RuntimeError):
     """Raised when Feishu OpenAPI returns a non-zero code or bad HTTP status."""
+
+
+@dataclass(frozen=True)
+class FeishuSentMessage:
+    """Identity of a bot message sent outside an existing reply thread."""
+
+    message_id: str
+    chat_id: str
 
 
 class FeishuClient:
@@ -45,6 +54,34 @@ class FeishuClient:
     async def reply_card(self, message_id: str, card: dict[str, object]) -> str:
         """Reply with an interactive CardKit card owned by this application."""
         return await self._reply_message(message_id, "interactive", card)
+
+    async def send_card_to_open_id(
+        self,
+        recipient_open_id: str,
+        card: dict[str, object],
+    ) -> FeishuSentMessage:
+        """Send an actionable card only to a known Feishu open_id recipient."""
+        token = await self.get_tenant_access_token()
+        response = await self._client.post(
+            "{}/open-apis/im/v1/messages".format(self._config.base_url),
+            params={"receive_id_type": "open_id"},
+            headers={"Authorization": "Bearer {}".format(token), "Content-Type": "application/json"},
+            json={
+                "receive_id": recipient_open_id,
+                "msg_type": "interactive",
+                "content": json.dumps(card, ensure_ascii=False),
+            },
+        )
+        response.raise_for_status()
+        data = response.json()
+        if data.get("code") != 0:
+            raise FeishuAPIError("Failed to send card message: {}".format(data))
+        message = data.get("data", {})
+        message_id = str(message.get("message_id", ""))
+        chat_id = str(message.get("chat_id", ""))
+        if not message_id or not chat_id:
+            raise FeishuAPIError("Feishu sent card response missing message_id or chat_id")
+        return FeishuSentMessage(message_id=message_id, chat_id=chat_id)
 
     async def update_card(self, message_id: str, card: dict[str, object]) -> None:
         """Replace a card sent by this bot with a non-actionable status card."""

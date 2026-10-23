@@ -22,6 +22,7 @@ from .operation_message import (
     build_execution_status_card,
     build_operation_status_card,
     build_plan_confirmation_card,
+    build_plan_display_card,
     clean_muliu_execution_log,
     format_execution_result,
     format_rejection,
@@ -114,6 +115,7 @@ class MessageJobProcessor:
         self._conversation_log = conversation_log
         self._task: asyncio.Task[None] | None = None
         self._operation_tasks: set[asyncio.Task[None]] = set()
+        self._group_status_tasks: dict[str, asyncio.Task[None]] = {}
         self._stopping = False
 
     def start(self) -> None:
@@ -132,10 +134,11 @@ class MessageJobProcessor:
             except asyncio.CancelledError:
                 pass
         operation_tasks = tuple(self._operation_tasks)
-        for task in operation_tasks:
+        group_status_tasks = tuple(self._group_status_tasks.values())
+        for task in (*operation_tasks, *group_status_tasks):
             task.cancel()
-        if operation_tasks:
-            await asyncio.gather(*operation_tasks, return_exceptions=True)
+        if operation_tasks or group_status_tasks:
+            await asyncio.gather(*operation_tasks, *group_status_tasks, return_exceptions=True)
 
     async def process_one(self, message_id: str) -> None:
         job = self._store.get(message_id)
@@ -213,8 +216,20 @@ class MessageJobProcessor:
                     else:
                         self._muliu_firewall.validate(plan)
                         route_snapshot = self._resolve_route_snapshot(plan)
+                        if not job.user_id.startswith("ou_"):
+                            reply = format_rejection(
+                                "未获取到可私发确认卡的请求人 open_id；请在指定运维群 @机器人重新发送该请求。"
+                            )
+                            await self._reply_and_finish(message_id, reply)
+                            self._append_conversation_log(job, "operation_rejected", reply, generation=generation)
+                            return
                         confirmation_token = self._new_confirmation_token()
-                        card = build_plan_confirmation_card(
+                        group_card = build_plan_display_card(
+                            plan,
+                            route_label=route_snapshot.label,
+                            route_identifier=route_snapshot.identifier,
+                        )
+                        confirmation_card = build_plan_confirmation_card(
                             plan,
                             request_message_id=message_id,
                             confirmation_token=confirmation_token,
@@ -222,12 +237,18 @@ class MessageJobProcessor:
                             route_identifier=route_snapshot.identifier,
                         )
                         reply_started = time.perf_counter()
-                        confirmation_message_id = await self._feishu_client.reply_card(message_id, card)
+                        group_status_message_id = await self._feishu_client.reply_card(message_id, group_card)
+                        confirmation_message = await self._feishu_client.send_card_to_open_id(
+                            job.user_id,
+                            confirmation_card,
+                        )
                         feishu_reply_ms = self._elapsed_ms(reply_started)
                         self._store.mark_awaiting_confirmation(
                             message_id,
                             plan_json=_plan_to_json(plan),
-                            confirmation_message_id=confirmation_message_id,
+                            confirmation_message_id=confirmation_message.message_id,
+                            confirmation_chat_id=confirmation_message.chat_id,
+                            group_status_message_id=group_status_message_id,
                             confirmation_token=confirmation_token,
                             confirmation_method="card",
                             route_region=route_snapshot.region,
@@ -235,7 +256,7 @@ class MessageJobProcessor:
                         self._append_conversation_log(
                             job,
                             "operation_plan",
-                            "已返回待确认交互卡片：{}".format(plan.summary),
+                            "已在群内展示只读计划，并私发原请求人确认卡：{}".format(plan.summary),
                             generation=generation,
                         )
                 except MuliuPlanGenerationError as exc:
@@ -268,7 +289,10 @@ class MessageJobProcessor:
                 self._elapsed_ms(total_started),
             )
         except Exception as exc:  # noqa: BLE001 - persist unexpected operational failures
-            self._store.mark_failed(message_id, str(exc))
+            error = str(exc)
+            self._store.mark_failed(message_id, error)
+            if 'group_status_message_id' in locals():
+                await self._mark_group_confirmation_unavailable(group_status_message_id, job.text, error)
             logger.exception("job failed message_id=%s error=%s", message_id, exc)
 
     async def process_confirmation(self, chat_id: str, confirmation_token: str, message_id: str) -> bool:
@@ -327,13 +351,15 @@ class MessageJobProcessor:
             if pending_job is None:
                 return None
             reply = "已取消待确认操作：{}".format(pending_job.text)
-            self._append_conversation_log(pending_job, "operation_cancelled", reply)
-            return build_operation_status_card(
+            status_card = build_operation_status_card(
                 "测试服操作已取消",
                 pending_job.text,
                 "未调用 Muliu，也未执行任何目标脚本。",
                 template="grey",
             )
+            self._schedule_group_status_update(pending_job, status_card)
+            self._append_conversation_log(pending_job, "operation_cancelled", reply)
+            return status_card
 
         if action != "confirm_operation":
             return None
@@ -352,13 +378,15 @@ class MessageJobProcessor:
             pending_job.confirmation_message_id,
         )
         if not accepted:
-            return build_operation_status_card(
+            status_card = build_operation_status_card(
                 "测试服操作未提交",
                 pending_job.text,
                 "已拒绝该已确认计划，未进入内网 Worker 队列。",
                 template="red",
             )
-        return build_operation_status_card(
+            self._schedule_group_status_update(pending_job, status_card)
+            return status_card
+        status_card = build_operation_status_card(
             "测试服操作已提交",
             pending_job.text,
             (
@@ -368,6 +396,8 @@ class MessageJobProcessor:
             ),
             template="blue",
         )
+        self._schedule_group_status_update(pending_job, status_card)
+        return status_card
 
     async def _start_claimed_confirmation(self, pending_job: Any, reply_message_id: str) -> bool:
         """Parse the stored plan and launch it after an atomic confirmation claim."""
@@ -601,6 +631,54 @@ class MessageJobProcessor:
             )
         )
 
+    def _schedule_group_status_update(self, pending_job: Any, status_card: dict[str, object]) -> None:
+        """Mirror a private-card transition to the group without delaying its callback."""
+        group_status_message_id = getattr(pending_job, "group_status_message_id", "")
+        update_card = getattr(self._feishu_client, "update_card", None)
+        if not group_status_message_id or not callable(update_card):
+            return
+        previous_task = self._group_status_tasks.get(group_status_message_id)
+        if previous_task is not None and not previous_task.done():
+            previous_task.cancel()
+        task = asyncio.create_task(update_card(group_status_message_id, status_card))
+        self._group_status_tasks[group_status_message_id] = task
+        task.add_done_callback(
+            lambda completed: self._finish_group_status_update(group_status_message_id, completed)
+        )
+
+    def _finish_group_status_update(self, group_status_message_id: str, task: asyncio.Task[None]) -> None:
+        if self._group_status_tasks.get(group_status_message_id) is task:
+            self._group_status_tasks.pop(group_status_message_id, None)
+        if task.cancelled():
+            return
+        try:
+            task.result()
+        except Exception:  # noqa: BLE001 - the private action outcome remains durable
+            logger.exception("group status card update failed message_id=%s", group_status_message_id)
+
+    async def _mark_group_confirmation_unavailable(
+        self,
+        group_status_message_id: str,
+        summary: str,
+        error: str,
+    ) -> None:
+        """Make a failed private-card delivery explicit in the group audit card."""
+        update_card = getattr(self._feishu_client, "update_card", None)
+        if not callable(update_card):
+            return
+        try:
+            await update_card(
+                group_status_message_id,
+                build_operation_status_card(
+                    "测试服操作未提交",
+                    summary,
+                    "未能向原请求人发送私聊确认卡，未提交给 Muliu。原因：{}".format(error),
+                    template="red",
+                ),
+            )
+        except Exception:  # noqa: BLE001 - the original send failure remains the durable outcome
+            logger.exception("group confirmation failure status update failed message_id=%s", group_status_message_id)
+
     async def deliver_execution_result(
         self,
         pending_job: Any,
@@ -609,16 +687,14 @@ class MessageJobProcessor:
         *,
         status_card: dict[str, object] | None = None,
     ) -> None:
-        """Deliver an already-persisted terminal outcome without changing it."""
+        """Deliver a terminal outcome to the requester and preserve group audit state."""
         try:
             update_card = getattr(self._feishu_client, "update_card", None)
-            if (
-                status_card is not None
-                and pending_job.confirmation_method == "card"
-                and callable(update_card)
-                and pending_job.confirmation_message_id
-            ):
-                await update_card(pending_job.confirmation_message_id, status_card)
+            if status_card is not None and pending_job.confirmation_method == "card" and callable(update_card):
+                if pending_job.confirmation_message_id:
+                    await update_card(pending_job.confirmation_message_id, status_card)
+                if pending_job.group_status_message_id:
+                    self._schedule_group_status_update(pending_job, status_card)
             await self._feishu_client.reply_text(reply_message_id, reply)
         except Exception:  # noqa: BLE001 - delivery failure does not change remote outcome
             logger.exception("execution result delivery failed message_id=%s", pending_job.message_id)
