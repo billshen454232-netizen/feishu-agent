@@ -887,6 +887,8 @@ async def test_card_confirmation_claims_private_plan_and_updates_private_and_gro
     assert update_targets.count("om_group_card") == 1
     assert feishu.card_updates[-1][0] == "om_group_card"
     assert feishu.card_updates[-1][1]["header"]["title"]["content"] == "测试服操作已完成"
+    assert "✅ 执行完成" in feishu.card_updates[-1][1]["elements"][2]["text"]["content"]
+    assert "执行明细：" not in feishu.card_updates[-1][1]["elements"][2]["text"]["content"]
     assert feishu.replies[0][0] == "om_card"
 
 

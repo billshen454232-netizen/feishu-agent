@@ -235,25 +235,30 @@ def build_operation_status_card(
     }
 
 
-def build_execution_status_card(result: MuliuExecutionResult) -> dict[str, object]:
+def build_execution_status_card(
+    result: MuliuExecutionResult,
+    *,
+    detail: str = "",
+) -> dict[str, object]:
+    """Build a terminal card with a bounded, auditable result summary."""
     if result.succeeded:
         return build_operation_status_card(
             "测试服操作已完成",
             result.summary,
-            "执行结果和日志已作为本卡片的回复发送。",
+            detail or "操作已完成，但未生成可展示的结果摘要。",
             template="green",
         )
     if result.result_unknown:
         return build_operation_status_card(
             "测试服操作结果尚未核验",
             result.summary,
-            "{}\n请勿重复确认或重试同一操作。".format(result.result_unknown_reason),
+            detail or "{}\n请勿重复确认或重试同一操作。".format(result.result_unknown_reason),
             template="yellow",
         )
     return build_operation_status_card(
         "测试服操作执行失败",
         result.summary,
-        "{}\n执行结果和日志已作为本卡片的回复发送。".format(result.failure_reason),
+        detail or result.failure_reason,
         template="red",
     )
 

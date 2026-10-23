@@ -417,7 +417,7 @@ class MessageJobProcessor:
                 pending_job,
                 reply_message_id,
                 reply,
-                status_card=build_execution_status_card(result),
+                status_card=build_execution_status_card(result, detail=_group_result_summary(reply)),
             )
             return False
 
@@ -431,11 +431,12 @@ class MessageJobProcessor:
                     failure_reason=error,
                 )
                 self._store.mark_failed(pending_job.message_id, error)
+                reply = format_rejection(error)
                 await self.deliver_execution_result(
                     pending_job,
                     reply_message_id,
-                    format_rejection(error),
-                    status_card=build_execution_status_card(result),
+                    reply,
+                    status_card=build_execution_status_card(result, detail=_group_result_summary(reply)),
                 )
                 return False
             if not self._store.queue_for_worker(pending_job.message_id):
@@ -447,11 +448,12 @@ class MessageJobProcessor:
                     failure_reason=error,
                 )
                 self._store.mark_failed(pending_job.message_id, error)
+                reply = format_rejection(error)
                 await self.deliver_execution_result(
                     pending_job,
                     reply_message_id,
-                    format_rejection(error),
-                    status_card=build_execution_status_card(result),
+                    reply,
+                    status_card=build_execution_status_card(result, detail=_group_result_summary(reply)),
                 )
                 return False
             return True
@@ -465,11 +467,12 @@ class MessageJobProcessor:
                 failure_reason=error,
             )
             self._store.mark_failed(pending_job.message_id, error)
+            reply = format_rejection(error)
             await self.deliver_execution_result(
                 pending_job,
                 reply_message_id,
-                format_rejection(error),
-                status_card=build_execution_status_card(result),
+                reply,
+                status_card=build_execution_status_card(result, detail=_group_result_summary(reply)),
             )
             return False
 
@@ -504,7 +507,10 @@ class MessageJobProcessor:
                 pending_job,
                 reply_message_id,
                 reply,
-                status_card=build_execution_status_card(execution_result),
+                status_card=build_execution_status_card(
+                    execution_result,
+                    detail=_group_result_summary(reply),
+                ),
             )
         except asyncio.CancelledError:
             self._store.mark_submitted_result_unknown(
@@ -535,7 +541,7 @@ class MessageJobProcessor:
                 pending_job,
                 reply_message_id,
                 reply,
-                status_card=build_execution_status_card(result),
+                status_card=build_execution_status_card(result, detail=_group_result_summary(reply)),
             )
         except MuliuExecutionError as exc:
             error = str(exc)
@@ -551,7 +557,7 @@ class MessageJobProcessor:
                 pending_job,
                 reply_message_id,
                 reply,
-                status_card=build_execution_status_card(result),
+                status_card=build_execution_status_card(result, detail=_group_result_summary(reply)),
             )
         except Exception as exc:  # noqa: BLE001 - preserve an uncertain remote operation
             error = "机器人在等待结果时发生异常：{}；请勿重复确认或重试".format(exc)
@@ -566,7 +572,7 @@ class MessageJobProcessor:
                 pending_job,
                 reply_message_id,
                 reply,
-                status_card=build_execution_status_card(result),
+                status_card=build_execution_status_card(result, detail=_group_result_summary(reply)),
             )
 
     async def interpret_execution_result(
@@ -594,8 +600,6 @@ class MessageJobProcessor:
             result,
             max_chars=self._config.execution_interpretation.max_execution_data_chars,
         )
-        if not execution_data:
-            return fallback_reply
 
         environment_context = _load_environment_context(
             self._config.execution_interpretation.server_environments_path
@@ -904,34 +908,18 @@ class MessageJobProcessor:
         return int((time.perf_counter() - started) * 1000)
 
 
-_INTERPRETATION_INTENT_KEYWORDS = (
-    "是否存在",
-    "有没有",
-    "是否有",
-    "是否包含",
-    "对比",
-    "分析",
-    "有哪些",
-    "哪个是",
-    "什么版本",
-)
-_INTERPRETATION_SCRIPT_NAMES = (
-    "batch_server_query.py",
-    "cc_patch.py",
-    "server_log_query.py",
-)
+def should_interpret_with_ai(_job_text: str, _result: MuliuExecutionResult) -> bool:
+    """Every trusted terminal outcome receives a concise, presentation-only AI summary."""
+    return True
 
 
-def should_interpret_with_ai(job_text: str, result: MuliuExecutionResult) -> bool:
-    """Return whether a successful result benefits from a concise AI conclusion."""
-    if not result.succeeded or not result.step_results:
-        return False
-    if any(keyword in job_text for keyword in _INTERPRETATION_INTENT_KEYWORDS):
-        return True
-    return any(
-        step.path.rsplit("/", 1)[-1] in _INTERPRETATION_SCRIPT_NAMES
-        for step in result.step_results
-    )
+def _group_result_summary(reply: str, *, max_chars: int = 1200) -> str:
+    """Show the AI conclusion in the group card, never its private full log detail."""
+    conclusion = reply.split("\n\n---\n\n执行明细：", 1)[0].strip()
+    conclusion = mask_sensitive_operation_data(conclusion)
+    if len(conclusion) <= max_chars:
+        return conclusion
+    return "{}\n…（群内摘要已截断）".format(conclusion[:max_chars])
 
 
 def _build_clean_execution_data(result: MuliuExecutionResult, *, max_chars: int) -> str:
@@ -983,12 +971,14 @@ def _build_execution_interpretation_prompt(
         "\n\n【环境资产参考】\n{}"
         "\n\n【实际执行结果】\n{}"
         "\n\n【输出约束】\n"
-        "1. 第一行直接回答用户问题的核心结论，例如【存在】、【不存在】、【版本完全一致】或【存在差异】。\n"
+        "1. 第一行必须给出本次任务的终态摘要，使用【执行完成】、【执行失败】或【结果尚未核验】之一；不能把脚本或 Muliu 返回成功说成游戏内实际生效。\n"
         "2. 只陈述实际执行结果明确支持的事实；数据不足时明确说明无法确认，绝不猜测。\n"
-        "3. 用简洁的中文 Markdown 列出关键证据；不要复述整段原始日志。\n"
-        "4. 严禁输出私网 IP、主机地址、账号、凭据、Cookie、数据库连接、文件系统工作目录或执行命令。\n"
-        "5. 不要建议、触发或描述新的执行操作。\n"
-        "6. 严禁添加任何多余前缀、说明性标题或客套话（如‘AI 研读结论：’、‘分析结果：’等），直接输出结论。"
+        "3. 若结果包含多台服务器的 basic_info.sh 查询，必须按服号分为：已开服、已关闭、查询报错/无法确认三组；每台服只能归入一组。没有某类时写“无”。\n"
+        "4. 用简洁的中文 Markdown 梳理关键结果和失败点；不要复述整段原始日志。\n"
+        "5. 若没有可用脚本输出，也必须基于已知终态和失败原因说明结果；不得虚构执行细节。\n"
+        "6. 严禁输出私网 IP、主机地址、账号、凭据、Cookie、数据库连接、文件系统工作目录或执行命令。\n"
+        "7. 不要建议、触发或描述新的执行操作。\n"
+        "8. 严禁添加任何多余前缀、说明性标题或客套话（如‘AI 研读结论：’、‘分析结果：’等），直接输出结论。"
     ).format(mask_sensitive_operation_data(user_text), environment_context, execution_data)
 
 

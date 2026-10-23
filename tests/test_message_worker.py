@@ -294,24 +294,70 @@ async def test_interpret_execution_result_falls_back_when_ai_times_out(tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_interpret_execution_result_skips_failed_unknown_and_unqualified_results(tmp_path):
+async def test_interpret_execution_result_summarizes_every_terminal_outcome(tmp_path):
     store = MessageJobStore(tmp_path / "jobs.sqlite3")
     store.initialize()
     job, _ = store.create_if_new("om_result", "evt_result", "oc_group", "ou_user", "查询 5010 服状态")
-    ai = InterpretationAIClient()
+    ai = InterpretationAIClient("【执行失败】Muliu 未返回可用的脚本终态。")
     processor = MessageJobProcessor(make_config(), store, ConversationStore(4), ai, FakeFeishuClient())
-    step = MuliuStepResult(1, "查询 5010 服状态", "/home/serverGeneralScript/basic_info.sh", ["5010"], True, "正常")
-    failed = MuliuExecutionResult("查询 5010 服状态", [step], failed_step_number=1, failure_reason="失败")
+    failed = MuliuExecutionResult("查询 5010 服状态", [], failed_step_number=1, failure_reason="失败")
     unknown = MuliuExecutionResult("查询 5010 服状态", [], result_unknown_reason="未知")
-    basic = MuliuExecutionResult("查询 5010 服状态", [step])
+    basic = MuliuExecutionResult(
+        "查询 5010 服状态",
+        [MuliuStepResult(1, "查询 5010 服状态", "/home/serverGeneralScript/basic_info.sh", ["5010"], True, "正常")],
+    )
 
-    assert should_interpret_with_ai(job.text, failed) is False
-    assert should_interpret_with_ai(job.text, unknown) is False
-    assert should_interpret_with_ai(job.text, basic) is False
-    assert await processor.interpret_execution_result(job, failed, "failed") == "failed"
-    assert await processor.interpret_execution_result(job, unknown, "unknown") == "unknown"
-    assert await processor.interpret_execution_result(job, basic, "basic") == "basic"
-    assert ai.calls == []
+    assert should_interpret_with_ai(job.text, failed) is True
+    assert should_interpret_with_ai(job.text, unknown) is True
+    assert should_interpret_with_ai(job.text, basic) is True
+    assert (await processor.interpret_execution_result(job, failed, "failed")).startswith("【执行失败】")
+    assert (await processor.interpret_execution_result(job, unknown, "unknown")).startswith("【执行失败】")
+    assert (await processor.interpret_execution_result(job, basic, "basic")).startswith("【执行失败】")
+    assert len(ai.calls) == 3
+    assert all("没有可用脚本输出" in prompt for _history, prompt in ai.calls[:2])
+
+
+@pytest.mark.asyncio
+async def test_interpret_execution_result_summarizes_multi_server_basic_info(tmp_path):
+    store = MessageJobStore(tmp_path / "jobs.sqlite3")
+    store.initialize()
+    job, _ = store.create_if_new(
+        "om_weekly",
+        "evt_weekly",
+        "oc_group",
+        "ou_user",
+        "检查海外所有 weekly 环境服务器是否已起服",
+    )
+    ai = InterpretationAIClient("【开服状态汇总】\n- 已开服：5000\n- 已关闭：5010\n- 查询报错/无法确认：无")
+    processor = MessageJobProcessor(make_config(), store, ConversationStore(4), ai, FakeFeishuClient())
+    result = MuliuExecutionResult(
+        "检查海外所有 weekly 环境服务器是否已起服",
+        [
+            MuliuStepResult(
+                1,
+                "检查 5000 服版本、开服信息和进程状态",
+                "/home/serverGeneralScript/basic_info.sh",
+                ["5000"],
+                True,
+                "服务器正在运行\n开服成功",
+            ),
+            MuliuStepResult(
+                2,
+                "检查 5010 服版本、开服信息和进程状态",
+                "/home/serverGeneralScript/basic_info.sh",
+                ["5010"],
+                True,
+                "服务器已正常关闭",
+            ),
+        ],
+    )
+
+    reply = await processor.interpret_execution_result(job, result, "执行明细")
+
+    assert reply.startswith("【开服状态汇总】")
+    assert "执行明细：" in reply
+    assert len(ai.calls) == 1
+    assert "已开服、已关闭、查询报错/无法确认三组" in ai.calls[0][1]
 
 
 @pytest.mark.asyncio

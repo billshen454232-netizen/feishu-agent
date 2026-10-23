@@ -321,3 +321,6 @@ def test_gateway_worker_result_route_persists_and_interprets_patch_query(monkeyp
     assert len(feishu.card_updates) == 2
     assert [card_target for card_target, _card in feishu.card_updates] == ["card_1", "group_card_1"]
     assert all(card["header"]["template"] == "green" for _card_target, card in feishu.card_updates)
+    group_card = feishu.card_updates[1][1]
+    assert "【存在】已在 5010 服找到该补丁" in group_card["elements"][2]["text"]["content"]
+    assert "执行明细：" not in group_card["elements"][2]["text"]["content"]
