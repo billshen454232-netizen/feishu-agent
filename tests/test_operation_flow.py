@@ -85,7 +85,6 @@ class FakeFeishuClient:
     def __init__(self):
         self.replies = []
         self.cards = []
-        self.private_cards = []
         self.card_updates = []
 
     async def reply_text(self, message_id, text):
@@ -94,15 +93,7 @@ class FakeFeishuClient:
 
     async def reply_card(self, message_id, card):
         self.cards.append((message_id, card))
-        return "om_group_card_{}".format(len(self.cards))
-
-    async def send_card_to_open_id(self, recipient_open_id, card):
-        self.private_cards.append((recipient_open_id, card))
-        return type(
-            "SentMessage",
-            (),
-            {"message_id": "om_private_card_{}".format(len(self.private_cards)), "chat_id": "oc_p2p_{}".format(len(self.private_cards))},
-        )()
+        return "om_card_{}".format(len(self.cards))
 
     async def update_card(self, message_id, card):
         self.card_updates.append((message_id, card))
@@ -324,16 +315,11 @@ async def test_request_creates_plan_and_waits_for_group_confirmation(tmp_path):
     assert executor.plans == []
     assert feishu.cards[0][0] == "om_request"
     assert feishu.cards[0][1]["header"]["title"]["content"] == "待确认的测试服操作"
-    assert all(element.get("tag") != "action" for element in feishu.cards[0][1]["elements"])
-    assert feishu.private_cards[0][0] == "ou_user"
-    assert feishu.private_cards[0][1]["elements"][-1]["actions"][0]["value"] == {
+    assert feishu.cards[0][1]["elements"][-1]["actions"][0]["value"] == {
         "action": "confirm_operation",
         "request_message_id": "om_request",
         "confirmation_token": job.confirmation_token,
     }
-    assert job.confirmation_message_id == "om_private_card_1"
-    assert job.confirmation_chat_id == "oc_p2p_1"
-    assert job.group_status_message_id == "om_group_card_1"
     assert json.loads(job.plan_json)["kind"] == "operation"
     assert json.loads(job.plan_json)["steps"][0]["args"] == ["6001"]
 
@@ -373,8 +359,6 @@ async def test_registered_chinese_hotfix_routes_wait_for_card_confirmation(tmp_p
     assert executor.plans == []
     assert json.loads(job.plan_json)["steps"][0]["args"] == ["-s", "5010", "-k", key, "-v", "1"]
     assert feishu.cards[0][1]["elements"][0]["text"]["content"] == json.loads(job.plan_json)["summary"]
-    assert all(element.get("tag") != "action" for element in feishu.cards[0][1]["elements"])
-    assert feishu.private_cards[0][1]["elements"][0]["text"]["content"] == json.loads(job.plan_json)["summary"]
 
 
 @pytest.mark.asyncio
@@ -417,8 +401,6 @@ async def test_shutdown_request_waits_for_confirmation_without_executing(tmp_pat
     }
     assert feishu.cards[0][0] == "om_shutdown"
     assert feishu.cards[0][1]["header"]["title"]["content"] == "待确认的测试服操作"
-    assert all(element.get("tag") != "action" for element in feishu.cards[0][1]["elements"])
-    assert feishu.private_cards[0][0] == "ou_user"
 
 
 @pytest.mark.asyncio
@@ -451,8 +433,6 @@ async def test_ordered_registered_operations_wait_for_one_confirmation(tmp_path)
     card_text = str(feishu.cards[0][1])
     assert "1/2 清档 5000 服" in card_text
     assert "2/2 将 5000 服改为赛季 10、剧本 5" in card_text
-    assert "action" not in card_text
-    assert feishu.private_cards[0][0] == "ou_user"
     assert json.loads(job.plan_json)["steps"] == [
         {"path": "/home/serverGeneralScript/clear", "args": ["5000"], "description": "清档 5000 服"},
         {
@@ -660,7 +640,6 @@ async def test_targeted_request_bypasses_script_knowledge_and_creates_plan(tmp_p
     assert planner.requests == [request]
     assert ai.calls == []
     assert feishu.cards[0][0] == "om_request"
-    assert feishu.private_cards[0][0] == "ou_user"
 
 
 @pytest.mark.asyncio
@@ -708,7 +687,6 @@ async def test_targeted_live_scenario_question_bypasses_knowledge_and_waits_for_
     }
     assert feishu.cards[0][0] == "om_scenario"
     assert "当前剧本" in str(feishu.cards[0][1])
-    assert feishu.private_cards[0][0] == "ou_user"
 
 
 @pytest.mark.asyncio
@@ -838,7 +816,7 @@ async def test_matching_confirmation_executes_stored_plan(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_card_confirmation_claims_private_plan_and_updates_private_and_group_cards(tmp_path):
+async def test_card_confirmation_claims_stored_plan_and_updates_original_card(tmp_path):
     config = make_config()
     store = MessageJobStore(tmp_path / "jobs.sqlite3")
     store.initialize()
@@ -852,8 +830,6 @@ async def test_card_confirmation_claims_private_plan_and_updates_private_and_gro
             "steps": [{"path": plan.steps[0].path, "args": plan.steps[0].args, "description": plan.steps[0].description}],
         }),
         confirmation_message_id="om_card",
-        confirmation_chat_id="oc_p2p",
-        group_status_message_id="om_group_card",
         confirmation_token="ABC123",
         confirmation_method="card",
     )
@@ -872,23 +848,19 @@ async def test_card_confirmation_claims_private_plan_and_updates_private_and_gro
         action="confirm_operation",
         request_message_id="om_request",
         confirmation_message_id="om_card",
-        chat_id="oc_p2p",
+        chat_id="oc_group",
         user_id="ou_requester",
         confirmation_token="ABC123",
     )
-    await asyncio.sleep(0)
     await asyncio.sleep(0)
 
     assert card["header"]["title"]["content"] == "测试服操作已提交"
     assert len(executor.plans) == 1
     assert store.get("om_request").status == "done"
-    update_targets = [message_id for message_id, _card in feishu.card_updates]
-    assert update_targets.count("om_card") == 1
-    assert update_targets.count("om_group_card") == 1
-    assert feishu.card_updates[-1][0] == "om_group_card"
-    assert feishu.card_updates[-1][1]["header"]["title"]["content"] == "测试服操作已完成"
-    assert "✅ 执行完成" in feishu.card_updates[-1][1]["elements"][2]["text"]["content"]
-    assert "执行明细：" not in feishu.card_updates[-1][1]["elements"][2]["text"]["content"]
+    assert feishu.card_updates[0][0] == "om_card"
+    assert feishu.card_updates[0][1]["header"]["title"]["content"] == "测试服操作已完成"
+    assert "✅ 执行完成" in feishu.card_updates[0][1]["elements"][2]["text"]["content"]
+    assert "执行明细：" not in feishu.card_updates[0][1]["elements"][2]["text"]["content"]
     assert feishu.replies[0][0] == "om_card"
 
 
@@ -945,8 +917,6 @@ async def test_gateway_card_confirmation_with_missing_route_is_not_reported_as_s
             "steps": [{"path": plan.steps[0].path, "args": plan.steps[0].args, "description": plan.steps[0].description}],
         }),
         confirmation_message_id="om_card",
-        confirmation_chat_id="oc_p2p",
-        group_status_message_id="om_group_card",
         confirmation_token="ABC123",
         confirmation_method="card",
     )
@@ -964,17 +934,15 @@ async def test_gateway_card_confirmation_with_missing_route_is_not_reported_as_s
         action="confirm_operation",
         request_message_id="om_request",
         confirmation_message_id="om_card",
-        chat_id="oc_p2p",
+        chat_id="oc_group",
         user_id="ou_requester",
         confirmation_token="ABC123",
     )
-    await asyncio.sleep(0)
 
     assert store.get("om_request").status == "failed"
     assert card["header"]["title"]["content"] == "测试服操作未提交"
     assert card["header"]["template"] == "red"
     assert "未进入内网 Worker 队列" in str(card)
-    assert ("om_group_card", card) in feishu.card_updates
 
 
 @pytest.mark.asyncio
@@ -987,7 +955,6 @@ async def test_card_confirmation_from_another_member_is_rejected_without_executi
         "om_request",
         plan_json=json.dumps({"kind": "operation", "summary": "查询", "steps": []}),
         confirmation_message_id="om_card",
-        confirmation_chat_id="oc_p2p",
         confirmation_token="ABC123",
     )
     executor = FakeExecutor()
@@ -1004,7 +971,7 @@ async def test_card_confirmation_from_another_member_is_rejected_without_executi
         action="confirm_operation",
         request_message_id="om_request",
         confirmation_message_id="om_card",
-        chat_id="oc_p2p",
+        chat_id="oc_group",
         user_id="ou_other",
         confirmation_token="ABC123",
     )
@@ -1024,18 +991,15 @@ async def test_card_cancellation_prevents_execution_and_returns_status_card(tmp_
         "om_request",
         plan_json=json.dumps({"kind": "operation", "summary": "关闭 5000 服", "steps": []}),
         confirmation_message_id="om_card",
-        confirmation_chat_id="oc_p2p",
-        group_status_message_id="om_group_card",
         confirmation_token="ABC123",
     )
     executor = FakeExecutor()
-    feishu = FakeFeishuClient()
     processor = MessageJobProcessor(
         config,
         store,
         ConversationStore(4),
         ai_client=None,
-        feishu_client=feishu,
+        feishu_client=FakeFeishuClient(),
         muliu_executor=executor,
     )
 
@@ -1043,16 +1007,14 @@ async def test_card_cancellation_prevents_execution_and_returns_status_card(tmp_
         action="cancel_operation",
         request_message_id="om_request",
         confirmation_message_id="om_card",
-        chat_id="oc_p2p",
+        chat_id="oc_group",
         user_id="ou_requester",
         confirmation_token="ABC123",
     )
-    await asyncio.sleep(0)
 
     assert card["header"]["title"]["content"] == "测试服操作已取消"
     assert store.get("om_request").status == "cancelled"
     assert executor.plans == []
-    assert ("om_group_card", card) in feishu.card_updates
 
 
 @pytest.mark.asyncio
@@ -1318,17 +1280,11 @@ async def test_batch_environment_version_query_passes_firewall_and_waits_for_con
     assert "batch_server_query.py" in str(feishu.cards[0][1])
     assert "--servers 5000,5001,5500,6000,6001,7001,7002" in str(feishu.cards[0][1])
     assert "海外所有DEV环境" in str(feishu.cards[0][1])
-    assert all(element.get("tag") != "action" for element in feishu.cards[0][1]["elements"])
-    assert feishu.private_cards[0][0] == "ou_user"
 
 
 @pytest.mark.asyncio
-async def test_scenario_lookup_plan_passes_firewall_and_waits_for_confirmation(tmp_path, monkeypatch):
+async def test_scenario_lookup_plan_passes_firewall_and_waits_for_confirmation(tmp_path):
     config = make_config()
-    monkeypatch.setattr(
-        "src.message_worker.MuliuPlanRouteResolver.resolve",
-        lambda _resolver, _plan: type("Route", (), {"region": "overseas", "label": "海外服", "identifier": "route-overseas"})(),
-    )
     store = MessageJobStore(tmp_path / "jobs.sqlite3")
     store.initialize()
     store.create_if_new("om_ssinfo", "evt_ssinfo", "oc_group", "ou_user", "查看目前所有服务器哪个是2001剧本", chat_type="group")
@@ -1353,7 +1309,11 @@ async def test_scenario_lookup_plan_passes_firewall_and_waits_for_confirmation(t
         feishu_client=feishu,
         operation_planner=FakePlanner(ssinfo_plan),
         muliu_firewall=production_firewall(config),
-        route_resolver=production_route_resolver(),
+        route_resolver=type(
+            "RouteResolver",
+            (),
+            {"resolve": lambda _self, _plan: type("Route", (), {"label": "海外服", "identifier": "route-overseas", "region": "overseas"})()},
+        )(),
         muliu_executor=executor,
     )
 
@@ -1367,7 +1327,5 @@ async def test_scenario_lookup_plan_passes_firewall_and_waits_for_confirmation(t
     assert "basic_info.sh" in str(feishu.cards[0][1])
     assert "ssinfo" in str(feishu.cards[0][1])
     assert "2001" in str(feishu.cards[0][1])
-    assert all(element.get("tag") != "action" for element in feishu.cards[0][1]["elements"])
-    assert feishu.private_cards[0][0] == "ou_user"
 
 

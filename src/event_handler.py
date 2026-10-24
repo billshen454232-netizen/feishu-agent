@@ -72,8 +72,6 @@ class FeishuEventHandler:
         sender_id = sender.get("sender_id", {}) if isinstance(sender, dict) else {}
         user_id = ""
         if isinstance(sender_id, dict):
-            # Operation confirmation cards are sent through the Feishu open_id API.
-            # Keep non-operation messages compatible with legacy identifier fallbacks.
             user_id = str(sender_id.get("open_id") or sender_id.get("user_id") or sender_id.get("union_id") or "")
 
         logger.warning(
@@ -127,7 +125,7 @@ class FeishuEventHandler:
         confirmation_token = str(value.get("confirmation_token", ""))
         confirmation_message_id = str(context.get("open_message_id", ""))
         chat_id = str(context.get("open_chat_id", ""))
-        user_id = str(operator.get("open_id") or "")
+        user_id = str(operator.get("open_id") or operator.get("user_id") or operator.get("union_id") or "")
         if not all((action_name, request_message_id, confirmation_token, confirmation_message_id, chat_id, user_id)):
             logger.warning("ignored card event_id=%s reason=missing_callback_identity", event_id)
             return _card_action_response("卡片操作信息不完整，未执行。", "warning")

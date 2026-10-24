@@ -246,8 +246,6 @@ def test_gateway_worker_result_route_persists_and_interprets_patch_query(monkeyp
         "om_worker_1",
         plan_json=_plan_to_json(plan),
         confirmation_message_id="card_1",
-        confirmation_chat_id="oc_p2p_1",
-        group_status_message_id="group_card_1",
         confirmation_token="token_1",
         confirmation_method="card",
         route_region="overseas",
@@ -255,7 +253,7 @@ def test_gateway_worker_result_route_persists_and_interprets_patch_query(monkeyp
     store.claim_card_confirmation(
         request_message_id="om_worker_1",
         confirmation_message_id="card_1",
-        chat_id="oc_p2p_1",
+        chat_id="oc_1",
         user_id="ou_1",
         confirmation_token="token_1",
         max_age_seconds=600,
@@ -318,9 +316,9 @@ def test_gateway_worker_result_route_persists_and_interprets_patch_query(monkeyp
     assert "执行明细：" in reply_text
     assert "✅ 执行完成：查询 5010 服 Patch 列表" in reply_text
 
-    assert len(feishu.card_updates) == 2
-    assert [card_target for card_target, _card in feishu.card_updates] == ["card_1", "group_card_1"]
-    assert all(card["header"]["template"] == "green" for _card_target, card in feishu.card_updates)
-    group_card = feishu.card_updates[1][1]
-    assert "【存在】已在 5010 服找到该补丁" in group_card["elements"][2]["text"]["content"]
-    assert "执行明细：" not in group_card["elements"][2]["text"]["content"]
+    assert len(feishu.card_updates) == 1
+    card_target, card = feishu.card_updates[0]
+    assert card_target == "card_1"
+    assert card["header"]["template"] == "green"
+    assert "【存在】已在 5010 服找到该补丁" in card["elements"][2]["text"]["content"]
+    assert "执行明细：" not in card["elements"][2]["text"]["content"]

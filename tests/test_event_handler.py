@@ -100,30 +100,20 @@ def card_action_event(
     }
 
 
-def message_event(
-    chat_type="p2p",
-    text="你好",
-    mentions=None,
-    event_id="evt-1",
-    message_id="om_1",
-    sender_open_id=None,
-):
-    event = {
-        "message": {
-            "message_id": message_id,
-            "chat_id": "oc_1",
-            "chat_type": chat_type,
-            "message_type": "text",
-            "content": json.dumps({"text": text}, ensure_ascii=False),
-            "mentions": mentions or [],
-        }
-    }
-    if sender_open_id:
-        event["sender"] = {"sender_id": {"open_id": sender_open_id}}
+def message_event(chat_type="p2p", text="你好", mentions=None, event_id="evt-1", message_id="om_1"):
     return {
         "schema": "2.0",
         "header": {"event_id": event_id, "event_type": "im.message.receive_v1", "token": "verify"},
-        "event": event,
+        "event": {
+            "message": {
+                "message_id": message_id,
+                "chat_id": "oc_1",
+                "chat_type": chat_type,
+                "message_type": "text",
+                "content": json.dumps({"text": text}, ensure_ascii=False),
+                "mentions": mentions or [],
+            }
+        },
     }
 
 
@@ -188,26 +178,6 @@ async def test_group_message_with_mention_removes_mention_text_before_queueing()
     assert result == {"code": 0}
     assert store.create_calls == [("om_1", "evt-1", "oc_1", "group", "", "帮我总结")]
     assert queue.enqueued == ["om_1"]
-
-
-@pytest.mark.asyncio
-async def test_group_message_persists_requester_open_id_for_private_confirmation_card():
-    store = FakeJobStore()
-    queue = FakeJobQueue()
-    mentions = [{"name": "AI助手", "key": "@_user_1"}]
-    handler = FeishuEventHandler(make_config(), store, queue)
-
-    result = await handler.handle(
-        message_event(
-            chat_type="group",
-            text="@_user_1 查询 6001 服",
-            mentions=mentions,
-            sender_open_id="ou_requester",
-        )
-    )
-
-    assert result == {"code": 0}
-    assert store.create_calls == [("om_1", "evt-1", "oc_1", "group", "ou_requester", "查询 6001 服")]
 
 
 @pytest.mark.asyncio

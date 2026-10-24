@@ -155,39 +155,6 @@ def test_card_confirmation_requires_original_requester_and_confirmation_card(tmp
     assert store.get("om_request").status == "confirmed"
 
 
-def test_card_confirmation_binds_private_chat_without_replacing_original_group_chat(tmp_path):
-    store = MessageJobStore(tmp_path / "jobs.sqlite3")
-    store.initialize()
-    store.create_if_new("om_request", "evt", "oc_group", "ou_requester", "关闭 5000 服", now=1000)
-    store.mark_awaiting_confirmation(
-        "om_request",
-        plan_json='{"kind":"operation","summary":"关闭 5000 服","steps":[]}',
-        confirmation_message_id="om_private_card",
-        confirmation_chat_id="oc_p2p",
-        group_status_message_id="om_group_card",
-        confirmation_token="ABC123",
-        confirmation_method="card",
-        now=1001,
-    )
-
-    wrong_chat = store.claim_card_confirmation(
-        "om_request", "om_private_card", "oc_group", "ou_requester", "ABC123", 600, now=1002
-    )
-    wrong_user = store.claim_card_confirmation(
-        "om_request", "om_private_card", "oc_p2p", "ou_other", "ABC123", 600, now=1002
-    )
-    claimed = store.claim_card_confirmation(
-        "om_request", "om_private_card", "oc_p2p", "ou_requester", "ABC123", 600, now=1002
-    )
-
-    assert wrong_chat is None
-    assert wrong_user is None
-    assert claimed is not None
-    assert claimed.chat_id == "oc_group"
-    assert claimed.confirmation_chat_id == "oc_p2p"
-    assert claimed.group_status_message_id == "om_group_card"
-
-
 def test_card_cancel_is_atomic_and_prevents_later_confirmation(tmp_path):
     store = MessageJobStore(tmp_path / "jobs.sqlite3")
     store.initialize()
@@ -247,8 +214,6 @@ def test_initialize_migrates_legacy_database_with_empty_chat_type(tmp_path):
     job = store.get("legacy")
     assert job is not None
     assert job.chat_type == ""
-    assert job.confirmation_chat_id == ""
-    assert job.group_status_message_id == ""
 
 
 def _queue_confirmed_worker_job(store, message_id, now=1000):

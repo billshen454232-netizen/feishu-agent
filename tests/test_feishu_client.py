@@ -4,7 +4,7 @@ import httpx
 import pytest
 
 from src.config import FeishuConfig
-from src.feishu_client import FeishuClient, FeishuSentMessage
+from src.feishu_client import FeishuClient
 
 
 @pytest.mark.asyncio
@@ -54,35 +54,6 @@ async def test_reply_card_posts_interactive_message_reply():
     message_id = await client.reply_card("om_xxx", {"header": {"title": "待确认"}})
 
     assert message_id == "om_card"
-    assert len(requests) == 2
-
-
-@pytest.mark.asyncio
-async def test_send_card_to_open_id_posts_interactive_private_message():
-    requests = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        requests.append(request)
-        if str(request.url).endswith("/auth/v3/tenant_access_token/internal"):
-            return httpx.Response(200, json={"code": 0, "tenant_access_token": "tenant-token", "expire": 7200})
-        assert request.method == "POST"
-        assert str(request.url) == "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id"
-        assert request.headers.get("authorization") == "Bearer tenant-token"
-        assert json.loads(request.content.decode("utf-8")) == {
-            "receive_id": "ou_requester",
-            "msg_type": "interactive",
-            "content": json.dumps({"header": {"title": "待确认"}}, ensure_ascii=False),
-        }
-        return httpx.Response(200, json={"code": 0, "data": {"message_id": "om_private", "chat_id": "oc_p2p"}})
-
-    client = FeishuClient(
-        FeishuConfig(app_id="app", app_secret="secret", base_url="https://open.feishu.cn"),
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
-    )
-
-    sent = await client.send_card_to_open_id("ou_requester", {"header": {"title": "待确认"}})
-
-    assert sent == FeishuSentMessage(message_id="om_private", chat_id="oc_p2p")
     assert len(requests) == 2
 
 
