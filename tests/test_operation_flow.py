@@ -315,8 +315,16 @@ async def test_request_creates_plan_and_waits_for_group_confirmation(tmp_path):
     assert executor.plans == []
     assert feishu.cards[0][0] == "om_request"
     assert feishu.cards[0][1]["header"]["title"]["content"] == "待确认的测试服操作"
-    assert feishu.cards[0][1]["elements"][-1]["actions"][0]["value"] == {
+    actions = feishu.cards[0][1]["elements"][-1]["actions"]
+    assert actions[0]["value"] == {
         "action": "confirm_operation",
+        "result_display": "summary",
+        "request_message_id": "om_request",
+        "confirmation_token": job.confirmation_token,
+    }
+    assert actions[1]["value"] == {
+        "action": "confirm_operation",
+        "result_display": "summary_with_logs",
         "request_message_id": "om_request",
         "confirmation_token": job.confirmation_token,
     }
@@ -859,9 +867,53 @@ async def test_card_confirmation_claims_stored_plan_and_updates_original_card(tm
     assert store.get("om_request").status == "done"
     assert feishu.card_updates[0][0] == "om_card"
     assert feishu.card_updates[0][1]["header"]["title"]["content"] == "测试服操作已完成"
-    assert "✅ 执行完成" in feishu.card_updates[0][1]["elements"][2]["text"]["content"]
+    assert "【执行完成】" in feishu.card_updates[0][1]["elements"][2]["text"]["content"]
     assert "执行明细：" not in feishu.card_updates[0][1]["elements"][2]["text"]["content"]
+    assert feishu.replies == []
+
+
+@pytest.mark.asyncio
+async def test_card_confirmation_with_logs_replies_with_execution_detail(tmp_path):
+    config = make_config()
+    store = MessageJobStore(tmp_path / "jobs.sqlite3")
+    store.initialize()
+    plan = make_plan()
+    store.create_if_new("om_request", "evt", "oc_group", "ou_requester", "查询 6001 服", chat_type="group")
+    store.mark_awaiting_confirmation(
+        "om_request",
+        plan_json=json.dumps({
+            "kind": plan.kind.value,
+            "summary": plan.summary,
+            "steps": [{"path": plan.steps[0].path, "args": plan.steps[0].args, "description": plan.steps[0].description}],
+        }),
+        confirmation_message_id="om_card",
+        confirmation_token="ABC123",
+        confirmation_method="card",
+    )
+    feishu = FakeFeishuClient()
+    processor = MessageJobProcessor(
+        config,
+        store,
+        ConversationStore(4),
+        ai_client=None,
+        feishu_client=feishu,
+        muliu_executor=FakeExecutor(),
+    )
+
+    await processor.process_card_action(
+        action="confirm_operation",
+        request_message_id="om_request",
+        confirmation_message_id="om_card",
+        chat_id="oc_group",
+        user_id="ou_requester",
+        confirmation_token="ABC123",
+        include_execution_logs=True,
+    )
+    await asyncio.sleep(0)
+
+    assert store.get("om_request").include_execution_logs is True
     assert feishu.replies[0][0] == "om_card"
+    assert "执行完成" in feishu.replies[0][1]
 
 
 @pytest.mark.asyncio

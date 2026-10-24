@@ -17,7 +17,7 @@ from .conversation_log import ConversationLog
 from .event_handler import FeishuEventHandler
 from .feishu_client import FeishuClient
 from .message_jobs import MessageJobStore
-from .message_worker import MessageJobProcessor, MessageJobQueue, _group_result_summary
+from .message_worker import MessageJobProcessor, MessageJobQueue, result_card_detail
 from .muliu_executor import MuliuExecutor
 from .muliu_firewall import MuliuFirewall
 from .muliu_intent import MuliuIntentRouter
@@ -271,7 +271,7 @@ def _add_gateway_worker_routes(
             pending_job,
             pending_job.confirmation_message_id,
             reply,
-            status_card=build_execution_status_card(result, detail=_group_result_summary(reply)),
+            status_card=build_execution_status_card(result, detail=result_card_detail(reply, result)),
         )
         return {"status": "accepted"}
 
@@ -311,7 +311,7 @@ async def _deliver_expired_worker_leases(
             job,
             job.confirmation_message_id,
             reply,
-            status_card=build_execution_status_card(result, detail=_group_result_summary(reply)),
+            status_card=build_execution_status_card(result, detail=result_card_detail(reply, result)),
         )
 
 

@@ -39,6 +39,7 @@ class MessageJob:
     confirmation_message_id: str
     confirmation_token: str
     confirmation_method: str
+    include_execution_logs: bool
     route_region: str
     worker_id: str
     worker_leased_at: int | None
@@ -69,6 +70,7 @@ class MessageJobStore:
                     confirmation_message_id TEXT NOT NULL DEFAULT '',
                     confirmation_token TEXT NOT NULL DEFAULT '',
                     confirmation_method TEXT NOT NULL DEFAULT 'text',
+                    include_execution_logs INTEGER NOT NULL DEFAULT 1,
                     route_region TEXT NOT NULL DEFAULT '',
                     worker_id TEXT NOT NULL DEFAULT '',
                     worker_leased_at INTEGER
@@ -80,6 +82,7 @@ class MessageJobStore:
             self._add_column_if_missing(conn, "confirmation_message_id", "TEXT NOT NULL DEFAULT ''")
             self._add_column_if_missing(conn, "confirmation_token", "TEXT NOT NULL DEFAULT ''")
             self._add_column_if_missing(conn, "confirmation_method", "TEXT NOT NULL DEFAULT 'text'")
+            self._add_column_if_missing(conn, "include_execution_logs", "INTEGER NOT NULL DEFAULT 1")
             self._add_column_if_missing(conn, "route_region", "TEXT NOT NULL DEFAULT ''")
             self._add_column_if_missing(conn, "worker_id", "TEXT NOT NULL DEFAULT ''")
             self._add_column_if_missing(conn, "worker_leased_at", "INTEGER")
@@ -124,7 +127,7 @@ class MessageJobStore:
                 SELECT message_id, event_id, chat_id, chat_type, user_id, text,
                        status, attempts, created_at, updated_at, last_error,
                        plan_json, confirmation_message_id, confirmation_token, confirmation_method,
-                       route_region, worker_id, worker_leased_at
+                       include_execution_logs, route_region, worker_id, worker_leased_at
                 FROM message_jobs
                 WHERE message_id = ?
                 """,
@@ -172,7 +175,7 @@ class MessageJobStore:
                 SELECT message_id, event_id, chat_id, chat_type, user_id, text,
                        status, attempts, created_at, updated_at, last_error,
                        plan_json, confirmation_message_id, confirmation_token, confirmation_method,
-                       route_region, worker_id, worker_leased_at
+                       include_execution_logs, route_region, worker_id, worker_leased_at
                 FROM message_jobs
                 WHERE status = 'queued_for_worker'
                 ORDER BY created_at ASC
@@ -320,7 +323,7 @@ class MessageJobStore:
                 SELECT message_id, event_id, chat_id, chat_type, user_id, text,
                        status, attempts, created_at, updated_at, last_error,
                        plan_json, confirmation_message_id, confirmation_token, confirmation_method,
-                       route_region, worker_id, worker_leased_at
+                       include_execution_logs, route_region, worker_id, worker_leased_at
                 FROM message_jobs
                 WHERE chat_id = ? AND confirmation_token = ?
                       AND confirmation_method = 'text'
@@ -354,6 +357,8 @@ class MessageJobStore:
         confirmation_token: str,
         max_age_seconds: int,
         now: int | None = None,
+        *,
+        include_execution_logs: bool = False,
     ) -> MessageJob | None:
         """Atomically confirm the exact stored card plan for its original requester.
 
@@ -369,7 +374,7 @@ class MessageJobStore:
                 SELECT message_id, event_id, chat_id, chat_type, user_id, text,
                        status, attempts, created_at, updated_at, last_error,
                        plan_json, confirmation_message_id, confirmation_token, confirmation_method,
-                       route_region, worker_id, worker_leased_at
+                       include_execution_logs, route_region, worker_id, worker_leased_at
                 FROM message_jobs
                 WHERE message_id = ? AND confirmation_message_id = ?
                       AND chat_id = ? AND user_id = ?
@@ -390,15 +395,15 @@ class MessageJobStore:
             updated = conn.execute(
                 """
                 UPDATE message_jobs
-                SET status = 'confirmed', updated_at = ?
+                SET status = 'confirmed', include_execution_logs = ?, updated_at = ?
                 WHERE message_id = ? AND status = 'awaiting_confirmation'
                 """,
-                (timestamp, request_message_id),
+                (int(include_execution_logs), timestamp, request_message_id),
             )
             if updated.rowcount != 1:
                 return None
             conn.commit()
-        return self._row_to_job(row)
+        return self.get(request_message_id)
 
     def cancel_card_confirmation(
         self,
@@ -419,7 +424,7 @@ class MessageJobStore:
                 SELECT message_id, event_id, chat_id, chat_type, user_id, text,
                        status, attempts, created_at, updated_at, last_error,
                        plan_json, confirmation_message_id, confirmation_token, confirmation_method,
-                       route_region, worker_id, worker_leased_at
+                       include_execution_logs, route_region, worker_id, worker_leased_at
                 FROM message_jobs
                 WHERE message_id = ? AND confirmation_message_id = ?
                       AND chat_id = ? AND user_id = ?
@@ -504,7 +509,7 @@ class MessageJobStore:
                 SELECT message_id, event_id, chat_id, chat_type, user_id, text,
                        status, attempts, created_at, updated_at, last_error,
                        plan_json, confirmation_message_id, confirmation_token, confirmation_method,
-                       route_region, worker_id, worker_leased_at
+                       include_execution_logs, route_region, worker_id, worker_leased_at
                 FROM message_jobs
                 WHERE status IN ('queued', 'processing') AND created_at >= ?
                 ORDER BY created_at ASC
@@ -522,7 +527,7 @@ class MessageJobStore:
                 SELECT message_id, event_id, chat_id, chat_type, user_id, text,
                        status, attempts, created_at, updated_at, last_error,
                        plan_json, confirmation_message_id, confirmation_token, confirmation_method,
-                       route_region, worker_id, worker_leased_at
+                       include_execution_logs, route_region, worker_id, worker_leased_at
                 FROM message_jobs
                 WHERE status IN ('queued', 'processing', 'awaiting_confirmation') AND created_at < ?
                 ORDER BY created_at ASC
@@ -590,6 +595,7 @@ class MessageJobStore:
             confirmation_message_id=str(row["confirmation_message_id"]),
             confirmation_token=str(row["confirmation_token"]),
             confirmation_method=str(row["confirmation_method"]),
+            include_execution_logs=bool(row["include_execution_logs"]),
             route_region=str(row["route_region"]),
             worker_id=str(row["worker_id"]),
             worker_leased_at=(int(row["worker_leased_at"]) if row["worker_leased_at"] is not None else None),

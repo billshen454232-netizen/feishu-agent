@@ -123,12 +123,16 @@ class FeishuEventHandler:
         action_name = str(value.get("action", ""))
         request_message_id = str(value.get("request_message_id", ""))
         confirmation_token = str(value.get("confirmation_token", ""))
+        result_display = str(value.get("result_display", ""))
         confirmation_message_id = str(context.get("open_message_id", ""))
         chat_id = str(context.get("open_chat_id", ""))
         user_id = str(operator.get("open_id") or operator.get("user_id") or operator.get("union_id") or "")
         if not all((action_name, request_message_id, confirmation_token, confirmation_message_id, chat_id, user_id)):
             logger.warning("ignored card event_id=%s reason=missing_callback_identity", event_id)
             return _card_action_response("卡片操作信息不完整，未执行。", "warning")
+        if action_name == "confirm_operation" and result_display not in {"summary", "summary_with_logs"}:
+            logger.warning("ignored card event_id=%s reason=invalid_result_display", event_id)
+            return _card_action_response("结果展示选项无效，未执行。", "warning")
 
         card = await self._job_processor.process_card_action(
             action=action_name,
@@ -137,6 +141,7 @@ class FeishuEventHandler:
             chat_id=chat_id,
             user_id=user_id,
             confirmation_token=confirmation_token,
+            include_execution_logs=(result_display == "summary_with_logs"),
         )
         if card is None:
             logger.warning(

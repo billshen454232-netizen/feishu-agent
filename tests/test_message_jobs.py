@@ -152,7 +152,31 @@ def test_card_confirmation_requires_original_requester_and_confirmation_card(tmp
     assert wrong_user is None
     assert wrong_card is None
     assert claimed is not None
+    assert claimed.include_execution_logs is False
     assert store.get("om_request").status == "confirmed"
+
+
+def test_card_confirmation_persists_summary_only_display_preference(tmp_path):
+    store = MessageJobStore(tmp_path / "jobs.sqlite3")
+    store.initialize()
+    store.create_if_new("om_request", "evt", "oc_group", "ou_requester", "关闭 5000 服", now=1000)
+    store.mark_awaiting_confirmation(
+        "om_request",
+        plan_json='{"kind":"operation","summary":"关闭 5000 服","steps":[]}',
+        confirmation_message_id="om_card",
+        confirmation_token="ABC123",
+        now=1001,
+    )
+
+    claimed = store.claim_card_confirmation(
+        "om_request", "om_card", "oc_group", "ou_requester", "ABC123", 600,
+        now=1002,
+        include_execution_logs=False,
+    )
+
+    assert claimed is not None
+    assert claimed.include_execution_logs is False
+    assert store.get("om_request").include_execution_logs is False
 
 
 def test_card_cancel_is_atomic_and_prevents_later_confirmation(tmp_path):
@@ -214,6 +238,7 @@ def test_initialize_migrates_legacy_database_with_empty_chat_type(tmp_path):
     job = store.get("legacy")
     assert job is not None
     assert job.chat_type == ""
+    assert job.include_execution_logs is True
 
 
 def _queue_confirmed_worker_job(store, message_id, now=1000):

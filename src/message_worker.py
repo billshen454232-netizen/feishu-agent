@@ -307,6 +307,7 @@ class MessageJobProcessor:
         chat_id: str,
         user_id: str,
         confirmation_token: str,
+        include_execution_logs: bool = False,
     ) -> dict[str, object] | None:
         """Handle a CardKit action without trusting its executable contents.
 
@@ -344,6 +345,7 @@ class MessageJobProcessor:
             user_id,
             confirmation_token,
             max_age_seconds=max_age_seconds,
+            include_execution_logs=include_execution_logs,
         )
         if pending_job is None:
             return None
@@ -387,7 +389,7 @@ class MessageJobProcessor:
                 pending_job,
                 reply_message_id,
                 reply,
-                status_card=build_execution_status_card(result, detail=_group_result_summary(reply)),
+                status_card=build_execution_status_card(result, detail=result_card_detail(reply, result)),
             )
             return False
 
@@ -406,7 +408,7 @@ class MessageJobProcessor:
                     pending_job,
                     reply_message_id,
                     reply,
-                    status_card=build_execution_status_card(result, detail=_group_result_summary(reply)),
+                    status_card=build_execution_status_card(result, detail=result_card_detail(reply, result)),
                 )
                 return False
             if not self._store.queue_for_worker(pending_job.message_id):
@@ -423,7 +425,7 @@ class MessageJobProcessor:
                     pending_job,
                     reply_message_id,
                     reply,
-                    status_card=build_execution_status_card(result, detail=_group_result_summary(reply)),
+                    status_card=build_execution_status_card(result, detail=result_card_detail(reply, result)),
                 )
                 return False
             return True
@@ -442,7 +444,7 @@ class MessageJobProcessor:
                 pending_job,
                 reply_message_id,
                 reply,
-                status_card=build_execution_status_card(result, detail=_group_result_summary(reply)),
+                status_card=build_execution_status_card(result, detail=result_card_detail(reply, result)),
             )
             return False
 
@@ -479,7 +481,7 @@ class MessageJobProcessor:
                 reply,
                 status_card=build_execution_status_card(
                     execution_result,
-                    detail=_group_result_summary(reply),
+                    detail=result_card_detail(reply, execution_result),
                 ),
             )
         except asyncio.CancelledError:
@@ -511,7 +513,7 @@ class MessageJobProcessor:
                 pending_job,
                 reply_message_id,
                 reply,
-                status_card=build_execution_status_card(result, detail=_group_result_summary(reply)),
+                status_card=build_execution_status_card(result, detail=result_card_detail(reply, result)),
             )
         except MuliuExecutionError as exc:
             error = str(exc)
@@ -527,7 +529,7 @@ class MessageJobProcessor:
                 pending_job,
                 reply_message_id,
                 reply,
-                status_card=build_execution_status_card(result, detail=_group_result_summary(reply)),
+                status_card=build_execution_status_card(result, detail=result_card_detail(reply, result)),
             )
         except Exception as exc:  # noqa: BLE001 - preserve an uncertain remote operation
             error = "机器人在等待结果时发生异常：{}；请勿重复确认或重试".format(exc)
@@ -542,7 +544,7 @@ class MessageJobProcessor:
                 pending_job,
                 reply_message_id,
                 reply,
-                status_card=build_execution_status_card(result, detail=_group_result_summary(reply)),
+                status_card=build_execution_status_card(result, detail=result_card_detail(reply, result)),
             )
 
     async def interpret_execution_result(
@@ -623,7 +625,8 @@ class MessageJobProcessor:
                 and pending_job.confirmation_message_id
             ):
                 await update_card(pending_job.confirmation_message_id, status_card)
-            await self._feishu_client.reply_text(reply_message_id, reply)
+            if pending_job.confirmation_method != "card" or pending_job.include_execution_logs:
+                await self._feishu_client.reply_text(reply_message_id, reply)
         except Exception:  # noqa: BLE001 - delivery failure does not change remote outcome
             logger.exception("execution result delivery failed message_id=%s", pending_job.message_id)
         finally:
@@ -838,12 +841,24 @@ def should_interpret_with_ai(_job_text: str, _result: MuliuExecutionResult) -> b
 
 
 def _group_result_summary(reply: str, *, max_chars: int = 1200) -> str:
-    """Show the AI conclusion in the group card, never its private full log detail."""
+    """Show a bounded, log-free conclusion in the terminal status card."""
     conclusion = reply.split("\n\n---\n\n执行明细：", 1)[0].strip()
     conclusion = mask_sensitive_operation_data(conclusion)
     if len(conclusion) <= max_chars:
         return conclusion
     return "{}\n…（群内摘要已截断）".format(conclusion[:max_chars])
+
+
+def result_card_detail(reply: str, result: MuliuExecutionResult) -> str:
+    """Prefer an AI conclusion but never put raw execution logs in a status card."""
+    summary = _group_result_summary(reply)
+    if "执行明细：" in reply:
+        return summary
+    if result.succeeded:
+        return "【执行完成】{}".format(result.summary)
+    if result.result_unknown:
+        return "【结果尚未核验】{}".format(result.result_unknown_reason)
+    return "【执行失败】{}".format(result.failure_reason)
 
 
 def _build_clean_execution_data(result: MuliuExecutionResult, *, max_chars: int) -> str:

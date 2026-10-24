@@ -91,6 +91,7 @@ def card_action_event(
                 "tag": "button",
                 "value": {
                     "action": action,
+                    "result_display": "summary",
                     "request_message_id": request_message_id,
                     "confirmation_token": confirmation_token,
                 },
@@ -303,7 +304,33 @@ async def test_card_action_passes_only_identity_values_to_processor():
         "chat_id": "oc_1",
         "user_id": "ou_requester",
         "confirmation_token": "ABC123",
+        "include_execution_logs": False,
     }]
+
+
+@pytest.mark.asyncio
+async def test_card_action_with_logs_forwards_only_display_preference():
+    processor = FakeCardProcessor()
+    payload = card_action_event()
+    payload["event"]["action"]["value"]["result_display"] = "summary_with_logs"
+    handler = FeishuEventHandler(make_config(), FakeJobStore(), FakeJobQueue(), job_processor=processor)
+
+    await handler.handle(payload)
+
+    assert processor.calls[0]["include_execution_logs"] is True
+
+
+@pytest.mark.asyncio
+async def test_card_action_with_invalid_display_is_rejected_without_calling_processor():
+    processor = FakeCardProcessor()
+    payload = card_action_event()
+    payload["event"]["action"]["value"]["result_display"] = "all_server_logs"
+    handler = FeishuEventHandler(make_config(), FakeJobStore(), FakeJobQueue(), job_processor=processor)
+
+    result = await handler.handle(payload)
+
+    assert result == {"toast": {"type": "warning", "content": "结果展示选项无效，未执行。"}}
+    assert processor.calls == []
 
 
 @pytest.mark.asyncio

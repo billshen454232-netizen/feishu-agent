@@ -199,10 +199,18 @@ def test_confirmation_card_uses_only_pending_plan_identity_in_button_values():
     )
 
     actions = card["elements"][-1]["actions"]
-    confirm_value = actions[0]["value"]
-    cancel_value = actions[1]["value"]
-    assert confirm_value == {
+    summary_value = actions[0]["value"]
+    logs_value = actions[1]["value"]
+    cancel_value = actions[2]["value"]
+    assert summary_value == {
         "action": "confirm_operation",
+        "result_display": "summary",
+        "request_message_id": "om_request",
+        "confirmation_token": "ABC123",
+    }
+    assert logs_value == {
+        "action": "confirm_operation",
+        "result_display": "summary_with_logs",
         "request_message_id": "om_request",
         "confirmation_token": "ABC123",
     }
@@ -211,8 +219,10 @@ def test_confirmation_card_uses_only_pending_plan_identity_in_button_values():
         "request_message_id": "om_request",
         "confirmation_token": "ABC123",
     }
-    assert "/home/serverGeneralScript/shutdown" not in str(confirm_value)
-    assert "5000" not in str(confirm_value)
+    assert "/home/serverGeneralScript/shutdown" not in str(summary_value)
+    assert "/home/serverGeneralScript/shutdown" not in str(logs_value)
+    assert "5000" not in str(summary_value)
+    assert "5000" not in str(logs_value)
 
 
 def test_confirmation_card_displays_derived_route_without_putting_it_in_button_values():

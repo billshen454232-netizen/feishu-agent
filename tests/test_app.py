@@ -309,12 +309,7 @@ def test_gateway_worker_result_route_persists_and_interprets_patch_query(monkeyp
 
     assert len(captured_feishu) == 1
     feishu = captured_feishu[0]
-    assert len(feishu.replies) == 1
-    reply_target, reply_text = feishu.replies[0]
-    assert reply_target == "card_1"
-    assert reply_text.startswith("【存在】已在 5010 服找到该补丁")
-    assert "执行明细：" in reply_text
-    assert "✅ 执行完成：查询 5010 服 Patch 列表" in reply_text
+    assert feishu.replies == []
 
     assert len(feishu.card_updates) == 1
     card_target, card = feishu.card_updates[0]
@@ -322,3 +317,94 @@ def test_gateway_worker_result_route_persists_and_interprets_patch_query(monkeyp
     assert card["header"]["template"] == "green"
     assert "【存在】已在 5010 服找到该补丁" in card["elements"][2]["text"]["content"]
     assert "执行明细：" not in card["elements"][2]["text"]["content"]
+
+
+def test_gateway_worker_result_with_logs_replies_with_execution_detail(monkeypatch, tmp_path):
+    catalog_path = tmp_path / "catalog.md"
+    catalog_path.write_text(
+        "# Muliu\n\n<!-- MULIU_CALL_CONTRACTS\n"
+        "{\n"
+        '  "max_plan_steps": 1,\n'
+        '  "contracts": [\n'
+        "    {\n"
+        '      "name": "basic-server-info",\n'
+        '      "path": "/home/serverGeneralScript/basic_info.sh",\n'
+        '      "args": ["{server_id}"],\n'
+        '      "variables": {"server_id": "[0-9]{3,8}"},\n'
+        '      "runner": "bash",\n'
+        '      "risk": "read"\n'
+        "    }\n"
+        "  ]\n"
+        "}\n"
+        "MULIU_CALL_CONTRACTS -->",
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "gateway-config.json"
+    config_path.write_text(json.dumps({
+        "runtime": {"role": "gateway", "worker_token": "secret-token", "lease_timeout_seconds": 60},
+        "feishu": {"app_id": "app", "app_secret": "secret", "verification_token": "verify"},
+        "ai": {"provider": "openai_compatible", "base_url": "https://api.example.com/v1", "api_key": "key", "model": "m"},
+        "job_queue": {"database_path": str(tmp_path / "jobs.sqlite3"), "recovery_window_seconds": 600},
+        "muliu": {"script_catalog_path": str(catalog_path)},
+        "execution_interpretation": {"enabled": False},
+    }), encoding="utf-8")
+
+    captured_feishu = []
+
+    class FakeFeishu:
+        def __init__(self, _cfg):
+            self.replies = []
+            self.card_updates = []
+            captured_feishu.append(self)
+
+        async def reply_text(self, message_id, text):
+            self.replies.append((message_id, text))
+
+        async def update_card(self, message_id, card):
+            self.card_updates.append((message_id, card))
+
+    monkeypatch.setattr("src.app.FeishuClient", FakeFeishu)
+    app = create_app(config_path)
+    store = MessageJobStore(tmp_path / "jobs.sqlite3")
+    store.initialize()
+    plan = MuliuPlan(
+        summary="查询 6001 服基础信息",
+        kind=MuliuPlanKind.OPERATION,
+        steps=[MuliuStep("/home/serverGeneralScript/basic_info.sh", ["6001"], "查询基础信息")],
+    )
+    store.create_if_new("om_worker_logs", "evt_logs", "oc_1", "ou_1", "查询 6001 服")
+    store.mark_awaiting_confirmation(
+        "om_worker_logs",
+        plan_json=_plan_to_json(plan),
+        confirmation_message_id="card_logs",
+        confirmation_token="token_logs",
+        confirmation_method="card",
+        route_region="overseas",
+    )
+    store.claim_card_confirmation(
+        "om_worker_logs", "card_logs", "oc_1", "ou_1", "token_logs", 600,
+        include_execution_logs=True,
+    )
+    store.queue_for_worker("om_worker_logs")
+
+    with TestClient(app) as client:
+        client.post(
+            "/internal/worker/jobs/claim",
+            headers={"Authorization": "Bearer secret-token", "X-Feishu-Worker-Id": "jenkins-worker-1"},
+        )
+        result = MuliuExecutionResult(
+            summary="查询 6001 服基础信息",
+            step_results=[MuliuStepResult(1, "查询基础信息", "/home/serverGeneralScript/basic_info.sh", ["6001"], True, "开服成功")],
+        )
+        response = client.post(
+            "/internal/worker/jobs/om_worker_logs/result",
+            headers={"Authorization": "Bearer secret-token", "X-Feishu-Worker-Id": "jenkins-worker-1"},
+            json={"result": serialize_execution_result(result)},
+        )
+
+    assert response.status_code == 200
+    feishu = captured_feishu[0]
+    assert len(feishu.replies) == 1
+    assert feishu.replies[0][0] == "card_logs"
+    assert "开服成功" in feishu.replies[0][1]
+    assert "开服成功" not in feishu.card_updates[0][1]["elements"][2]["text"]["content"]

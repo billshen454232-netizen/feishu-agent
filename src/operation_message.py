@@ -140,13 +140,34 @@ def build_plan_confirmation_card(
                 {
                     "tag": "button",
                     "type": "primary",
-                    "text": {"tag": "plain_text", "content": "确认执行"},
-                    "value": {"action": "confirm_operation", **callback_reference},
+                    "text": {"tag": "plain_text", "content": "确认执行（仅摘要）"},
+                    "value": {
+                        "action": "confirm_operation",
+                        "result_display": "summary",
+                        **callback_reference,
+                    },
                     "confirm": {
                         "title": {"tag": "plain_text", "content": "确认执行测试服操作"},
                         "text": {
                             "tag": "plain_text",
-                            "content": "确认后会立即提交卡片中展示的操作计划。",
+                            "content": "确认后会立即提交卡片中展示的操作计划；完成后仅更新卡片摘要。",
+                        },
+                    },
+                },
+                {
+                    "tag": "button",
+                    "type": "default",
+                    "text": {"tag": "plain_text", "content": "确认执行并输出日志"},
+                    "value": {
+                        "action": "confirm_operation",
+                        "result_display": "summary_with_logs",
+                        **callback_reference,
+                    },
+                    "confirm": {
+                        "title": {"tag": "plain_text", "content": "确认执行并输出日志"},
+                        "text": {
+                            "tag": "plain_text",
+                            "content": "确认后会立即提交卡片中展示的操作计划；完成后会在群内回复执行明细。",
                         },
                     },
                 },
