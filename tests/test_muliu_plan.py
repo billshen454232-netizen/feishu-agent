@@ -27,6 +27,44 @@ def test_parses_valid_operation_plan():
     assert plan.summary == "查询 6001 服信息"
     assert plan.steps[0].path == "/home/serverGeneralScript/basic_info.sh"
     assert plan.steps[0].args == ["6001"]
+    assert plan.route_scope is None
+
+
+@pytest.mark.parametrize("route_scope", ["cn", "overseas"])
+def test_parses_closed_range_route_scope(route_scope):
+    plan = parse_plan(
+        json.dumps({
+            "kind": "operation",
+            "route_scope": route_scope,
+            "summary": "查询范围剧本服务器",
+            "steps": [{
+                "path": "/home/serverGeneralScript/basic_info.sh",
+                "args": ["ssinfo", "1000"],
+                "description": "查询剧本服务器",
+            }],
+        }),
+        allow_legacy_kind=False,
+    )
+
+    assert plan.route_scope == route_scope
+
+
+@pytest.mark.parametrize("route_scope", [None, "global", 1])
+def test_rejects_invalid_range_route_scope(route_scope):
+    with pytest.raises(MuliuPlanError, match="route_scope 必须是 cn 或 overseas"):
+        parse_plan(
+            json.dumps({
+                "kind": "operation",
+                "route_scope": route_scope,
+                "summary": "查询范围剧本服务器",
+                "steps": [{
+                    "path": "/home/serverGeneralScript/basic_info.sh",
+                    "args": ["ssinfo", "1000"],
+                    "description": "查询剧本服务器",
+                }],
+            }),
+            allow_legacy_kind=False,
+        )
 
 
 @pytest.mark.parametrize("kind", ["knowledge", "clarify", "reject"])

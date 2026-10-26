@@ -153,6 +153,39 @@ async def test_catalog_supports_registered_basic_info_shape():
 
 
 @pytest.mark.asyncio
+async def test_scoped_scenario_lookup_keeps_the_scope_through_semantic_review():
+    from pathlib import Path
+
+    catalog_path = Path(__file__).parents[1] / "config" / "muliu_script_catalog.md"
+
+    class ProductionCatalog:
+        def read(self):
+            return catalog_path.read_text(encoding="utf-8")
+
+        def read_call_contracts(self):
+            return parse_call_contracts(self.read())
+
+    response = json.dumps({
+        "kind": "operation",
+        "route_scope": "cn",
+        "summary": "查询国服所有剧本为 1000 的服务器",
+        "steps": [{
+            "path": "/home/serverGeneralScript/basic_info.sh",
+            "args": ["ssinfo", "1000"],
+            "description": "查询国服范围内的 1000 剧本服务器",
+        }],
+    }, ensure_ascii=False)
+    ai = FakeAIClient([response])
+    planner = MuliuPlanner(ai, ProductionCatalog(), max_steps=1)
+
+    plan = await planner.create_plan("查询国服所有剧本为 1000 的服务器")
+
+    assert plan.route_scope == "cn"
+    assert plan.steps[0].args == ["ssinfo", "1000"]
+    assert '"route_scope":"cn"' in ai.prompts[1][1]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("user_text", "path", "args"),
     [

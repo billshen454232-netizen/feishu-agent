@@ -172,8 +172,7 @@ class MuliuHttpClient:
             time.sleep(interval_seconds)
 
     def get_current_version(self) -> int:
-        _, result = self.request_json(
-            "GET",
+        _, result = self._request_read_json_with_session_recovery(
             "/muliu/api/task/detail?id={}".format(self._config.task_id),
         )
         if not isinstance(result, dict) or result.get("code") != 0:
@@ -232,8 +231,7 @@ class MuliuHttpClient:
             raise MuliuExecutionError("Muliu 明确拒绝执行任务：{}".format(_result_message(result)))
 
     def get_latest_step_log(self) -> str:
-        _, result = self.request_json(
-            "GET",
+        _, result = self._request_read_json_with_session_recovery(
             "/muliu/api/task/log?id={}&step={}&num=0".format(
                 self._config.task_id,
                 self._config.step,
@@ -252,6 +250,18 @@ class MuliuHttpClient:
         if not isinstance(content, str) or not content.strip():
             raise MuliuLogPendingError("Muliu 当前任务日志尚未写入内容")
         return content.strip()
+
+    def _request_read_json_with_session_recovery(self, path: str) -> tuple[int, Any]:
+        """Retry one safe task-read request after an expired Muliu session."""
+        status, result = self.request_json("GET", path)
+        if not _is_muliu_login_page(result):
+            return status, result
+
+        self.login()
+        status, result = self.request_json("GET", path)
+        if _is_muliu_login_page(result):
+            raise MuliuExecutionError("Muliu 会话恢复后仍返回登录页，无法读取任务状态")
+        return status, result
 
     def request_json(
         self,
@@ -387,17 +397,10 @@ class MuliuExecutor:
                 try:
                     verification_log = client.execute_step(verification_step)
                 except MuliuSubmittedError as exc:
-                    if exc.submitted:
-                        return MuliuExecutionResult(
-                            summary=plan.summary,
-                            step_results=results,
-                            result_unknown_reason="起服脚本已结束，但起服状态核验尚未取得终态：{}".format(exc),
-                        )
                     return MuliuExecutionResult(
                         summary=plan.summary,
                         step_results=results,
-                        failed_step_number=step_number,
-                        failure_reason="起服脚本已结束，但起服状态核验未完成：{}".format(exc),
+                        result_unknown_reason="起服脚本已成功结束；起服状态结果尚未核验：{}".format(exc),
                     )
                 verified, verification_error = interpret_start_verification_outcome(verification_log)
                 results.append(
@@ -493,7 +496,24 @@ def decode_response(raw_body: bytes, declared_charset: str | None) -> str:
     return raw_body.decode("utf-8", errors="replace")
 
 
+def _is_muliu_login_page(result: Any) -> bool:
+    """Recognize the Muliu login document without treating arbitrary HTML as auth loss."""
+    if not isinstance(result, str):
+        return False
+    normalized = result.lower()
+    return (
+        "<html" in normalized
+        and "/muliu/login" in normalized
+        and "csrf" in normalized
+        and "password" in normalized
+    )
+
+
 def _result_message(result: Any) -> str:
+    if _is_muliu_login_page(result):
+        return "Muliu 返回登录页，会话可能已失效"
     if isinstance(result, dict):
         return str(result.get("msg") or result.get("message") or result)
+    if isinstance(result, str) and "<html" in result.lower():
+        return "Muliu 返回非预期 HTML 响应"
     return str(result)

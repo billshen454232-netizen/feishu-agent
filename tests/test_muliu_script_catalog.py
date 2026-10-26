@@ -36,10 +36,11 @@ MULIU_CALL_CONTRACTS -->
 """
 
 
-def make_plan(path, args):
+def make_plan(path, args, *, route_scope=None):
     return MuliuPlan(
         summary="查询测试服信息",
         steps=[MuliuStep(path=path, args=args, description="查询")],
+        route_scope=route_scope,
     )
 
 
@@ -105,6 +106,48 @@ def test_contract_extracts_only_contract_declared_target_server_ids():
     plan = make_plan("/home/serverGeneralScript/cc_patch.py", ["-s", "6001", "-ck"])
 
     assert contracts.extract_server_ids(plan) == ("6001",)
+
+
+def test_contract_validates_the_registered_scenario_range_scope_only():
+    contracts = parse_call_contracts(
+        """<!-- MULIU_CALL_CONTRACTS
+        {
+          "max_plan_steps": 2,
+          "contracts": [
+            {
+              "name": "scenario-servers",
+              "path": "/home/serverGeneralScript/basic_info.sh",
+              "args": ["ssinfo", "{scenario}"],
+              "variables": {"scenario": "[0-9]{1,8}"},
+              "runner": "bash",
+              "risk": "read",
+              "route_scopes": ["cn", "overseas"]
+            },
+            {
+              "name": "basic-server-info",
+              "path": "/home/serverGeneralScript/basic_info.sh",
+              "args": ["{server_id}"],
+              "variables": {"server_id": "[0-9]{3,8}"},
+              "runner": "bash",
+              "risk": "read"
+            }
+          ]
+        }
+        MULIU_CALL_CONTRACTS -->"""
+    )
+
+    contracts.validate(
+        make_plan("/home/serverGeneralScript/basic_info.sh", ["ssinfo", "1000"], route_scope="cn")
+    )
+    contracts.validate(
+        make_plan("/home/serverGeneralScript/basic_info.sh", ["ssinfo", "1000"], route_scope="overseas")
+    )
+    with pytest.raises(MuliuCallContractError, match="必须声明"):
+        contracts.validate(make_plan("/home/serverGeneralScript/basic_info.sh", ["ssinfo", "1000"]))
+    with pytest.raises(MuliuCallContractError, match="未由已登记只读调用合同允许"):
+        contracts.validate(
+            make_plan("/home/serverGeneralScript/basic_info.sh", ["6001"], route_scope="overseas")
+        )
 
 
 def test_contract_extracts_all_merge_source_and_target_server_ids():
@@ -206,7 +249,6 @@ def test_production_catalog_accepts_ordered_registered_steps():
         ("/home/serverGeneralScript/cc_patch.py", ["-s", "5000", "-d", "avatar_patch_60952.lua"]),
         ("/home/serverGeneralScript/cc_patch.py", ["-s", "5000", "-f", "uf_hotfix"]),
         ("/home/serverGeneralScript/basic_info.sh", ["5000", "ctime"]),
-        ("/home/serverGeneralScript/basic_info.sh", ["ssinfo", "2001"]),
         ("/home/serverGeneralScript/basic_info.sh", ["ssnum", "player_account"]),
         ("/home/serverGeneralScript/basic_info.sh", ["5000", "123456"]),
         ("/home/serverGeneralScript/clear_logic_game.py", ["5000"]),
@@ -242,6 +284,20 @@ def test_production_catalog_accepts_every_registered_operation_shape(path, args)
     contracts = parse_call_contracts(catalog_path.read_text(encoding="utf-8"))
 
     contracts.validate(make_plan(path, args))
+
+
+@pytest.mark.parametrize("route_scope", ["cn", "overseas"])
+def test_production_catalog_accepts_scenario_lookup_for_the_explicit_range(route_scope):
+    catalog_path = Path(__file__).parents[1] / "config" / "muliu_script_catalog.md"
+    contracts = parse_call_contracts(catalog_path.read_text(encoding="utf-8"))
+
+    contracts.validate(
+        make_plan(
+            "/home/serverGeneralScript/basic_info.sh",
+            ["ssinfo", "2001"],
+            route_scope=route_scope,
+        )
+    )
 
 
 def test_production_catalog_extracts_batch_server_ids_without_using_label_numbers():

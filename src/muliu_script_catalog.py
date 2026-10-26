@@ -37,6 +37,9 @@ class MuliuCallContract:
     variable_patterns: dict[str, re.Pattern[str]]
     runner: str
     risk: str
+    # Gateway/Worker-only routing metadata. It is intentionally not emitted to
+    # the GS-1 argv manifest because it must never become a script argument.
+    route_scopes: frozenset[str] = frozenset()
 
     def matches(self, step: MuliuStep) -> bool:
         if step.path != self.path or len(step.args) != len(self.args):
@@ -109,13 +112,27 @@ class MuliuCallContracts:
                 "当前执行资料最多允许 {} 个已登记步骤".format(self.max_plan_steps)
             )
 
+        matched_contracts: list[MuliuCallContract] = []
         for step_number, step in enumerate(plan.steps, start=1):
-            if any(contract.matches(step) for contract in self.contracts):
+            matching_contracts = [contract for contract in self.contracts if contract.matches(step)]
+            if len(matching_contracts) == 1:
+                matched_contracts.append(matching_contracts[0])
                 continue
+            if len(matching_contracts) > 1:
+                raise MuliuCallContractError(
+                    "步骤 {} 无法唯一匹配调用合同".format(step_number)
+                )
             raise MuliuCallContractError(
                 "步骤 {} 不符合任何已登记调用合同：脚本路径和参数必须完全匹配执行资料中的模板"
                 .format(step_number)
             )
+
+        if plan.route_scope is None:
+            if any(contract.route_scopes for contract in matched_contracts):
+                raise MuliuCallContractError("该已登记范围查询必须声明 cn 或 overseas 路由范围")
+            return
+        if len(matched_contracts) != 1 or not self.permits_route_scope(plan, plan.route_scope):
+            raise MuliuCallContractError("计划声明的范围路由未由已登记只读调用合同允许")
 
     def runner_manifest(self) -> MuliuRunnerManifest:
         runners_by_path: dict[str, str] = {}
@@ -132,36 +149,57 @@ class MuliuCallContracts:
 
         This deliberately ignores free-form descriptions and ordinary numeric
         arguments such as scenario, season, account, user id, or threshold value.
-        Any call shape that does not declare a target server is not routable.
+        Any call shape that does not declare a target server is not routable unless
+        a matching read-only contract explicitly permits its closed range route.
         """
         server_ids: list[str] = []
         for step_number, step in enumerate(plan.steps, start=1):
-            matching_contracts = [contract for contract in self.contracts if contract.matches(step)]
-            if len(matching_contracts) != 1:
-                raise MuliuCallContractError(
-                    "步骤 {} 无法唯一匹配调用合同，不能选择 Worker 路由".format(step_number)
-                )
-            contract = matching_contracts[0]
-            step_server_ids: list[str] = []
-            for actual_argument, template_argument in zip(step.args, contract.args):
-                variable_match = _VARIABLE_TEMPLATE_PATTERN.fullmatch(template_argument)
-                if variable_match is None:
-                    continue
-                variable_name = variable_match.group(1)
-                if (
-                    variable_name == "server_id"
-                    or variable_name.startswith("server_id_")
-                    or variable_name.endswith("_server_id")
-                ):
-                    step_server_ids.append(actual_argument)
-                elif variable_name == "server_ids":
-                    step_server_ids.extend(server_id.strip() for server_id in actual_argument.split(","))
+            contract = self._matching_contract(step, step_number)
+            step_server_ids = self._contract_server_ids(contract, step)
             if not step_server_ids or any(not server_id for server_id in step_server_ids):
                 raise MuliuCallContractError(
                     "步骤 {} 的调用合同未声明有效目标服号，不能选择 Worker 路由".format(step_number)
                 )
             server_ids.extend(step_server_ids)
         return tuple(server_ids)
+
+    def permits_route_scope(self, plan: MuliuPlan, route_scope: str) -> bool:
+        """Return whether every exact plan step allows this closed range route."""
+        if route_scope not in {"cn", "overseas"}:
+            return False
+        if not plan.steps:
+            return False
+        return all(
+            contract.risk == "read" and contract.route_scopes and route_scope in contract.route_scopes
+            for step_number, step in enumerate(plan.steps, start=1)
+            for contract in (self._matching_contract(step, step_number),)
+        )
+
+    def _matching_contract(self, step: MuliuStep, step_number: int) -> MuliuCallContract:
+        matching_contracts = [contract for contract in self.contracts if contract.matches(step)]
+        if len(matching_contracts) != 1:
+            raise MuliuCallContractError(
+                "步骤 {} 无法唯一匹配调用合同，不能选择 Worker 路由".format(step_number)
+            )
+        return matching_contracts[0]
+
+    @staticmethod
+    def _contract_server_ids(contract: MuliuCallContract, step: MuliuStep) -> list[str]:
+        step_server_ids: list[str] = []
+        for actual_argument, template_argument in zip(step.args, contract.args):
+            variable_match = _VARIABLE_TEMPLATE_PATTERN.fullmatch(template_argument)
+            if variable_match is None:
+                continue
+            variable_name = variable_match.group(1)
+            if (
+                variable_name == "server_id"
+                or variable_name.startswith("server_id_")
+                or variable_name.endswith("_server_id")
+            ):
+                step_server_ids.append(actual_argument)
+            elif variable_name == "server_ids":
+                step_server_ids.extend(server_id.strip() for server_id in actual_argument.split(","))
+        return step_server_ids
 
 
 class MuliuScriptCatalog:
@@ -279,7 +317,11 @@ def _parse_contract(raw_contract: object, index: int) -> MuliuCallContract:
     label = "Muliu 调用合同 contracts[{}]".format(index)
     if not isinstance(raw_contract, dict):
         raise MuliuCallContractError("{} 必须是 JSON 对象".format(label))
-    _reject_unknown_fields(raw_contract, {"name", "path", "args", "variables", "runner", "risk"}, label)
+    _reject_unknown_fields(
+        raw_contract,
+        {"name", "path", "args", "variables", "runner", "risk", "route_scopes"},
+        label,
+    )
 
     name = _require_non_empty_string(raw_contract.get("name"), "{}.name".format(label))
     path = _require_non_empty_string(raw_contract.get("path"), "{}.path".format(label))
@@ -295,6 +337,9 @@ def _parse_contract(raw_contract: object, index: int) -> MuliuCallContract:
         raise MuliuCallContractError(
             "{}.risk 必须是以下值之一：{}".format(label, ", ".join(sorted(_RISK_VALUES)))
         )
+    route_scopes = _parse_route_scopes(raw_contract.get("route_scopes"), label)
+    if route_scopes and risk != "read":
+        raise MuliuCallContractError("{}.route_scopes 仅允许用于 read 合同".format(label))
 
     raw_args = raw_contract.get("args")
     if not isinstance(raw_args, list):
@@ -329,7 +374,20 @@ def _parse_contract(raw_contract: object, index: int) -> MuliuCallContract:
         variable_patterns=variable_patterns,
         runner=runner,
         risk=risk,
+        route_scopes=route_scopes,
     )
+
+
+def _parse_route_scopes(raw_route_scopes: object, label: str) -> frozenset[str]:
+    if raw_route_scopes is None:
+        return frozenset()
+    if not isinstance(raw_route_scopes, list) or not raw_route_scopes:
+        raise MuliuCallContractError("{}.route_scopes 必须是非空数组".format(label))
+    if any(not isinstance(region, str) or region not in {"cn", "overseas"} for region in raw_route_scopes):
+        raise MuliuCallContractError("{}.route_scopes 只能包含 cn 或 overseas".format(label))
+    if len(raw_route_scopes) != len(set(raw_route_scopes)):
+        raise MuliuCallContractError("{}.route_scopes 不能重复".format(label))
+    return frozenset(raw_route_scopes)
 
 
 def _require_non_empty_string(value: object, label: str) -> str:

@@ -94,6 +94,15 @@ def make_route_resolver(tmp_path):
                 runner="bash",
                 risk="read",
             ),
+            MuliuCallContract(
+                name="按剧本查询范围服务器",
+                path="/home/serverGeneralScript/basic_info.sh",
+                args=("ssinfo", "{scenario}"),
+                variable_patterns={"scenario": re.compile(r"[0-9]{1,8}")},
+                runner="bash",
+                risk="read",
+                route_scopes=frozenset({"cn", "overseas"}),
+            ),
         ),
     )
     return MuliuPlanRouteResolver(str(environment_path), contracts)
@@ -125,6 +134,32 @@ def make_cn_plan():
             )
         ],
     )
+
+
+def make_scoped_scenario_plan(route_scope):
+    return MuliuPlan(
+        summary="查询 {}范围 1000 剧本服务器".format(route_scope),
+        kind=MuliuPlanKind.OPERATION,
+        route_scope=route_scope,
+        steps=[
+            MuliuStep(
+                path="/home/serverGeneralScript/basic_info.sh",
+                args=["ssinfo", "1000"],
+                description="查询范围内 1000 剧本服务器",
+            )
+        ],
+    )
+
+
+def plan_json(plan):
+    payload = {
+        "kind": plan.kind.value,
+        "summary": plan.summary,
+        "steps": [{"path": plan.steps[0].path, "args": plan.steps[0].args, "description": plan.steps[0].description}],
+    }
+    if plan.route_scope is not None:
+        payload["route_scope"] = plan.route_scope
+    return json.dumps(payload)
 
 
 class AcceptAllFirewall:
@@ -247,6 +282,39 @@ async def test_worker_selects_cn_profile_task_id_with_the_cn_muliu_url(tmp_path,
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("route_scope", "base_url", "task_id"),
+    [
+        ("cn", "https://cn.example.com", 101),
+        ("overseas", "https://overseas.example.com", 89),
+    ],
+)
+async def test_worker_selects_range_route_profile_without_a_server_id(
+    tmp_path,
+    monkeypatch,
+    route_scope,
+    base_url,
+    task_id,
+):
+    config = make_config()
+    plan = make_scoped_scenario_plan(route_scope)
+    gateway = RecordingGatewayClient()
+    RecordingExecutor.instances = []
+    monkeypatch.setattr("src.muliu_worker.MuliuExecutor", RecordingExecutor)
+    worker = MuliuWorker(config, AcceptAllFirewall(), gateway, make_route_resolver(tmp_path))
+
+    await worker._execute_claimed_job(
+        ClaimedWorkerJob("om_scoped", plan_json(plan), route_scope)
+    )
+
+    assert len(RecordingExecutor.instances) == 1
+    assert RecordingExecutor.instances[0].config.base_url == base_url
+    assert RecordingExecutor.instances[0].config.task_id == task_id
+    assert RecordingExecutor.instances[0].plans == [plan]
+    assert gateway.results == [("om_scoped", success_result(plan))]
+
+
+@pytest.mark.asyncio
 async def test_worker_reports_local_validation_failure_without_executing(tmp_path, monkeypatch):
     config = make_config()
     plan = make_plan()
@@ -345,6 +413,24 @@ async def test_worker_rejects_gateway_route_that_differs_from_local_plan_route(t
             }),
             "cn",
         )
+    )
+
+    assert RecordingExecutor.instances == []
+    assert len(gateway.results) == 1
+    assert "不一致" in gateway.results[0][1].failure_reason
+
+
+@pytest.mark.asyncio
+async def test_worker_rejects_gateway_route_that_differs_from_scoped_plan_route(tmp_path, monkeypatch):
+    config = make_config()
+    plan = make_scoped_scenario_plan("cn")
+    gateway = RecordingGatewayClient()
+    RecordingExecutor.instances = []
+    monkeypatch.setattr("src.muliu_worker.MuliuExecutor", RecordingExecutor)
+    worker = MuliuWorker(config, AcceptAllFirewall(), gateway, make_route_resolver(tmp_path))
+
+    await worker._execute_claimed_job(
+        ClaimedWorkerJob("om_scoped", plan_json(plan), "overseas")
     )
 
     assert RecordingExecutor.instances == []

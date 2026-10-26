@@ -48,6 +48,10 @@ class MuliuPlanRouteResolver:
 
     def resolve(self, plan: MuliuPlan) -> MuliuRouteSnapshot:
         try:
+            self._call_contracts.validate(plan)
+            if plan.route_scope is not None:
+                return MuliuRouteSnapshot.from_region(plan.route_scope)
+
             environments = ServerEnvironments.load(self._server_environments_path)
             server_ids = self._call_contracts.extract_server_ids(plan)
             region = environments.route_region_for_server_ids(server_ids)

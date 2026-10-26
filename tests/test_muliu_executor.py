@@ -17,6 +17,7 @@ from src.muliu_executor import (
     is_completed_step_log,
     interpret_script_outcome,
     interpret_start_verification_outcome,
+    _is_muliu_login_page,
 )
 from src.muliu_plan import MuliuPlan, MuliuStep
 
@@ -92,6 +93,118 @@ def test_client_uses_the_selected_route_task_id_for_every_task_endpoint(monkeypa
     ]
     assert captured[1][2]["form_data"]["id"] == 101
     assert captured[2][2]["form_data"]["id"] == 101
+
+
+LOGIN_PAGE = """<!DOCTYPE html>
+<html>
+  <head><meta name="csrf-token" content="expired"></head>
+  <body><form action="/muliu/login"><input type="password" name="password"></form></body>
+</html>"""
+
+
+def test_recognizes_only_muliu_login_html_as_an_expired_session():
+    assert _is_muliu_login_page(LOGIN_PAGE) is True
+    assert _is_muliu_login_page("<html><body>proxy error</body></html>") is False
+    assert _is_muliu_login_page({"code": 0}) is False
+
+
+def test_get_current_version_recovers_expired_session_once(monkeypatch):
+    client = MuliuHttpClient(make_config())
+    calls = []
+    responses = iter([
+        (200, LOGIN_PAGE),
+        (200, {"code": 0, "data": {"version": 19}}),
+    ])
+    monkeypatch.setattr(
+        client,
+        "request_json",
+        lambda method, path, **_kwargs: (calls.append((method, path)) or next(responses)),
+    )
+    monkeypatch.setattr(client, "login", lambda: calls.append(("LOGIN", "")))
+
+    assert client.get_current_version() == 19
+    assert calls == [
+        ("GET", "/muliu/api/task/detail?id=89"),
+        ("LOGIN", ""),
+        ("GET", "/muliu/api/task/detail?id=89"),
+    ]
+
+
+def test_get_latest_step_log_recovers_expired_session_once(monkeypatch):
+    client = MuliuHttpClient(make_config())
+    calls = []
+    responses = iter([
+        (200, LOGIN_PAGE),
+        (200, {"code": 0, "data": [{"content": "AI_OP_END status=success\\nEND"}]}),
+    ])
+    monkeypatch.setattr(
+        client,
+        "request_json",
+        lambda method, path, **_kwargs: (calls.append((method, path)) or next(responses)),
+    )
+    monkeypatch.setattr(client, "login", lambda: calls.append(("LOGIN", "")))
+
+    assert client.get_latest_step_log() == "AI_OP_END status=success\\nEND"
+    assert calls == [
+        ("GET", "/muliu/api/task/log?id=89&step=11&num=0"),
+        ("LOGIN", ""),
+        ("GET", "/muliu/api/task/log?id=89&step=11&num=0"),
+    ]
+
+
+def test_session_recovery_stops_after_one_read_retry_and_hides_login_html(monkeypatch):
+    client = MuliuHttpClient(make_config())
+    calls = []
+    monkeypatch.setattr(
+        client,
+        "request_json",
+        lambda method, path, **_kwargs: (calls.append((method, path)) or (200, LOGIN_PAGE)),
+    )
+    monkeypatch.setattr(client, "login", lambda: calls.append(("LOGIN", "")))
+
+    with pytest.raises(MuliuExecutionError, match="会话恢复后仍返回登录页") as raised:
+        client.get_current_version()
+
+    assert LOGIN_PAGE not in str(raised.value)
+    assert calls == [
+        ("GET", "/muliu/api/task/detail?id=89"),
+        ("LOGIN", ""),
+        ("GET", "/muliu/api/task/detail?id=89"),
+    ]
+
+
+def test_execute_step_recovers_detail_read_without_replaying_control_posts(monkeypatch):
+    client = MuliuHttpClient(make_config())
+    calls = []
+    detail_responses = iter([
+        (200, LOGIN_PAGE),
+        (200, {"code": 0, "data": {"version": 10}}),
+        (200, {"code": 0, "data": {"version": 11}}),
+    ])
+
+    def fake_request_json(method, path, **_kwargs):
+        calls.append((method, path))
+        if path.startswith("/muliu/api/task/detail"):
+            return next(detail_responses)
+        if path == "/muliu/api/task/argument/save":
+            return 200, {"code": 0}
+        if path == "/muliu/api/task/execute":
+            return 200, {"code": 0}
+        raise AssertionError("unexpected request: {} {}".format(method, path))
+
+    monkeypatch.setattr(client, "request_json", fake_request_json)
+    monkeypatch.setattr(client, "login", lambda: calls.append(("LOGIN", "")))
+    monkeypatch.setattr(client, "wait_for_completed_step_log", lambda: "AI_OP_END status=success\\nEND")
+
+    assert client.execute_step(MuliuStep("/home/serverGeneralScript/start", ["5000"], "启动 5000 服"))
+    assert calls == [
+        ("GET", "/muliu/api/task/detail?id=89"),
+        ("LOGIN", ""),
+        ("GET", "/muliu/api/task/detail?id=89"),
+        ("POST", "/muliu/api/task/argument/save"),
+        ("GET", "/muliu/api/task/detail?id=89"),
+        ("POST", "/muliu/api/task/execute"),
+    ]
 
 
 def test_interprets_dispatcher_failure_marker_as_failed_script():
@@ -311,6 +424,43 @@ async def test_executor_waits_before_verifying_start_after_start_script_reaches_
         "启动 5000 服",
         "核验 5000 服是否起服成功",
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("submitted", [False, True])
+async def test_executor_marks_start_result_unknown_when_verification_is_unavailable(monkeypatch, submitted):
+    executor = MuliuExecutor(make_config())
+    monkeypatch.setattr("src.muliu_executor.time.sleep", lambda _seconds: None)
+
+    class FakeClient:
+        def __init__(self, _config):
+            pass
+
+        def login(self):
+            pass
+
+        def execute_step(self, step):
+            if step.path == START_SCRIPT_PATH:
+                return "AI_OP_END status=success\nEND"
+            raise MuliuSubmittedError(
+                MuliuExecutionError("Muliu 会话恢复后仍返回登录页，无法读取任务状态"),
+                submitted=submitted,
+            )
+
+    monkeypatch.setattr("src.muliu_executor.MuliuHttpClient", FakeClient)
+    result = await executor.execute_plan(
+        MuliuPlan(
+            summary="启动 5000 服",
+            steps=[MuliuStep(START_SCRIPT_PATH, ["5000"], "启动 5000 服")],
+        )
+    )
+
+    assert result.result_unknown is True
+    assert result.failed_step_number is None
+    assert "起服脚本已成功结束" in result.result_unknown_reason
+    assert "结果尚未核验" in result.result_unknown_reason
+    assert len(result.step_results) == 1
+    assert result.step_results[0].succeeded is True
 
 
 @pytest.mark.asyncio

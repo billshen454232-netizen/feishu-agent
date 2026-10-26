@@ -922,19 +922,18 @@ def _build_execution_interpretation_prompt(
 
 
 def _plan_to_json(plan: MuliuPlan) -> str:
-    return json.dumps(
-        {
-            "kind": plan.kind.value,
-            "summary": plan.summary,
-            "steps": [
-                {
-                    "path": step.path,
-                    "args": step.args,
-                    "description": step.description,
-                }
-                for step in plan.steps
-            ],
-        },
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
+    payload = {
+        "kind": plan.kind.value,
+        "summary": plan.summary,
+        "steps": [
+            {
+                "path": step.path,
+                "args": step.args,
+                "description": step.description,
+            }
+            for step in plan.steps
+        ],
+    }
+    if plan.route_scope is not None:
+        payload["route_scope"] = plan.route_scope
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))

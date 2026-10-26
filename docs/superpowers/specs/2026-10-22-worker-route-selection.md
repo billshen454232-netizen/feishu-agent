@@ -23,9 +23,10 @@ AI、飞书卡片、`plan_json`、Gateway API、审计文本和 Git 都不得携
 
 - 唯一服号归属来源是 `config/server_environments.json`。
 - `regions.cn` 中登记的服号映射为 `cn`；其余已登记区域（港澳台、全球、韩服、越南）映射为 `overseas`。
-- 服号只能从已匹配的 Muliu 调用合同变量中提取：`server_id`、`server_id_*`、`server_ids`。不扫描自然语言、步骤描述或任意数字。
-- 缺少目标服号、未登记服号、未知 `route_region`、或跨 `cn` / `overseas` 的同一计划，均在确认前或 Worker 网络请求前阻断。
-- 不得将 `route_region` 或 route identifier 加入 AI 生成的 `plan_json`。
+- 默认情况下，服号只能从已匹配的 Muliu 调用合同变量中提取：`server_id`、`server_id_*`、`server_ids`。不扫描自然语言、步骤描述或任意数字。
+- 唯一例外是合同明确声明 `route_scopes:["cn","overseas"]` 的无服号只读范围查询。该计划只能使用根字段 `route_scope:"cn"` 或 `route_scope:"overseas"`；Gateway 与 Worker 均须根据同一合同重新验证它。`route_scope` 不是脚本参数，不能携带 URL、账号、任务 ID、IP 或 route identifier。
+- 缺少目标服号、未登记服号、未声明范围的范围查询、未知 `route_scope` / `route_region`、或跨 `cn` / `overseas` 的同一计划，均在确认前或 Worker 网络请求前阻断。
+- 不得将 `route_region` 或 route identifier 加入 AI 生成的 `plan_json`；已登记范围查询的 `route_scope` 是唯一允许的非敏感计划路由字段。
 
 ## 受控快照
 

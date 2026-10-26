@@ -323,6 +323,11 @@ class MuliuPlanner:
 
 当用户请求精确匹配已登记模式时，必须使用该模式模板。例如“查询 / 查看 / 检查 <server_id> 服 Patch 列表或 Patch 状态”匹配单服 Patch 查询模式，必须生成 `path` 为 `/home/serverGeneralScript/cc_patch.py` 且 `args` 为 `["-s","<server_id>","-ck"]`，不能误判为“资料没有查询能力”。
 
+范围查询规则：
+- 仅当注册表明确声明范围路由的只读模式、且用户明确指定“国服”或“海外”时，根对象必须加入 `route_scope:"cn"` 或 `route_scope:"overseas"`；它只选择 Worker，绝不是脚本参数，不能写入 `args`。
+- 当前 `basic_info.sh ssinfo <scenario>` 是该类模式。例如“查询国服所有剧本为 1000 的服务器”必须生成 `args:["ssinfo","1000"]` 与 `route_scope:"cn"`；海外同理为 `overseas`。用户未指定国服或海外时，必须使用 `kind:"clarify"`，不能自行选择。
+- 所有其他已登记调用都不能输出 `route_scope`；仍必须从合同声明的服务器编号推导 Worker。
+
 成功时只能返回一个 JSON 对象，禁止 Markdown、代码围栏、解释文字、shell、command 字段或其他字段：
 {
   "kind":"operation",
@@ -337,7 +342,8 @@ class MuliuPlanner:
 }
 
 严格结构要求：
-- 根对象只允许 `kind`、`summary` 和 `steps` 三个字段；
+- 根对象只允许 `kind`、`summary`、`steps` 和可选的 `route_scope` 四个字段；
+- `route_scope` 只能是 `cn` 或 `overseas`，只能用于明确声明范围路由的 `kind:"operation"`；
 - `kind` 只能是 `operation`、`knowledge`、`clarify` 或 `reject`；
 - `steps` 必须是 JSON 数组，即使只有一个步骤也必须写成 `"steps":[{...}]`，绝不能写成 `"steps":{...}`；
 - 仅 `kind:"operation"` 可含步骤，且必须至少一个；其他 kind 必须为 `"steps":[]`；
@@ -362,19 +368,22 @@ class MuliuPlanner:
         script_catalog: str,
         candidate_plan: MuliuPlan,
     ) -> str:
+        candidate_payload = {
+            "kind": candidate_plan.kind.value,
+            "summary": candidate_plan.summary,
+            "steps": [
+                {
+                    "path": step.path,
+                    "args": step.args,
+                    "description": step.description,
+                }
+                for step in candidate_plan.steps
+            ],
+        }
+        if candidate_plan.route_scope is not None:
+            candidate_payload["route_scope"] = candidate_plan.route_scope
         candidate_json = json.dumps(
-            {
-                "kind": candidate_plan.kind.value,
-                "summary": candidate_plan.summary,
-                "steps": [
-                    {
-                        "path": step.path,
-                        "args": step.args,
-                        "description": step.description,
-                    }
-                    for step in candidate_plan.steps
-                ],
-            },
+            candidate_payload,
             ensure_ascii=False,
             separators=(",", ":"),
         )
@@ -390,6 +399,7 @@ class MuliuPlanner:
 - 如果任一必要动作没有已登记调用能完成，返回 `kind:"reject"` 和空步骤，并在 summary 简述缺少的能力；
 - 可以把用户明确要求的多个已登记动作拆成按顺序执行的多个步骤；任一脚本、参数或额外动作未登记时，必须拒绝整个组合，不得只保留其中一部分。
 - 不得调用未登记脚本、编造参数、使用 shell / command 字段或补充用户未要求的动作。
+- 对注册表明确声明范围路由的只读查询：用户明确指定国服或海外时，必须保留对应 `route_scope`；没有指定范围时必须返回 `kind:"clarify"`；不得把范围写入 `args`。
 
 原始用户请求：
 ---
@@ -406,7 +416,7 @@ class MuliuPlanner:
 %s
 ---
 
-只返回一个 JSON 对象，禁止 Markdown、解释文字或代码围栏。根对象只允许 `kind`、`summary`、`steps`；kind 只能为 operation、knowledge、clarify、reject；每个步骤只允许 `path`、`args`、`description`；非空步骤必须精确匹配注册表的一个调用合同。
+只返回一个 JSON 对象，禁止 Markdown、解释文字或代码围栏。根对象只允许 `kind`、`summary`、`steps` 和可选的 `route_scope`；kind 只能为 operation、knowledge、clarify、reject；`route_scope` 只能为 cn 或 overseas，且只能用于注册表明确声明的范围只读查询；每个步骤只允许 `path`、`args`、`description`；非空步骤必须精确匹配注册表的一个调用合同。
 """ % (user_text, candidate_json, script_catalog)
 
     @classmethod
@@ -467,6 +477,7 @@ class MuliuPlanner:
 - 如果用户把环境标签和服号连写，例如 `HMT5000`，应将 `HMT` 视为环境描述，将尾部数字 `5000` 作为服务器编号；环境标签只能出现在 summary 或 description，绝不能放入 args；
 - 只要用户请求的每个动作都可精确映射到已登记模式，就按用户要求的顺序生成一个或多个 operation 步骤，进入一次群内确认；
 - 询问能力、用途、风险、参数或“能否执行”时，应生成 knowledge 空步骤决策，不进入确认；
+- 对注册表明确声明范围路由的只读查询，用户明确指定国服或海外时必须使用对应 `route_scope`；未指定范围时必须 `clarify`；`route_scope` 绝不能写入 `args`。
 - 不得自行创造未登记脚本、参数、别名或额外操作；任一必要动作无法匹配时，拒绝整个组合。
 
 以下执行调用注册表是唯一允许来源：
@@ -478,7 +489,8 @@ class MuliuPlanner:
 %s
 
 必须满足：
-- 根对象只允许 `kind`、`summary` 和 `steps`；
+- 根对象只允许 `kind`、`summary`、`steps` 和可选的 `route_scope`；
+- `route_scope` 只能为 `cn` 或 `overseas`，且仅能用于注册表明确声明的范围只读查询；
 - `kind` 只能为 `operation`、`knowledge`、`clarify`、`reject`；
 - `steps` 必须是数组；即使只有一个步骤，也必须是 `"steps":[{...}]`；
 - `kind:"operation"` 必须有至少一个精确匹配合同的步骤，且总步数不得超过注册表上限；其他 kind 必须为 `"steps":[]`；

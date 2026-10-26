@@ -21,6 +21,9 @@ class MuliuPlanKind(str, Enum):
     REJECT = "reject"
 
 
+_PLAN_ROUTE_REGIONS = frozenset({"cn", "overseas"})
+
+
 @dataclass(frozen=True)
 class MuliuStep:
     path: str
@@ -35,6 +38,9 @@ class MuliuPlan:
     # Older persisted confirmation plans did not carry ``kind``. Keep an operation
     # default so they remain parseable while new AI responses must declare it.
     kind: MuliuPlanKind = MuliuPlanKind.OPERATION
+    # Only registered range queries may use an explicit closed Worker route instead
+    # of deriving one from a target server ID.
+    route_scope: str | None = None
 
 
 def parse_plan(
@@ -58,8 +64,12 @@ def parse_plan(
     if not isinstance(raw_plan, dict):
         raise MuliuPlanError("请求决策必须是 JSON 对象")
 
-    _reject_unknown_fields(raw_plan, {"kind", "summary", "steps"}, "请求决策")
+    _reject_unknown_fields(raw_plan, {"kind", "summary", "steps", "route_scope"}, "请求决策")
     summary = _require_short_text(raw_plan.get("summary"), "summary")
+    route_scope = _parse_route_scope(
+        raw_plan.get("route_scope"),
+        declared="route_scope" in raw_plan,
+    )
     raw_steps = raw_plan.get("steps")
     if not isinstance(raw_steps, list):
         raise MuliuPlanError("steps 必须是数组")
@@ -71,12 +81,29 @@ def parse_plan(
         raw_steps,
         allow_legacy_kind=allow_legacy_kind,
     )
+    if route_scope is not None and kind is not MuliuPlanKind.OPERATION:
+        raise MuliuPlanError("仅 kind=operation 可以声明 route_scope")
     steps = [_parse_step(raw_step, index) for index, raw_step in enumerate(raw_steps, start=1)]
     if kind is MuliuPlanKind.OPERATION and not steps:
         raise MuliuPlanError("kind=operation 时 steps 必须至少包含一个步骤")
     if kind is not MuliuPlanKind.OPERATION and steps:
         raise MuliuPlanError("kind={} 时 steps 必须为空数组".format(kind.value))
-    return MuliuPlan(summary=summary, steps=steps, kind=kind)
+    return MuliuPlan(
+        summary=summary,
+        steps=steps,
+        kind=kind,
+        route_scope=route_scope,
+    )
+
+
+def _parse_route_scope(raw_route_scope: Any, *, declared: bool) -> str | None:
+    if not declared:
+        return None
+    if not isinstance(raw_route_scope, str):
+        raise MuliuPlanError("route_scope 必须是 cn 或 overseas")
+    if raw_route_scope not in _PLAN_ROUTE_REGIONS:
+        raise MuliuPlanError("route_scope 必须是 cn 或 overseas")
+    return raw_route_scope
 
 
 def _parse_kind(

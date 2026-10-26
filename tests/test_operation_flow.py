@@ -1335,21 +1335,41 @@ async def test_batch_environment_version_query_passes_firewall_and_waits_for_con
 
 
 @pytest.mark.asyncio
-async def test_scenario_lookup_plan_passes_firewall_and_waits_for_confirmation(tmp_path):
+@pytest.mark.parametrize(
+    ("route_scope", "route_label", "route_identifier"),
+    [
+        ("cn", "国服", "route-cn"),
+        ("overseas", "海外服", "route-overseas"),
+    ],
+)
+async def test_scenario_lookup_plan_passes_firewall_and_waits_for_confirmation(
+    tmp_path,
+    route_scope,
+    route_label,
+    route_identifier,
+):
     config = make_config()
     store = MessageJobStore(tmp_path / "jobs.sqlite3")
     store.initialize()
-    store.create_if_new("om_ssinfo", "evt_ssinfo", "oc_group", "ou_user", "查看目前所有服务器哪个是2001剧本", chat_type="group")
+    store.create_if_new(
+        "om_ssinfo",
+        "evt_ssinfo",
+        "oc_group",
+        "ou_user",
+        "查询 {}所有剧本为 2001 的服务器".format(route_label),
+        chat_type="group",
+    )
     ssinfo_plan = MuliuPlan(
-        summary="查询 2001 剧本的所有服务器",
+        summary="查询 {} 2001 剧本的所有服务器".format(route_label),
         steps=[
             MuliuStep(
                 path="/home/serverGeneralScript/basic_info.sh",
                 args=["ssinfo", "2001"],
-                description="查询归属 2001 剧本的所有服务器信息",
+                description="查询 {}范围内归属 2001 剧本的所有服务器信息".format(route_label),
             )
         ],
         kind=MuliuPlanKind.OPERATION,
+        route_scope=route_scope,
     )
     feishu = FakeFeishuClient()
     executor = FakeExecutor()
@@ -1361,11 +1381,7 @@ async def test_scenario_lookup_plan_passes_firewall_and_waits_for_confirmation(t
         feishu_client=feishu,
         operation_planner=FakePlanner(ssinfo_plan),
         muliu_firewall=production_firewall(config),
-        route_resolver=type(
-            "RouteResolver",
-            (),
-            {"resolve": lambda _self, _plan: type("Route", (), {"label": "海外服", "identifier": "route-overseas", "region": "overseas"})()},
-        )(),
+        route_resolver=production_route_resolver(),
         muliu_executor=executor,
     )
 
@@ -1374,10 +1390,15 @@ async def test_scenario_lookup_plan_passes_firewall_and_waits_for_confirmation(t
     job = store.get("om_ssinfo")
     assert job is not None
     assert job.status == "awaiting_confirmation"
+    assert job.route_region == route_scope
+    assert json.loads(job.plan_json)["route_scope"] == route_scope
     assert executor.plans == []
     assert len(feishu.cards) == 1
-    assert "basic_info.sh" in str(feishu.cards[0][1])
-    assert "ssinfo" in str(feishu.cards[0][1])
-    assert "2001" in str(feishu.cards[0][1])
+    card_text = str(feishu.cards[0][1])
+    assert "basic_info.sh" in card_text
+    assert "ssinfo" in card_text
+    assert "2001" in card_text
+    assert route_label in card_text
+    assert route_identifier in card_text
 
 
