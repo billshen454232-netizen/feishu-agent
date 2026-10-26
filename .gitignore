@@ -23,6 +23,4 @@ docs/gemini-code-1792483526256.html
 docs/hotfix_thresholds_excel_export.json
 docs/superpowers/specs/2026-10-15-hotfix-threshold-registry.md
 knowledge/season_process.lua
-tests/test_generate_runner_manifest.py
-tests/test_hotfix_threshold_registry.py
 tools/hotfix_threshold_registry.py

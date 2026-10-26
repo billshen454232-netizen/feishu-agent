@@ -184,6 +184,51 @@
       "risk": "write"
     },
     {
+      "name": "enable-gm-panel",
+      "path": "/home/serverGeneralScript/control_is_pub.sh",
+      "args": [
+        "{server_id}",
+        "k"
+      ],
+      "variables": {
+        "server_id": "[0-9]{3,8}"
+      },
+      "runner": [
+        "bash"
+      ],
+      "risk": "write"
+    },
+    {
+      "name": "disable-gm-panel-enable-publish-mode",
+      "path": "/home/serverGeneralScript/control_is_pub.sh",
+      "args": [
+        "{server_id}",
+        "re"
+      ],
+      "variables": {
+        "server_id": "[0-9]{3,8}"
+      },
+      "runner": [
+        "bash"
+      ],
+      "risk": "write"
+    },
+    {
+      "name": "start-external-experience-server",
+      "path": "/home/serverGeneralScript/control_is_pub.sh",
+      "args": [
+        "{server_id}",
+        "op"
+      ],
+      "variables": {
+        "server_id": "[0-9]{3,8}"
+      },
+      "runner": [
+        "bash"
+      ],
+      "risk": "write"
+    },
+    {
       "name": "check-start-time",
       "path": "/home/serverGeneralScript/starttime",
       "args": [

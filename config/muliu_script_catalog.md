@@ -250,7 +250,26 @@
 - **精确参数数组模板**：`["<server_id>"]`
 - **远端影响**：清理数据库，破坏性操作，必须群内确认。
 
-### 模式 M：免重启热更服务器阈值配置（auto_hotfix_tool.py）
+### 模式 M：控制发布模式、GM 面板或外部体验开服（control_is_pub.sh）
+
+- **用途**：对一个明确指定的测试服，执行以下三项彼此独立的操作之一：开启调试 / GM 面板、关闭调试 / GM 面板并切换为发布模式、或走外部体验开服脚本。
+- **精确脚本路径**：`/home/serverGeneralScript/control_is_pub.sh`
+- **已登记参数数组模板**：
+  - 开启调试 / GM 面板：`["<server_id>", "k"]`。
+    - 匹配：`开启 5000 服 GM 面板`、`打开 5000 服调试面板`、`关闭 5000 服发布模式`。
+  - 关闭调试 / GM 面板并切换发布模式：`["<server_id>", "re"]`。
+    - 匹配：`关闭 5000 服 GM 面板`、`关闭 5000 服调试面板`、`开启 5000 服发布模式`。
+  - 走外部体验开服脚本：`["<server_id>", "op"]`。
+    - 匹配：`用外部开服脚本启动 5000 服`、`按外部体验开服 5000 服`、`执行 5000 服 public_game 开服脚本`。
+- **参数顺序**：第 1 项必须是 3 至 8 位数字服务器编号；第 2 项只能是固定字面量 `k`、`re` 或 `op`，分别对应上述三个独立操作。不得以普通“启动 / 开服”请求推断为 `op`；普通启动仍使用 `start` 合同。
+- **远端影响**：
+  - `k` 会将 `IS_PUBLISH` 和 `NSLG_IS_PUBLISH` 设置为 `false`，开启调试 / GM 面板；
+  - `re` 会将两项设置为 `true`，关闭调试 / GM 面板并切换发布模式；
+  - `op` 会调用目标服的 `release_bin/public_game.sh` 外部体验开服流程。
+
+  三项均为高影响写操作，必须经群内确认；配置脚本返回成功不等于运行中的服务已经重新读取配置，也不等于游戏内状态已生效。
+
+### 模式 N：免重启热更服务器阈值配置（auto_hotfix_tool.py）
 
 - **用途**：通过自动生成内存 Patch 并触发热更，免重启秒级修改测试服的人数限制、开启阈值、名额等数值配置。
 - **匹配的自然语言**：
@@ -502,6 +521,45 @@
         "server_id": "[0-9]{3,8}",
         "season": "[0-9]{1,8}",
         "scenario": "[0-9]{1,8}"
+      },
+      "runner": "bash",
+      "risk": "write"
+    },
+    {
+      "name": "enable-gm-panel",
+      "path": "/home/serverGeneralScript/control_is_pub.sh",
+      "args": [
+        "{server_id}",
+        "k"
+      ],
+      "variables": {
+        "server_id": "[0-9]{3,8}"
+      },
+      "runner": "bash",
+      "risk": "write"
+    },
+    {
+      "name": "disable-gm-panel-enable-publish-mode",
+      "path": "/home/serverGeneralScript/control_is_pub.sh",
+      "args": [
+        "{server_id}",
+        "re"
+      ],
+      "variables": {
+        "server_id": "[0-9]{3,8}"
+      },
+      "runner": "bash",
+      "risk": "write"
+    },
+    {
+      "name": "start-external-experience-server",
+      "path": "/home/serverGeneralScript/control_is_pub.sh",
+      "args": [
+        "{server_id}",
+        "op"
+      ],
+      "variables": {
+        "server_id": "[0-9]{3,8}"
       },
       "runner": "bash",
       "risk": "write"

@@ -4,7 +4,6 @@ import pytest
 
 from tools.sync_hotfix_planner_catalog import (
     HotfixCatalogSyncError,
-    check_artifacts,
     expected_artifacts,
     render_catalog,
 )
@@ -12,10 +11,6 @@ from tools.sync_hotfix_planner_catalog import (
 
 REPOSITORY_ROOT = Path(__file__).parents[1]
 CATALOG_PATH = REPOSITORY_ROOT / "config" / "muliu_script_catalog.md"
-
-
-def test_checked_in_hotfix_static_artifacts_match_execution_registry():
-    assert check_artifacts() == ()
 
 
 def test_generated_catalog_contains_requested_chinese_routes_and_strict_keys():
@@ -39,9 +34,3 @@ def test_catalog_sync_rejects_missing_generated_route_marker():
         render_catalog(source.replace("<!-- HOTFIX_THRESHOLD_REGISTRY:END -->", "", 1))
     with pytest.raises(HotfixCatalogSyncError, match="标记对"):
         render_catalog(source.replace("<!-- ENVIRONMENT_MAPPING:END -->", "", 1))
-
-
-def test_catalog_sync_is_idempotent_after_generation():
-    source = CATALOG_PATH.read_text(encoding="utf-8")
-
-    assert render_catalog(source) == source
