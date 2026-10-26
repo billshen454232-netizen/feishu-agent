@@ -30,6 +30,7 @@ def test_environment_registry_derives_closed_worker_route_from_registered_region
 
     assert environments.route_region_for_server_ids(("2003",)) == "cn"
     assert environments.route_region_for_server_ids(("5500", "6001")) == "overseas"
+    assert environments.route_region_for_server_ids(("5000", "5001")) == "overseas"
     with pytest.raises(ServerEnvironmentsError, match="不能同时包含国服和海外服"):
         environments.route_region_for_server_ids(("2003", "5500"))
 

@@ -160,6 +160,7 @@ async def test_catalog_supports_registered_basic_info_shape():
         ("强制关闭 5000 服", "/home/serverGeneralScript/shutdown", ["5000", "kill"]),
         ("启动 5000 服", "/home/serverGeneralScript/start", ["5000"]),
         ("只启动 5000 服游戏服务", "/home/serverGeneralScript/start", ["5000", "noz"]),
+        ("将 5000 服合到 5001 服，赛季 4、剧本 9", "/home/serverGeneralScript/exc_server_merge.sh", ["5000", "5001", "4", "9"]),
         ("开启 5000 服 GM 面板", "/home/serverGeneralScript/control_is_pub.sh", ["5000", "k"]),
         ("关闭 5000 服 GM 面板", "/home/serverGeneralScript/control_is_pub.sh", ["5000", "re"]),
         ("用外部开服脚本启动 5000 服", "/home/serverGeneralScript/control_is_pub.sh", ["5000", "op"]),

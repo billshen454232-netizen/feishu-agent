@@ -229,6 +229,26 @@
       "risk": "write"
     },
     {
+      "name": "merge-single-source-single-target",
+      "path": "/home/serverGeneralScript/exc_server_merge.sh",
+      "args": [
+        "{source_server_id}",
+        "{target_server_id}",
+        "{season}",
+        "{scenario}"
+      ],
+      "variables": {
+        "scenario": "[0-9]{1,8}",
+        "season": "[0-9]{1,8}",
+        "source_server_id": "[0-9]{3,8}",
+        "target_server_id": "[0-9]{3,8}"
+      },
+      "runner": [
+        "bash"
+      ],
+      "risk": "write"
+    },
+    {
       "name": "check-start-time",
       "path": "/home/serverGeneralScript/starttime",
       "args": [

@@ -107,6 +107,32 @@ def test_contract_extracts_only_contract_declared_target_server_ids():
     assert contracts.extract_server_ids(plan) == ("6001",)
 
 
+def test_contract_extracts_all_merge_source_and_target_server_ids():
+    contracts = parse_call_contracts(
+        """<!-- MULIU_CALL_CONTRACTS
+        {
+          "max_plan_steps": 1,
+          "contracts": [{
+            "name": "merge-single-source-single-target",
+            "path": "/home/serverGeneralScript/exc_server_merge.sh",
+            "args": ["{source_server_id}", "{target_server_id}", "{season}", "{scenario}"],
+            "variables": {
+              "source_server_id": "[0-9]{3,8}",
+              "target_server_id": "[0-9]{3,8}",
+              "season": "[0-9]{1,8}",
+              "scenario": "[0-9]{1,8}"
+            },
+            "runner": "bash",
+            "risk": "write"
+          }]
+        }
+        MULIU_CALL_CONTRACTS -->"""
+    )
+    plan = make_plan("/home/serverGeneralScript/exc_server_merge.sh", ["5000", "5001", "4", "9"])
+
+    assert contracts.extract_server_ids(plan) == ("5000", "5001")
+
+
 def test_contract_rejects_multiple_steps_over_catalog_limit():
     contracts = parse_call_contracts(CATALOG)
     plan = MuliuPlan(
@@ -158,6 +184,7 @@ def test_production_catalog_accepts_ordered_registered_steps():
         ("/home/serverGeneralScript/shutdown", ["5000", "autokill"]),
         ("/home/serverGeneralScript/start", ["5000"]),
         ("/home/serverGeneralScript/start", ["5000", "noz"]),
+        ("/home/serverGeneralScript/exc_server_merge.sh", ["5000", "5001", "4", "9"]),
         ("/home/serverGeneralScript/control_is_pub.sh", ["5000", "k"]),
         ("/home/serverGeneralScript/control_is_pub.sh", ["5000", "re"]),
         ("/home/serverGeneralScript/control_is_pub.sh", ["5000", "op"]),

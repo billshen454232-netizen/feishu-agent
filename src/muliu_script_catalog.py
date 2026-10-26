@@ -148,7 +148,11 @@ class MuliuCallContracts:
                 if variable_match is None:
                     continue
                 variable_name = variable_match.group(1)
-                if variable_name == "server_id" or variable_name.startswith("server_id_"):
+                if (
+                    variable_name == "server_id"
+                    or variable_name.startswith("server_id_")
+                    or variable_name.endswith("_server_id")
+                ):
                     step_server_ids.append(actual_argument)
                 elif variable_name == "server_ids":
                     step_server_ids.extend(server_id.strip() for server_id in actual_argument.split(","))

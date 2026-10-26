@@ -19,6 +19,7 @@
 |`shutdown`|常规或强制关闭游戏、Zone 或 GVG 相关进程|关闭、停服、关服、kill、GVG|[shutdown.md](docs/shutdown.md)|不得登记：高风险服务中断|
 |`starttime`|检查或修改 Debug 开服时间配置和时间戳文件|开服时间、启动时间、时间戳、Debug|[starttime.md](docs/starttime.md)|不得登记：高风险配置变更|
 |`control_is_pub.sh`|独立控制调试/GM 面板、发布模式或外部体验开服|GM面板、调试面板、发布模式、外部开服、public_game|[control_is_pub.md](docs/control_is_pub.md)|已登记三项独立受控写操作|
+|`exc_server_merge.sh`|生成合服配置并启动合服工具|合服、服务器合并、合到、合服工具|[exc_server_merge.md](docs/exc_server_merge.md)|首批仅登记单来源服、单目标服、赛季和剧本的受控写操作|
 
 ## 配置与脱敏流程资料
 
