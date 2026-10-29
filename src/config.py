@@ -51,10 +51,26 @@ class AIConfig:
     temperature: float = 0.2
     max_tokens: int = 2048
     timeout_seconds: float = 60.0
-    # Optional degraded-mode model. When set, it is only used after the primary
-    # model has exhausted its retries, and every answer it produces is labelled
-    # so a weaker model can never pass as the primary one.
-    fallback: "AIConfig | None" = None
+
+
+# 一个模型配置即可独立使用，也可作为 AI 池中的一项。
+AI_POOL_STRATEGIES = ("random", "round_robin", "fallback")
+
+
+@dataclass(frozen=True)
+class AIPoolConfig:
+    """一组可调用的模型及其选路策略。
+
+    每种策略在某个模型失败后都会继续尝试下一个，差别只在首选顺序：
+    ``random`` 打乱顺序，``round_robin`` 轮转起点，``fallback`` 恒从第一个
+    开始。这样单个模型抖动不会让整条请求失败，同时又能分摊调用负载。
+    """
+
+    strategy: str = "random"
+    models: tuple[AIConfig, ...] = ()
+
+    def __bool__(self) -> bool:
+        return bool(self.models)
 
 
 @dataclass(frozen=True)
@@ -203,7 +219,7 @@ class ExecutionInterpretationConfig:
 class AppConfig:
     server: ServerConfig
     feishu: FeishuConfig
-    ai: AIConfig
+    ai: AIPoolConfig
     conversation: ConversationConfig
     knowledge_base: KnowledgeBaseConfig
     bot: BotConfig
@@ -303,34 +319,64 @@ def _load_runtime(raw: dict[str, Any]) -> RuntimeConfig:
     )
 
 
-def _load_ai_fallback(raw: Any, *, defaults: AIConfig) -> AIConfig | None:
-    """Load the optional degraded-mode model, inheriting unset fields from the primary.
-
-    The fallback is only reached after the primary model has exhausted its
-    retries, so it must stay cheap to configure: only provider, base_url,
-    api_key and model are required, and everything else defaults to the
-    primary model's values.
-    """
-    if raw is None:
-        return None
+def _load_ai_model(raw: Any, *, section: str, defaults: AIConfig | None = None) -> AIConfig:
+    """Load one model entry, inheriting unset generation fields from ``defaults``."""
     if not isinstance(raw, dict):
-        raise ConfigError("ai.fallback must be a JSON object")
-    provider = _require_str(raw, "provider", "ai.fallback")
+        raise ConfigError("{} 必须是 JSON 对象".format(section))
+    provider = _require_str(raw, "provider", section)
     if provider not in ("openai_compatible", "claude_messages"):
-        raise ConfigError(f"Unsupported ai.fallback.provider: {provider}")
+        raise ConfigError("Unsupported {}.provider: {}".format(section, provider))
+
+    def pick(key, default, cast=str):
+        if key in raw:
+            return cast(raw[key])
+        if defaults is not None:
+            return getattr(defaults, key)
+        return default
+
+    timeout_value = raw.get("timeout_seconds", defaults.timeout_seconds if defaults else 60)
     return AIConfig(
         provider=provider,  # type: ignore[arg-type]
-        base_url=_require_str(raw, "base_url", "ai.fallback").rstrip("/"),
-        api_key=_require_str(raw, "api_key", "ai.fallback"),
-        model=_require_str(raw, "model", "ai.fallback"),
-        system_prompt=str(raw.get("system_prompt", defaults.system_prompt)),
-        temperature=float(raw.get("temperature", defaults.temperature)),
-        max_tokens=int(raw.get("max_tokens", defaults.max_tokens)),
-        timeout_seconds=_require_positive_number(
-            float(raw.get("timeout_seconds", defaults.timeout_seconds)),
-            "ai.fallback.timeout_seconds",
-        ),
+        base_url=_require_str(raw, "base_url", section).rstrip("/"),
+        api_key=_require_str(raw, "api_key", section),
+        model=_require_str(raw, "model", section),
+        system_prompt=pick("system_prompt", defaults.system_prompt if defaults else "你是一个飞书里的 AI 助手，请用简洁、准确的中文回答。"),
+        temperature=float(pick("temperature", defaults.temperature if defaults else 0.2)),
+        max_tokens=int(pick("max_tokens", defaults.max_tokens if defaults else 2048)),
+        timeout_seconds=_require_positive_number(float(timeout_value), "{}.timeout_seconds".format(section)),
     )
+
+
+def _load_ai_pool(raw: Any) -> AIPoolConfig:
+    """Load the model pool from the ``ai`` section.
+
+    Two shapes are accepted:
+
+    * pool form — ``ai`` has a ``models`` array; ``strategy`` selects how the
+      first model is chosen, and every strategy falls through to the next on
+      failure;
+    * legacy single-model form — ``ai`` carries ``provider`` / ``base_url``
+      directly, treated as a one-entry pool so existing configs keep working.
+    """
+    if not isinstance(raw, dict):
+        raise ConfigError("ai section must be a JSON object")
+    if "models" not in raw:
+        return AIPoolConfig(strategy="fallback", models=(_load_ai_model(raw, section="ai"),))
+
+    models_raw = raw.get("models")
+    if not isinstance(models_raw, list) or not models_raw:
+        raise ConfigError("ai.models 必须是非空数组")
+    strategy = str(raw.get("strategy", "random"))
+    if strategy not in AI_POOL_STRATEGIES:
+        raise ConfigError(
+            "ai.strategy 必须是 {} 之一，当前为 {!r}".format(" / ".join(AI_POOL_STRATEGIES), strategy)
+        )
+    defaults = _load_ai_model(models_raw[0], section="ai.models[0]")
+    models = (defaults,) + tuple(
+        _load_ai_model(item, section="ai.models[{}]".format(index), defaults=defaults)
+        for index, item in enumerate(models_raw[1:], start=1)
+    )
+    return AIPoolConfig(strategy=strategy, models=models)
 
 
 def load_config(path: str | Path = "config/config.json") -> AppConfig:
@@ -373,43 +419,11 @@ def load_config(path: str | Path = "config/config.json") -> AppConfig:
     if not isinstance(execution_interpretation_raw, dict):
         raise ConfigError("execution_interpretation section must be a JSON object")
 
-    provider = (
-        str(ai_raw.get("provider", "openai_compatible"))
-        if runtime.role == "worker"
-        else _require_str(ai_raw, "provider", "ai")
-    )
-    if provider not in ("openai_compatible", "claude_messages"):
-        raise ConfigError(f"Unsupported ai.provider: {provider}")
-
-    primary_ai = AIConfig(
-        provider=provider,  # type: ignore[arg-type]
-        base_url=(
-            str(ai_raw.get("base_url", "")).rstrip("/")
-            if runtime.role == "worker"
-            else _require_str(ai_raw, "base_url", "ai").rstrip("/")
-        ),
-        api_key=(
-            str(ai_raw.get("api_key", ""))
-            if runtime.role == "worker"
-            else _require_str(ai_raw, "api_key", "ai")
-        ),
-        model=(
-            str(ai_raw.get("model", ""))
-            if runtime.role == "worker"
-            else _require_str(ai_raw, "model", "ai")
-        ),
-        system_prompt=str(ai_raw.get("system_prompt", "你是一个飞书里的 AI 助手，请用简洁、准确的中文回答。")),
-        temperature=float(ai_raw.get("temperature", 0.2)),
-        max_tokens=int(ai_raw.get("max_tokens", 2048)),
-        timeout_seconds=_require_positive_number(
-            float(ai_raw.get("timeout_seconds", 60)),
-            "ai.timeout_seconds",
-        ),
-    )
-    ai_config = replace(
-        primary_ai,
-        fallback=_load_ai_fallback(ai_raw.get("fallback"), defaults=primary_ai),
-    )
+    if not ai_raw and runtime.role == "worker":
+        # Worker 不调用 AI，允许完全不配 ai 段。
+        ai_pool = AIPoolConfig()
+    else:
+        ai_pool = _load_ai_pool(ai_raw)
 
     config = AppConfig(
         server=ServerConfig(
@@ -431,7 +445,7 @@ def load_config(path: str | Path = "config/config.json") -> AppConfig:
             encrypt_key=str(feishu_raw.get("encrypt_key", "")),
             base_url=str(feishu_raw.get("base_url", "https://open.feishu.cn")).rstrip("/"),
         ),
-        ai=ai_config,
+        ai=ai_pool,
         conversation=ConversationConfig(
             max_history_messages=int(conversation_raw.get("max_history_messages", 12))
             if isinstance(conversation_raw, dict)

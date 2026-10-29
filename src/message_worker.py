@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from .ai_client import degradation_notice, generate_with_provenance
+from .ai_client import generate_with_provenance
 from .config import AppConfig
 from .conversation_log import ConversationLogEntry
 from .conversation import ConversationStore
@@ -603,7 +603,6 @@ class MessageJobProcessor:
         interpretation = mask_sensitive_operation_data(str(generation.text).strip())
         if not interpretation:
             return fallback_reply
-        interpretation += degradation_notice(generation)
         return mask_sensitive_operation_data(
             "{}\n\n---\n\n执行明细：\n{}".format(
                 interpretation,
@@ -666,7 +665,6 @@ class MessageJobProcessor:
             reply = "📚 以下回答基于当前执行注册表和本地脚本资料生成。\n\n{}\n\n来源：\n{}".format(reply, sources)
         else:
             reply = "📚 以下回答基于当前执行注册表生成。\n\n{}".format(reply)
-        reply += degradation_notice(generation)
 
         self._conversations.append(job.chat_id, "user", job.text)
         self._conversations.append(job.chat_id, "assistant", reply)
@@ -707,8 +705,7 @@ class MessageJobProcessor:
             reply = generation.text
             if local_knowledge_hit:
                 reply = self._format_local_knowledge_reply(reply, source_paths)
-            reply += degradation_notice(generation)
-        self._conversations.append(job.chat_id, "user", job.text)
+            self._conversations.append(job.chat_id, "user", job.text)
         self._conversations.append(job.chat_id, "assistant", reply)
         feishu_reply_started = time.perf_counter()
         await self._reply_and_finish(message_id, reply)

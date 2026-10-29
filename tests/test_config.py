@@ -41,7 +41,8 @@ def test_loads_openai_compatible_config(tmp_path):
     config = load_config(config_path)
 
     assert config.feishu.app_id == "cli_xxx"
-    assert config.ai.provider == "openai_compatible"
+    assert config.ai.strategy == "fallback"
+    assert [m.provider for m in config.ai.models] == ["openai_compatible"]
     assert config.conversation.max_history_messages == 6
     assert config.knowledge_base.enabled is True
     assert config.knowledge_base.vault_path == "D:/MySecondBrain/vault"
@@ -254,7 +255,7 @@ def test_worker_allows_empty_feishu_and_ai_but_requires_gateway_and_identity(tmp
 
     assert config.runtime.role == "worker"
     assert config.feishu.app_id == ""
-    assert config.ai.api_key == ""
+    assert config.ai.models == ()
     assert config.runtime.gateway_base_url == "https://feishu.example.com"
     assert config.muliu.routes["cn"].identifier == "route-cn"
     assert config.muliu.routes["cn"].task_id == 101
@@ -337,93 +338,110 @@ def test_example_configurations_are_valid():
     assert worker_config.runtime.role == "worker"
 
 
-def _ai_section(**fallback):
+def _ai_model(base_url="https://api.example.com/v1", api_key="key", model="m", **extra):
     section = {
         "provider": "openai_compatible",
-        "base_url": "https://api.example.com/v1",
-        "api_key": "key",
-        "model": "primary-model",
+        "base_url": base_url,
+        "api_key": api_key,
+        "model": model,
     }
-    if fallback:
-        section["fallback"] = fallback["fallback"]
+    section.update(extra)
     return section
 
 
-def test_ai_fallback_is_optional_and_defaults_to_none(tmp_path):
+def test_ai_pool_defaults_to_fallback_strategy_and_single_model(tmp_path):
     config_path = tmp_path / "config.json"
     config_path.write_text(json.dumps({
         "feishu": {"app_id": "app", "app_secret": "secret"},
-        "ai": _ai_section(),
+        "ai": _ai_model(),
     }), encoding="utf-8")
 
-    assert load_config(config_path).ai.fallback is None
+    pool = load_config(config_path).ai
+
+    assert pool.strategy == "fallback"
+    assert len(pool.models) == 1
+    assert pool.models[0].model == "m"
 
 
-def test_ai_fallback_is_loaded_and_inherits_primary_defaults(tmp_path):
-    config_path = tmp_path / "config.json"
-    config_path.write_text(json.dumps({
-        "feishu": {"app_id": "app", "app_secret": "secret"},
-        "ai": {
-            **_ai_section(),
-            "system_prompt": "主模型提示词",
-            "temperature": 0.4,
-            "max_tokens": 777,
-            "timeout_seconds": 33,
-            "fallback": {
-                "provider": "openai_compatible",
-                "base_url": "https://fallback.example.com/v1",
-                "api_key": "fb-key",
-                "model": "minimax-3.1",
-            },
-        },
-    }), encoding="utf-8")
-
-    config = load_config(config_path)
-    fallback = config.ai.fallback
-
-    assert fallback is not None
-    assert fallback.model == "minimax-3.1"
-    assert fallback.base_url == "https://fallback.example.com/v1"
-    assert fallback.system_prompt == "主模型提示词"
-    assert fallback.temperature == 0.4
-    assert fallback.max_tokens == 777
-    assert fallback.timeout_seconds == 33
-
-
-def test_ai_fallback_may_override_inherited_defaults(tmp_path):
+def test_ai_pool_loads_multiple_models_and_strategy(tmp_path):
     config_path = tmp_path / "config.json"
     config_path.write_text(json.dumps({
         "feishu": {"app_id": "app", "app_secret": "secret"},
         "ai": {
-            **_ai_section(),
-            "fallback": {
-                "provider": "claude_messages",
-                "base_url": "https://fallback.example.com/v1",
-                "api_key": "fb-key",
-                "model": "minimax-3.1",
-                "system_prompt": "兜底专用提示词",
-                "max_tokens": 512,
-            },
+            "strategy": "round_robin",
+            "models": [
+                _ai_model(base_url="https://a.example.com/v1", model="model-a"),
+                _ai_model(base_url="https://b.example.com/v1", model="model-b"),
+            ],
         },
     }), encoding="utf-8")
 
-    fallback = load_config(config_path).ai.fallback
+    pool = load_config(config_path).ai
 
-    assert fallback.provider == "claude_messages"
-    assert fallback.system_prompt == "兜底专用提示词"
-    assert fallback.max_tokens == 512
+    assert pool.strategy == "round_robin"
+    assert [m.model for m in pool.models] == ["model-a", "model-b"]
+    assert [m.base_url for m in pool.models] == ["https://a.example.com/v1", "https://b.example.com/v1"]
 
 
-@pytest.mark.parametrize("invalid, match", [
-    ({"provider": "openai_compatible", "base_url": "https://x", "api_key": "k"}, "ai.fallback.model"),
-    ({"base_url": "https://x", "api_key": "k", "model": "m"}, "ai.fallback.provider"),
-    ({"provider": "unknown", "base_url": "https://x", "api_key": "k", "model": "m"}, "Unsupported ai.fallback.provider"),
+def test_ai_pool_second_model_inherits_generation_defaults(tmp_path):
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({
+        "feishu": {"app_id": "app", "app_secret": "secret"},
+        "ai": {
+            "strategy": "random",
+            "models": [
+                _ai_model(system_prompt="主提示词", temperature=0.4, max_tokens=777, timeout_seconds=33),
+                _ai_model(base_url="https://b.example.com/v1", model="model-b"),
+            ],
+        },
+    }), encoding="utf-8")
+
+    second = load_config(config_path).ai.models[1]
+
+    assert second.system_prompt == "主提示词"
+    assert second.temperature == 0.4
+    assert second.max_tokens == 777
+    assert second.timeout_seconds == 33
+
+
+def test_ai_pool_second_model_may_override_inherited_defaults(tmp_path):
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({
+        "feishu": {"app_id": "app", "app_secret": "secret"},
+        "ai": {
+            "models": [
+                _ai_model(),
+                _ai_model(
+                    provider="claude_messages",
+                    base_url="https://b.example.com/v1",
+                    model="model-b",
+                    system_prompt="兜底专用提示词",
+                    max_tokens=512,
+                ),
+            ],
+        },
+    }), encoding="utf-8")
+
+    second = load_config(config_path).ai.models[1]
+
+    assert second.provider == "claude_messages"
+    assert second.system_prompt == "兜底专用提示词"
+    assert second.max_tokens == 512
+
+
+@pytest.mark.parametrize("ai_section, match", [
+    ({"models": []}, "ai.models"),
+    ({"strategy": "nope", "models": [_ai_model()]}, "ai.strategy"),
+    ({"models": [{"provider": "openai_compatible", "base_url": "https://x", "api_key": "k"}]}, r"ai\.models\[0\]\.model"),
+    ({"models": [{"base_url": "https://x", "api_key": "k", "model": "m"}]}, r"ai\.models\[0\]\.provider"),
+    ({"models": [{"provider": "unknown", "base_url": "https://x", "api_key": "k", "model": "m"}]},
+     r"Unsupported ai\.models\[0\]\.provider"),
 ])
-def test_ai_fallback_rejects_incomplete_or_unknown_shapes(tmp_path, invalid, match):
+def test_ai_pool_rejects_incomplete_or_unknown_shapes(tmp_path, ai_section, match):
     config_path = tmp_path / "config.json"
     config_path.write_text(json.dumps({
         "feishu": {"app_id": "app", "app_secret": "secret"},
-        "ai": {**_ai_section(), "fallback": invalid},
+        "ai": ai_section,
     }), encoding="utf-8")
 
     with pytest.raises(ConfigError, match=match):

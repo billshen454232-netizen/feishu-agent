@@ -651,26 +651,26 @@
         {
           id: "11",
           status: "active",
-          title: "AI 模型兜底配置",
-          desc: "支持配置兜底模型，主模型失败后降级到 MiniMax 3.1",
+          title: "AI 模型调用池",
+          desc: "把 ai 配置扩成模型池，随机/轮询分摊负载，扩展只需加一项",
           done: [
-            "已确认用户有 MiniMax 3.1 API 剩余额度，能力较弱，定位为兜底而非主力",
-            "已设计配置结构：ai.fallback 可选段，只填 provider / base_url / api_key / model，其余继承主模型",
-            "已扩展 AIConfig 与 load_config，fallback 缺字段时报 ConfigError",
-            "已实现 FallbackAIClient：主模型重试耗尽才降级，非负载均衡，切换记日志",
-            "已实现 generate_with_provenance()：generate() 保持纯净文本（计划解析不受影响），出处单独返回",
-            "已实现 degradation_notice()：兜底回复末尾强制标注模型名与「请谨慎采信」",
-            "已接入 message_worker 三处飞书回复（执行研读、知识回答、旧版对话）",
-            "已补测试 15 个：降级触发、双重失败、标注内容、主模型不标注、配置继承与校验、创建时自动包装"
+            "已确认用户需求：ai 1/2/3 扩展成调用池，随机调用平均负载，便于后续扩展",
+            "已确认 MiniMax 3.1 Flash 用于语言格式转化足够可靠，不需要在回复里标注所用模型（用户 2026-10-29 决定，覆盖此前「必须标注」要求）",
+            "已实现 AIPoolConfig：strategy（random / round_robin / fallback）+ models 数组",
+            "已实现 PoolAIClient：三种策略只决定首选顺序，任一模型失败都会继续试下一个，单个模型抖动不致整条请求失败",
+            "已移除上一版的 degradation_notice 标注逻辑，改为记录所用模型（可观测性不打扰用户）",
+            "已保留单模型旧写法兼容：ai 直接写 provider/base_url 视为单条目 fallback 池",
+            "配置模板 config.example.json / config.gateway.example.json 已改为池结构（strategy + models 数组）",
+            "职责索引已更新为「AI 模型池」章节",
+            "测试 420 passed（含池策略、失败换下一个、单模型兼容、配置继承与校验）"
           ],
           current: [
-            "已把 ai.fallback 占位块补进 config.example.json 与 config.gateway.example.json（修正此前「不写进模板」的错误判断）",
-            "改动待提交推送，推送后在真实 config.json 填入 MiniMax 凭据"
+            "在真实 config/config.json 里填入两个模型的凭据"
           ],
           remaining: [
-            "在 config/config.json 中填入真实的 MiniMax 3.1 凭据（需用户自行填写，不入库）",
-            "部署到线上 Gateway 并在真实降级场景验证标注是否出现在飞书回复",
-            "评估 MiniMax 3.1 的实际可用性与答案质量，决定是否调整兜底触发条件"
+            "在 config/config.json 填入主模型与 MiniMax 3.1 Flash 的 base_url / api_key / model（凭据不入库）",
+            "部署重启 Gateway，验证随机分摊与失败换模型",
+            "评估策略选择：random 平均负载 vs fallback 质量优先"
           ]
         },
         {

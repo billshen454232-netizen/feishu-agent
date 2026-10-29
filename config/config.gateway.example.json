@@ -21,20 +21,25 @@
     "base_url": "https://open.feishu.cn"
   },
   "ai": {
-    "provider": "openai_compatible",
-    "base_url": "https://api.example.com/v1",
-    "api_key": "填写模型 API Key",
-    "model": "填写模型名",
-    "system_prompt": "你是一个飞书里的 AI 助手，请用简洁、准确的中文回答。",
-    "temperature": 0.2,
-    "max_tokens": 2048,
-    "timeout_seconds": 60,
-    "fallback": {
-      "provider": "openai_compatible",
-      "base_url": "https://填写兜底模型网关",
-      "api_key": "填写兜底模型 API Key",
-      "model": "填写兜底模型名，例如 MiniMax-Text-01"
-    }
+    "strategy": "random",
+    "models": [
+      {
+        "provider": "openai_compatible",
+        "base_url": "https://主模型网关",
+        "api_key": "主模型 API Key",
+        "model": "主模型名",
+        "system_prompt": "你是一个飞书里的 AI 助手，请用简洁、准确的中文回答。",
+        "temperature": 0.2,
+        "max_tokens": 2048,
+        "timeout_seconds": 60
+      },
+      {
+        "provider": "openai_compatible",
+        "base_url": "https://api.minimax.chat/v1",
+        "api_key": "MiniMax API Key",
+        "model": "MiniMax-3.1-Flash"
+      }
+    ]
   },
   "conversation": {
     "max_history_messages": 12

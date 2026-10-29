@@ -55,57 +55,36 @@ worker  = 主动连 Gateway 领任务 + 本地 Muliu 执行（无飞书/AI 凭�
 
 完整配置字段定义见 [src/config.py](../src/config.py) 的 `AppConfig` 及各 `*Config` dataclass。
 
-### AI 兜底模型（可选）
+### AI 模型池
 
-`ai` 段可选配 `fallback`：主模型重试耗尽后降级到的模型。**未配置则没有兜底**。配置结构见 `config.example.json` 与 `config.gateway.example.json` 中的 `ai.fallback` 占位块：
+`ai` 段是一个**模型池**，随机/轮询分摊调用负载，扩展就是往 `models` 数组加一项。
 
 ```json
 "ai": {
-  "provider": "openai_compatible",
-  "base_url": "https://主模型网关",
-  "api_key": "主模型密钥",
-  "model": "主模型名",
-  "fallback": {
-    "provider": "openai_compatible",
-    "base_url": "https://兜底模型网关",
-    "api_key": "兜底密钥",
-    "model": "minimax-3.1"
-  }
+  "strategy": "random",
+  "models": [
+    { "provider": "openai_compatible", "base_url": "https://主模型网关", "api_key": "...", "model": "..." },
+    { "provider": "openai_compatible", "base_url": "https://api.minimax.chat/v1", "api_key": "...", "model": "MiniMax-3.1-Flash" }
+  ]
 }
 ```
 
+**三种 `strategy`（区别只在首选顺序，任一模型失败都会继续试下一个）：**
+
+| 策略 | 首选 | 适合 |
+| --- | --- | --- |
+| `random` | 随机打乱 | 平均负载 |
+| `round_robin` | 轮转起点 | 平均负载、可预测 |
+| `fallback` | 恒从第一个开始 | 质量优先，前一个挂了才换 |
+
 边界：
 
-- 只有 `provider` / `base_url` / `api_key` / `model` 必填；`system_prompt`、`temperature`、`max_tokens`、`timeout_seconds` 未填时**继承主模型值**；
-- 兜底只在主模型**重试耗尽后**才调用，不是负载均衡；
-- 兜底产出的回复**必然带降级标注**（末尾注明「本次回复由兜底模型 X 生成…请谨慎采信」），避免弱模型结论被当主力模型结论；
-- 标注只进飞书展示层，不回流到提示词或计划解析（计划解析走 `generate()`，返回纯净文本）；
-- 兜底也失败时走失败错误卡片，不会静默；
-- **注意**：示例里的兜底块是占位值，真实使用前须填入实际网关与密钥，或整块删除（删除即不启用兜底）。
+- 每个模型只需 `provider` / `base_url` / `api_key` / `model`；`system_prompt`、`temperature`、`max_tokens`、`timeout_seconds` 未填时**继承 `models[0]` 的值**；
+- **单模型写法兼容**：`ai` 直接写 `provider` / `base_url` 等（无 `models` 数组）时，视为单条目的 `fallback` 池，现有配置不改也能跑；
+- 池内每个模型各自带 5xx/超时重试（见 `_post_with_retry`），重试耗尽后才换下一个模型；
+- **不标注所用模型**：MiniMax 3.1 Flash 用于语言格式转化足够可靠，无需在回复里区分（用户 2026-10-29 决定）。如后续引入明显更弱的模型，再考虑按模型加标注；
+- worker 角色可完全不配 `ai` 段（它不调用 AI）。
 
-### 1.2 服务环境与路由资料
-
-| 文件 | 作用 | 消费者 | 敏感性 | 备注 |
-| --- | --- | --- | --- | --- |
-| `server_environments.json` | **服号 → 区域 / 环境归属**的唯一资料源。含 `regions`（cn / hmt / global / kr / vn）、`environment_labels`、跨区域 `groups` 选择器。 | [src/server_environments.py](../src/server_environments.py) 加载并校验；[src/muliu_routing.py](../src/muliu_routing.py) 从它派生 `route_region`；[src/message_worker.py](../src/message_worker.py) 用它构造 AI 研读的环境上下文。 | 仅服号与环境标签，无私密连接信息。 | 改服号归属只改这里；catalog 中的环境服号列表由 `tools/sync_hotfix_planner_catalog.py` 从它生成。 |
-| `muliu_regions.example.json` | 旧式 Muliu profile 模板：以 `profiles.{china,overseas}` 和 `server_regions` 表示服号路由。 | **当前仓库代码没有读取它**。 | **敏感字段**：URL / 账号 / 密码 / Task ID 占位。 | 历史 / 候选资料，不能替代当前 worker 的 `muliu.routes` 配置。 |
-| `muliu_regions.json` | 上述旧式模板的占位副本。当前副本仅含占位值。 | **当前仓库代码没有读取它**。 | 含敏感字段结构，但当前无真实凭据。 | 被 Git 跟踪；用户已决定保持现状、不加入 `.gitignore`。如未来填入真实值，必须先重新评估存放方式。 |
-
-### 1.3 执行合同与热更资料
-
-| 文件 | 作用 | 消费者 | 敏感性 | 备注 |
-| --- | --- | --- | --- | --- |
-| `muliu_script_catalog.md` | **机器人侧唯一精确执行合同**。登记每个可调用脚本的 `path + args` 模板、变量正则、风险等级 `read/write`。 | [src/muliu_script_catalog.py](../src/muliu_script_catalog.py) 解析；[src/muliu_planner.py](../src/muliu_planner.py) 生成计划时约束；[src/muliu_firewall.py](../src/muliu_firewall.py) 二次校验。 | 无私密连接信息。 | **知识文档不能替代它**；模型不能按脚本名或近义词扩大调用能力。 |
-| `hotfix_thresholds.json` | 热更阈值的 **JSON 资料模型**（含可执行候选与不可执行条目的结构化区分）。 | 仅由 [tools/hotfix_threshold_registry.py](../tools/hotfix_threshold_registry.py) 加载；**当前不在 catalog 同步主链中**。 | 业务字段名，无私密连接信息。 | **已被 `.gitignore` 排除**，属本地资料副本。不得称为“当前唯一运行时来源”；它是候选迁移资料。 |
-
-### 1.4 其他
-
-| 文件 | 作用 | 备注 |
-| --- | --- | --- |
-| `data/feishu_bot.sqlite3` | 任务状态机、去重、审计、确认令牌的 SQLite 数据库。 | 由 `job_queue.database_path` 指定；含真实请求与状态，属内部运行数据，不入 Git。 |
-| `logs/conversations/` | 按日期追加的可读对话 Markdown 归档。 | 由 [src/conversation_log.py](../src/conversation_log.py) 写入；含群内原文，属内部数据。 |
-
----
 
 ## 2. `src/` — 运行期 Python 模块
 

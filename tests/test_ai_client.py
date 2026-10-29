@@ -5,13 +5,12 @@ import pytest
 
 from src.ai_client import (
     AIGeneration,
-    FallbackAIClient,
+    PoolAIClient,
     create_ai_client,
-    degradation_notice,
     generate_with_provenance,
     is_retryable_ai_error,
 )
-from src.config import AIConfig
+from src.config import AIConfig, AIPoolConfig
 
 
 def _openai_config() -> AIConfig:
@@ -229,16 +228,14 @@ def test_retryability_classification():
     assert not is_retryable_ai_error(ValueError("not a transport error"))
 
 
-def _fallback_config(**overrides):
-    base = dict(
+def _model(base_url, model):
+    return AIConfig(
         provider="openai_compatible",
-        base_url="https://fallback.example.com/v1",
-        api_key="fb-key",
-        model="minimax-3.1",
+        base_url=base_url,
+        api_key="k",
+        model=model,
         system_prompt="sys",
     )
-    base.update(overrides)
-    return AIConfig(**base)
 
 
 class _ScriptedClient:
@@ -262,84 +259,91 @@ class _ScriptedClient:
 
 
 @pytest.mark.asyncio
-async def test_primary_success_does_not_degrade():
-    primary = _ScriptedClient("gpt-test", ["主力回答"])
-    fallback = _ScriptedClient("minimax-3.1", ["兜底回答"])
-    client = FallbackAIClient(primary, fallback, primary_model="gpt-test", fallback_model="minimax-3.1")
+async def test_pool_first_entry_succeeds_without_touching_others():
+    first = _ScriptedClient("model-a", ["A 的回答"])
+    second = _ScriptedClient("model-b", ["B 的回答"])
+    pool = PoolAIClient([(first, "model-a"), (second, "model-b")], strategy="fallback")
 
-    generation = await client.generate_with_provenance([], "查一下")
+    generation = await pool.generate_with_provenance([], "查一下")
 
-    assert generation.text == "主力回答"
-    assert generation.model == "gpt-test"
-    assert generation.degraded is False
-    assert fallback.calls == 0
-
-
-@pytest.mark.asyncio
-async def test_primary_failure_falls_back_and_is_marked_degraded():
-    primary = _ScriptedClient("gpt-test", [RuntimeError("primary down")])
-    fallback = _ScriptedClient("minimax-3.1", ["兜底回答"])
-    client = FallbackAIClient(primary, fallback, primary_model="gpt-test", fallback_model="minimax-3.1")
-
-    generation = await client.generate_with_provenance([], "查一下")
-
-    assert generation.text == "兜底回答"
-    assert generation.model == "minimax-3.1"
-    assert generation.degraded is True
-    assert primary.calls == 1
-    assert fallback.calls == 1
+    assert generation.text == "A 的回答"
+    assert generation.model == "model-a"
+    assert second.calls == 0
 
 
 @pytest.mark.asyncio
-async def test_both_models_failing_raises():
-    primary = _ScriptedClient("gpt-test", [RuntimeError("primary down")])
-    fallback = _ScriptedClient("minimax-3.1", [RuntimeError("fallback down")])
-    client = FallbackAIClient(primary, fallback, primary_model="gpt-test", fallback_model="minimax-3.1")
+async def test_pool_falls_through_to_next_model_on_failure():
+    first = _ScriptedClient("model-a", [RuntimeError("A 挂了")])
+    second = _ScriptedClient("model-b", ["B 的回答"])
+    pool = PoolAIClient([(first, "model-a"), (second, "model-b")], strategy="fallback")
 
-    with pytest.raises(RuntimeError, match="fallback down"):
-        await client.generate([], "查一下")
+    generation = await pool.generate_with_provenance([], "查一下")
 
-
-def test_degradation_notice_is_empty_for_primary_answers():
-    assert degradation_notice(AIGeneration("答", "gpt-test", False)) == ""
-
-
-def test_degradation_notice_names_the_fallback_model():
-    notice = degradation_notice(AIGeneration("答", "minimax-3.1", True))
-
-    assert "minimax-3.1" in notice
-    assert "兜底模型" in notice
-    assert "谨慎采信" in notice
+    assert generation.text == "B 的回答"
+    assert generation.model == "model-b"
+    assert first.calls == 1 and second.calls == 1
 
 
 @pytest.mark.asyncio
-async def test_plain_test_double_gets_provenance_without_crashing():
-    class PlainDouble:
-        async def generate(self, history, user_message):
-            return "只实现了 generate"
+async def test_pool_raises_last_error_when_every_model_fails():
+    first = _ScriptedClient("model-a", [RuntimeError("A 挂了")])
+    second = _ScriptedClient("model-b", [RuntimeError("B 也挂了")])
+    pool = PoolAIClient([(first, "model-a"), (second, "model-b")], strategy="fallback")
 
-    generation = await generate_with_provenance(PlainDouble(), [], "查一下")
+    with pytest.raises(RuntimeError, match="B 也挂了"):
+        await pool.generate([], "查一下")
 
-    assert generation.text == "只实现了 generate"
-    assert generation.degraded is False
+
+def test_pool_rejects_empty_entries():
+    with pytest.raises(ValueError, match="AI 池不能为空"):
+        PoolAIClient([])
+
+
+def test_round_robin_rotates_the_first_choice():
+    first = _ScriptedClient("model-a", ["A"])
+    second = _ScriptedClient("model-b", ["B"])
+    pool = PoolAIClient([(first, "model-a"), (second, "model-b")], strategy="round_robin")
+
+    orders = [entry.model for entry in pool._ordered_entries() for _ in range(0)] or None
+    # 直接看两轮的首选顺序
+    first_round = [c.model for c, _ in pool._ordered_entries()]
+    second_round = [c.model for c, _ in pool._ordered_entries()]
+    assert first_round[0] != second_round[0]
+    assert sorted(first_round) == sorted(second_round) == ["model-a", "model-b"]
+
+
+def test_fallback_strategy_always_prefers_first_entry():
+    first = _ScriptedClient("model-a", ["A"])
+    second = _ScriptedClient("model-b", ["B"])
+    pool = PoolAIClient([(first, "model-a"), (second, "model-b")], strategy="fallback")
+
+    for _ in range(3):
+        assert [c.model for c, _ in pool._ordered_entries()] == ["model-a", "model-b"]
+
+
+def test_random_strategy_spreads_across_the_pool():
+    entries = [(_ScriptedClient("m{}".format(i), ["x"]), "m{}".format(i)) for i in range(4)]
+    pool = PoolAIClient(entries, strategy="random")
+
+    firsts = {pool._ordered_entries()[0][1] for _ in range(40)}
+    assert len(firsts) > 1
 
 
 @pytest.mark.asyncio
-async def test_create_ai_client_wraps_fallback_when_configured():
+async def test_create_ai_client_builds_pool_from_config():
     handler, calls = _recording_handler([
         httpx.Response(520, text="origin error"),
-        httpx.Response(200, json={"choices": [{"message": {"content": "兜底回答"}}]}),
+        httpx.Response(200, json={"choices": [{"message": {"content": "第二个模型的回答"}}]}),
     ])
-    config = AIConfig(
-        provider="openai_compatible",
-        base_url="https://api.example.com/v1",
-        api_key="secret",
-        model="gpt-test",
-        system_prompt="sys",
-        fallback=_fallback_config(),
+    pool_config = AIPoolConfig(
+        strategy="fallback",
+        models=(
+            _model("https://a.example.com/v1", "model-a"),
+            _model("https://b.example.com/v1", "model-b"),
+        ),
     )
     client = create_ai_client(
-        config,
+        pool_config,
         http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
         max_retries=0,
         retry_backoff_seconds=0,
@@ -347,7 +351,21 @@ async def test_create_ai_client_wraps_fallback_when_configured():
 
     generation = await client.generate_with_provenance([], "查一下")
 
-    assert generation.text == "兜底回答"
-    assert generation.model == "minimax-3.1"
-    assert generation.degraded is True
+    assert generation.text == "第二个模型的回答"
+    assert generation.model == "model-b"
     assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_create_ai_client_accepts_single_model_config():
+    handler, calls = _recording_handler([
+        httpx.Response(200, json={"choices": [{"message": {"content": "单模型回答"}}]}),
+    ])
+    client = create_ai_client(
+        _model("https://api.example.com/v1", "only-model"),
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        retry_backoff_seconds=0,
+    )
+
+    assert await client.generate([], "查一下") == "单模型回答"
+    assert len(calls) == 1

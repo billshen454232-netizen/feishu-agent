@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 from typing import NamedTuple, Protocol
 
 import httpx
 
-from .config import AIConfig
+from .config import AIConfig, AIPoolConfig
 
 logger = logging.getLogger(__name__)
 
@@ -92,20 +93,6 @@ async def generate_with_provenance(
     return AIGeneration(await client.generate(history, user_message), "未知模型", False)
 
 
-def degradation_notice(generation: AIGeneration) -> str:
-    """Return a presentation-only marker, or an empty string for a primary answer.
-
-    A fallback model is chosen because it is cheaper and weaker, so its answers
-    must never pass for the primary model's. This text is appended to the reply
-    shown to the requester only; it is never fed back into a prompt or plan.
-    """
-    if not generation.degraded:
-        return ""
-    return (
-        "\n\n---\n\n⚠️ 本次回复由兜底模型「{}」生成（主模型暂不可用），"
-        "能力弱于主模型，请谨慎采信其结论。".format(generation.model)
-    )
-
 
 class OpenAICompatibleClient:
     def __init__(
@@ -188,20 +175,33 @@ class ClaudeMessagesClient:
         return AIGeneration(await self.generate(history, user_message), self._config.model, False)
 
 
-class FallbackAIClient:
-    """Try the primary model first, then a cheaper fallback when it fails.
+class PoolAIClient:
+    """Pick a model per request and fall through to the next when one fails.
 
-    Degradation is never silent: the fallback's answers are tagged so a weaker
-    model cannot pass for the primary one, and the switch is logged. The fallback
-    runs after the primary's own retry budget is exhausted, so it is a genuine
-    last resort rather than a load balancer.
+    The strategy only decides which model is tried first; every strategy walks
+    the whole pool on failure so one flaky provider cannot fail a request on its
+    own. ``random`` spreads load, ``round_robin`` rotates the start index, and
+    ``fallback`` always prefers the first entry.
     """
 
-    def __init__(self, primary: AIClient, fallback: AIClient, *, primary_model: str, fallback_model: str) -> None:
-        self._primary = primary
-        self._fallback = fallback
-        self._primary_model = primary_model
-        self._fallback_model = fallback_model
+    def __init__(self, entries, *, strategy: str = "random") -> None:
+        if not entries:
+            raise ValueError("AI 池不能为空")
+        self._entries = list(entries)
+        self._strategy = strategy
+        self._cursor = 0
+
+    def _ordered_entries(self):
+        if self._strategy == "fallback":
+            return list(self._entries)
+        if self._strategy == "round_robin":
+            size = len(self._entries)
+            start = self._cursor % size
+            self._cursor = (self._cursor + 1) % size
+            return [self._entries[(start + offset) % size] for offset in range(size)]
+        shuffled = list(self._entries)
+        random.shuffle(shuffled)
+        return shuffled
 
     async def generate(self, history: list[dict[str, str]], user_message: str) -> str:
         generation = await self.generate_with_provenance(history, user_message)
@@ -210,38 +210,50 @@ class FallbackAIClient:
     async def generate_with_provenance(
         self, history: list[dict[str, str]], user_message: str
     ) -> AIGeneration:
-        try:
-            return AIGeneration(await self._primary.generate(history, user_message), self._primary_model, False)
-        except Exception as exc:  # noqa: BLE001 - fallback must absorb primary failures
-            logger.warning(
-                "primary AI model failed, degrading to fallback model=%s error=%s",
-                self._fallback_model,
-                exc,
-            )
-        return AIGeneration(await self._fallback.generate(history, user_message), self._fallback_model, True)
+        errors: list[Exception] = []
+        for client, model_name in self._ordered_entries():
+            try:
+                return AIGeneration(await client.generate(history, user_message), model_name, False)
+            except Exception as exc:  # noqa: BLE001 - one model's failure must not fail the request
+                errors.append(exc)
+                logger.warning("AI 池模型 %s 调用失败，尝试下一个: %s", model_name, exc)
+        if not errors:
+            raise RuntimeError("AI 池为空")
+        raise errors[-1]
 
 
 def create_ai_client(
-    config: AIConfig,
+    config,
     http_client: httpx.AsyncClient | None = None,
     *,
     max_retries: int = DEFAULT_MAX_RETRIES,
     retry_backoff_seconds: float = DEFAULT_RETRY_BACKOFF_SECONDS,
 ) -> AIClient:
+    """Build a client from a model pool, or from a single model config.
+
+    ``AIPoolConfig`` produces a :class:`PoolAIClient`; a bare :class:`AIConfig`
+    is treated as a one-entry pool so older callers and configs keep working.
+    """
     retry_kwargs = {
         "max_retries": max_retries,
         "retry_backoff_seconds": retry_backoff_seconds,
     }
-    primary = _build_single_client(config, http_client=http_client, **retry_kwargs)
-    if config.fallback is None:
-        return primary
-    fallback = _build_single_client(config.fallback, http_client=http_client, **retry_kwargs)
-    return FallbackAIClient(
-        primary,
-        fallback,
-        primary_model=config.model,
-        fallback_model=config.fallback.model,
-    )
+    if isinstance(config, AIPoolConfig):
+        models = config.models
+        strategy = config.strategy
+    else:
+        models = (config,)
+        strategy = "fallback"
+    if not models:
+        raise ValueError("AI 池未配置任何模型")
+
+    entries = [
+        (_build_single_client(model, http_client=http_client, **retry_kwargs), model.model)
+        for model in models
+    ]
+    if len(entries) == 1:
+        return entries[0][0]
+    return PoolAIClient(entries, strategy=strategy)
 
 
 def _build_single_client(

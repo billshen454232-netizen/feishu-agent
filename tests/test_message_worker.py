@@ -13,7 +13,6 @@ from src.config import (
     KnowledgeBaseConfig,
     ServerConfig,
 )
-from src.ai_client import AIGeneration
 from src.conversation import ConversationStore
 from src.knowledge_base import KnowledgeSearchResult, KnowledgeSource
 from src.message_jobs import MessageJobStore
@@ -385,52 +384,3 @@ async def test_queue_puts_and_gets_confirmation_items():
     assert item.message_id == "om_confirm"
     assert item.chat_id == "oc_group"
     assert item.confirmation_token == "ABC123"
-
-
-class DegradedAIClient:
-    """Test double answering as a fallback model would: marked as degraded."""
-
-    def __init__(self, reply="【执行完成】兜底模型给出的结论。", model="minimax-3.1"):
-        self.calls = []
-        self.reply = reply
-        self.model = model
-
-    async def generate(self, history, user_message):
-        self.calls.append((history, user_message))
-        return self.reply
-
-    async def generate_with_provenance(self, history, user_message):
-        text = await self.generate(history, user_message)
-        return AIGeneration(text, self.model, True)
-
-
-@pytest.mark.asyncio
-async def test_interpretation_labels_degraded_fallback_model(tmp_path):
-    store = MessageJobStore(tmp_path / "jobs.sqlite3")
-    store.initialize()
-    job, _ = store.create_if_new("om_degraded", "evt_degraded", "oc_group", "ou_user", "查询 Patch 列表")
-    ai = DegradedAIClient()
-    processor = MessageJobProcessor(make_config(), store, ConversationStore(4), ai, FakeFeishuClient())
-    result = _successful_patch_result('{"file": "avatar_patch_79941.lua"}')
-
-    reply = await processor.interpret_execution_result(job, result, "fallback")
-
-    assert "兜底模型给出的结论" in reply
-    assert "兜底模型「minimax-3.1」" in reply
-    assert "谨慎采信" in reply
-
-
-@pytest.mark.asyncio
-async def test_interpretation_leaves_primary_answer_unlabelled(tmp_path):
-    store = MessageJobStore(tmp_path / "jobs.sqlite3")
-    store.initialize()
-    job, _ = store.create_if_new("om_primary", "evt_primary", "oc_group", "ou_user", "查询 Patch 列表")
-    ai = InterpretationAIClient("【执行完成】主模型结论。")
-    processor = MessageJobProcessor(make_config(), store, ConversationStore(4), ai, FakeFeishuClient())
-    result = _successful_patch_result('{"file": "avatar_patch_79941.lua"}')
-
-    reply = await processor.interpret_execution_result(job, result, "fallback")
-
-    assert "主模型结论" in reply
-    assert "兜底模型" not in reply
-    assert "谨慎采信" not in reply
