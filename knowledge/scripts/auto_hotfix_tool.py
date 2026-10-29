@@ -283,12 +283,18 @@ end
         )
 
         # 6-7. 每个类型各写一份：同服同字段同类型复用已有文件，仅首次创建。
+        #     任一类型失败都要如实报出已写入的部分，避免只留下半套补丁却看不出。
         mounted_names = []
         for selected_patch_type in patch_types:
             patch_file_name = self._select_patch_file_name(
                 host, server_id, field_name, selected_patch_type
             )
             if not patch_file_name:
+                logger.error(
+                    "无法为类型 %s 确定补丁文件名；已写入: %s",
+                    selected_patch_type,
+                    ", ".join(mounted_names) or "（无）",
+                )
                 return False
             local_temp_patch = f"/tmp/{patch_file_name}" if os.name != "nt" else os.path.join(os.environ.get("TEMP", "."), patch_file_name)
 
@@ -302,11 +308,18 @@ end
             self.run_remote_cmd(host, f"mkdir -p {remote_patch_dir}")
             code, out = self.scp_to_remote(host, local_temp_patch, remote_patch_file_path)
             if code != 0:
-                logger.error("上传补丁文件失败: %s", out)
+                logger.error(
+                    "上传 %s 类型补丁失败: %s；已写入: %s",
+                    selected_patch_type, out, ", ".join(mounted_names) or "（无）",
+                )
                 return False
 
             logger.info("更新远端热更清单: %s", self.REMOTE_PATCH_LIST)
             if not self._mount_patch_to_remote_json(host, patch_file_name, selected_patch_type):
+                logger.error(
+                    "挂载 %s 类型补丁失败；已写入: %s",
+                    selected_patch_type, ", ".join(mounted_names) or "（无）",
+                )
                 return False
             mounted_names.append("{}/{}".format(selected_patch_type, patch_file_name))
 

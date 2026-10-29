@@ -23,7 +23,13 @@
     "system_prompt": "你是一个飞书里的 AI 助手，请用简洁、准确的中文回答。",
     "temperature": 0.2,
     "max_tokens": 2048,
-    "timeout_seconds": 60
+    "timeout_seconds": 60,
+    "fallback": {
+      "provider": "openai_compatible",
+      "base_url": "https://填写兜底模型网关",
+      "api_key": "填写兜底模型 API Key",
+      "model": "填写兜底模型名，例如 MiniMax-Text-01"
+    }
   },
   "conversation": {
     "max_history_messages": 12

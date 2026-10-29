@@ -650,7 +650,7 @@
         },
         {
           id: "11",
-          status: "done",
+          status: "active",
           title: "AI 模型兜底配置",
           desc: "支持配置兜底模型，主模型失败后降级到 MiniMax 3.1",
           done: [
@@ -663,7 +663,10 @@
             "已接入 message_worker 三处飞书回复（执行研读、知识回答、旧版对话）",
             "已补测试 15 个：降级触发、双重失败、标注内容、主模型不标注、配置继承与校验、创建时自动包装"
           ],
-          current: [],
+          current: [
+            "已把 ai.fallback 占位块补进 config.example.json 与 config.gateway.example.json（修正此前「不写进模板」的错误判断）",
+            "改动待提交推送，推送后在真实 config.json 填入 MiniMax 凭据"
+          ],
           remaining: [
             "在 config/config.json 中填入真实的 MiniMax 3.1 凭据（需用户自行填写，不入库）",
             "部署到线上 Gateway 并在真实降级场景验证标注是否出现在飞书回复",
@@ -832,13 +835,15 @@
             "已修正 auto_hotfix_tool.py 类型语义注释（原第 45 行错误假设）",
             "已更新 catalog 路由表显示实际类型 common + client_avatar，同步镜像副本",
             "已补测试 3 个：类型推导、显式类型覆盖、双 guard 结构；全量 417 passed",
-            "附带修复 STEP 19：catalog 同步检查现已通过"
+            "附带修复 STEP 19：catalog 同步检查现已通过",
+            "已实测通过：热更 7011 服弹劾人数生成 common + client_avatar 两份补丁，patch_order_list.json 两条目齐全",
+            "已定位并修复部署损坏：手动复制误按 ESC 混入 0x1B 控制字符致 SyntaxError，改用 scp 后 ast.parse 通过",
+            "已把 GS-1 脚本覆盖流程写入 deployment/gs1/README.md 第 5 节"
           ],
           current: [],
           remaining: [
-            "部署到线上工具并真实热更一次，验证客户端数值实际变化",
-            "迁移已存在的 common 阈值 Patch：为客户端可见阈值补发 client_avatar 副本",
-            "逐条验证脚本成功 ≠ 客户端已生效，需游戏内/客户端实际观察"
+            "进游戏确认客户端数值实际变化（脚本成功 ≠ 客户端已生效）",
+            "迁移已存在的存量 common 阈值 Patch：为客户端可见阈值补发 client_avatar 副本"
           ]
         }
       ]

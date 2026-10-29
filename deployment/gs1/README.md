@@ -67,7 +67,38 @@ python3.7 server_log_query.py \
 6. **目标服权限与结构**：确认固定日志目录、文件模式、读取权限、输出体积、耗时和编码。候选脚本的假设不能替代实测。
 7. **Task 89 结果协议**：确认返回结果如何对应本次请求；本仓库当前没有 run nonce / run ID 的请求级日志绑定实现。
 
-## 5. 受控人工核验顺序
+## 5. 脚本覆盖到 GS-1 的正确做法
+
+GS-1 上被调用的脚本改动后需要**手动覆盖**（仓库 git push 不会自动部署到 GS-1）。必须用字节级复制：
+
+```bash
+cd D:\otherPrograms\feishu_agent\tools
+scp auto_hotfix_tool.py     root@<GS-1>:/home/serverGeneralScript/
+scp auto_hotfix_registry.py root@<GS-1>:/home/serverGeneralScript/
+```
+
+**两个文件必须同时覆盖且在同一目录**：`auto_hotfix_tool.py` 靠同目录的 `auto_hotfix_registry.py` 找字段定义，只换一个会退回旧行为。
+
+### 为什么不能手动复制
+
+**踩过的坑（2026-10-29）**：手动从编辑器/终端复制粘贴时误按 ESC，文件里混入 `0x1B` 控制字符，位置正好在标识符中间（`file<ESC>_name`），导致 GS-1 上 Python 报 `SyntaxError: invalid syntax`。这类污染是**静默的**——本地 `py_compile` 通过、复制时看不出，只在目标机执行时才炸。
+
+`scp` / `rsync` 是字节级复制，不受影响。
+
+### 覆盖后必做的验证
+
+```bash
+# 1. 语法必须通过
+python3 -c "import ast; ast.parse(open('/home/serverGeneralScript/auto_hotfix_tool.py').read())" && echo "语法 OK"
+
+# 2. 确认无 ESC 污染（应输出 0）
+grep -c $'\x1b' /home/serverGeneralScript/auto_hotfix_tool.py
+grep -c $'\x1b' /home/serverGeneralScript/auto_hotfix_registry.py
+```
+
+国内 GS-1 与海外 GS-1 都要覆盖并验证。
+
+## 6. 受控人工核验顺序
 
 部署会向 GS-1 写入或覆盖文件，应由有权限的环境维护者明确执行。复制后，先在单个明确测试服进行只读人工核验；记录耗时、返回状态、编码、敏感数据、截断行为和实际文件布局。
 
@@ -81,7 +112,7 @@ python3.7 server_log_query.py --server-id <明确测试服> --profile startup_er
 
 只有上述环境事实与输出边界核验完成后，才考虑在本地 catalog 登记额外 profile、更新测试，并通过飞书做一次受控的只读确认验证。
 
-## 6. 结果表述边界
+## 7. 结果表述边界
 
 - 成功复制候选文件，只代表文件复制完成；不代表 Task 89 已调用它。
 - Task 89 或脚本返回成功，只代表已获得对应层的终态；不代表日志诊断结论、服务就绪或游戏内效果已经验证。
