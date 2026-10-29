@@ -213,7 +213,9 @@ class PoolAIClient:
         errors: list[Exception] = []
         for client, model_name in self._ordered_entries():
             try:
-                return AIGeneration(await client.generate(history, user_message), model_name, False)
+                answer = await client.generate(history, user_message)
+                logger.info("AI 池选用模型: %s", model_name)
+                return AIGeneration(answer, model_name, False)
             except Exception as exc:  # noqa: BLE001 - one model's failure must not fail the request
                 errors.append(exc)
                 logger.warning("AI 池模型 %s 调用失败，尝试下一个: %s", model_name, exc)
