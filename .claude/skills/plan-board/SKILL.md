@@ -87,6 +87,14 @@ D:\otherPrograms\feishu_agent\docs\hotfix-requirements-progress.html
 - **批注只存浏览器本地，不写入 Git**；任何文档不得声称批注已持久化到仓库。
 - 想把批注带进项目，用「导出批注」按钮自行决定放哪。
 
+## 3.5 手动改状态（浏览器本地覆盖）
+
+点击卡片右上角或详情页的状态徽章，弹出「已完成 / 进行中 / 未开始」菜单可直接切换。
+
+- 改动存 `localStorage`（键 `hotfix-plan-status-overrides-v1`），**只影响本机浏览器视图**，不写仓库里的 `PLAN_DATA`；
+- 导出批注时会附带「本机改过的状态」清单，维护者据此回写 `PLAN_DATA` 才永久生效；
+- 收到用户转来的状态清单时，按清单更新 `PLAN_DATA` 对应 step 的 `status`。
+
 ## 4. 日常更新只改数据
 
 只编辑 `PLAN_DATA` 与 `FLOWS`，**不改 `<style>` 和渲染函数**（`flowInner` / `renderFlow` / `selectHop` / `openDetail` 等）。

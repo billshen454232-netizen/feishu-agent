@@ -247,6 +247,45 @@
     .status-active .status-tag { background: var(--blue-soft); color: var(--blue-bright); }
     .status-todo .status-tag { background: rgba(148, 163, 184, 0.16); color: var(--text-sub); }
 
+    /* 状态标签可点击，弹出切换菜单 */
+    .status-tag[data-editable] {
+      cursor: pointer;
+      position: relative;
+      user-select: none;
+    }
+    .status-tag[data-editable]:hover { filter: brightness(1.15); }
+    .status-menu {
+      position: absolute;
+      z-index: 50;
+      min-width: 128px;
+      background: var(--bg-shell);
+      border: 1px solid var(--border-default);
+      border-radius: 10px;
+      padding: 5px;
+      box-shadow: 0 12px 32px -8px rgba(0, 0, 0, 0.45);
+    }
+    .status-menu button {
+      display: block;
+      width: 100%;
+      text-align: left;
+      border: 0;
+      background: transparent;
+      color: var(--text-main);
+      padding: 8px 11px;
+      border-radius: 7px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .status-menu button:hover { background: var(--bg-surface-hover); }
+    .status-menu button.current { color: var(--blue-bright); }
+    .status-menu .hint {
+      padding: 6px 11px 3px;
+      font-size: 10.5px;
+      color: var(--text-muted);
+      line-height: 1.5;
+    }
+
     .card-title { font-size: 15.5px; font-weight: 700; line-height: 1.35; color: var(--text-main); }
     .card-desc { font-size: 12.5px; line-height: 1.5; color: var(--text-sub); flex: 1; }
 
@@ -650,7 +689,7 @@
         },
         {
           id: "11",
-          status: "active",
+          status: "done",
           title: "AI 模型调用池",
           desc: "把 ai 配置扩成模型池，随机/轮询分摊负载，扩展只需加一项",
           done: [
@@ -662,7 +701,9 @@
             "已保留单模型旧写法兼容：ai 直接写 provider/base_url 视为单条目 fallback 池",
             "配置模板 config.example.json / config.gateway.example.json 已改为池结构（strategy + models 数组）",
             "职责索引已更新为「AI 模型池」章节",
-            "测试 420 passed（含池策略、失败换下一个、单模型兼容、配置继承与校验）"
+            "测试 420 passed（含池策略、失败换下一个、单模型兼容、配置继承与校验）",
+            "已按用户反馈改为 defaults + 扁平 models：models[] 每项形状一致，共享生成参数放独立 defaults 块，消除主次观感",
+            "已补记 AI 池选用的模型名（此前声称保留日志但未实现）"
           ],
           current: [
             "在真实 config/config.json 里填入两个模型的凭据"
@@ -963,6 +1004,63 @@
       try { localStorage.setItem(NOTES_KEY, JSON.stringify(notes)); } catch (e) {}
     }
 
+    /* ==================== 手动改状态（浏览器本地覆盖） ====================
+       点击状态标签即可切换已完成 / 进行中 / 未开始。改动存 localStorage，
+       只影响本机浏览器视图，不改仓库里的 PLAN_DATA；需要永久生效时导出给维护者。
+       ================================================================== */
+    const STATUS_OVERRIDE_KEY = "hotfix-plan-status-overrides-v1";
+
+    function loadStatusOverrides() {
+      try { return JSON.parse(localStorage.getItem(STATUS_OVERRIDE_KEY)) || {}; }
+      catch (e) { return {}; }
+    }
+
+    function applyStatusOverrides() {
+      const overrides = loadStatusOverrides();
+      PLAN_DATA.steps.forEach(step => {
+        if (overrides[step.id]) step.status = overrides[step.id];
+      });
+    }
+
+    function closeStatusMenu() {
+      const menu = document.querySelector(".status-menu");
+      if (menu) menu.remove();
+    }
+
+    function openStatusMenu(event, stepId) {
+      event.stopPropagation();
+      closeStatusMenu();
+      const step = PLAN_DATA.steps.find(s => s.id === stepId);
+      if (!step) return;
+
+      const menu = document.createElement("div");
+      menu.className = "status-menu";
+      menu.innerHTML = ["done", "active", "todo"].map(key => `
+        <button class="${step.status === key ? "current" : ""}" onclick="setStatus('${stepId}','${key}')">
+          ${step.status === key ? "● " : ""}${STATUS_LABEL[key]}
+        </button>`).join("") +
+        `<div class="hint">改动只在本机浏览器生效<br>永久生效请导出后告知维护者</div>`;
+
+      document.body.appendChild(menu);
+      const rect = event.currentTarget.getBoundingClientRect();
+      menu.style.left = Math.min(rect.left + window.scrollX, window.scrollX + document.documentElement.clientWidth - 150) + "px";
+      menu.style.top = (rect.bottom + window.scrollY + 6) + "px";
+    }
+
+    function setStatus(stepId, status) {
+      const step = PLAN_DATA.steps.find(s => s.id === stepId);
+      if (!step) return;
+      step.status = status;
+      const overrides = loadStatusOverrides();
+      overrides[stepId] = status;
+      try { localStorage.setItem(STATUS_OVERRIDE_KEY, JSON.stringify(overrides)); } catch (e) {}
+      closeStatusMenu();
+      renderFilters();
+      renderProgress();
+      renderGrid();
+      if (currentStepId === stepId) openDetail(stepId);
+    }
+
     /* ==================== 状态映射 ==================== */
     const STATUS_LABEL = { done: "已完成", active: "进行中", todo: "未开始" };
     const STATUS_ORDER = ["done", "active", "todo"];
@@ -1010,7 +1108,7 @@
         <div class="card status-${s.status}" onclick="openDetail('${s.id}')">
           <div class="card-head">
             <div class="step-num">${s.id}</div>
-            <span class="status-tag">${STATUS_LABEL[s.status]}</span>
+            <span class="status-tag status-${s.status}" data-editable onclick="openStatusMenu(event, '${s.id}')" title="点击切换状态">${STATUS_LABEL[s.status]}</span>
           </div>
           <div class="card-title">${s.title}</div>
           <div class="card-desc">${s.desc}</div>
@@ -1047,7 +1145,7 @@
         <div class="detail-head">
           <div class="detail-topline">
             <button class="btn" onclick="closeDetail()">← 返回全部卡片</button>
-            <span class="status-tag status-${s.status}" style="font-size:12px;padding:5px 13px;">${STATUS_LABEL[s.status]}</span>
+            <span class="status-tag status-${s.status}" data-editable style="font-size:12px;padding:5px 13px;" onclick="openStatusMenu(event, '${s.id}')" title="点击切换状态">${STATUS_LABEL[s.status]}</span>
           </div>
           <div class="detail-title">STEP ${s.id} · ${s.title}</div>
           <div class="detail-desc">${s.desc}</div>
@@ -1150,6 +1248,16 @@
         `原则：${PLAN_DATA.principle}`,
         ""
       ];
+      const overrides = loadStatusOverrides();
+      const overridden = Object.keys(overrides);
+      if (overridden.length) {
+        lines.push("## 本机改过的状态（需维护者回写 PLAN_DATA）", "");
+        overridden.forEach(id => {
+          const step = PLAN_DATA.steps.find(s => s.id === id);
+          lines.push(`- STEP ${id} ${step ? step.title : ""} → ${STATUS_LABEL[overrides[id]]}`);
+        });
+        lines.push("");
+      }
       let any = false;
       PLAN_DATA.steps.forEach(s => {
         const rec = notes[s.id] || {};
@@ -1189,6 +1297,8 @@
     document.getElementById("pageTitle").textContent = PLAN_DATA.title;
     document.getElementById("themeBtn").addEventListener("click", toggleTheme);
     document.getElementById("exportBtn").addEventListener("click", exportNotes);
+    document.addEventListener("click", closeStatusMenu);
+    applyStatusOverrides();
     renderProgress();
     renderFilters();
     renderGrid();
