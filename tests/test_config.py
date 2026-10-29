@@ -335,3 +335,96 @@ def test_example_configurations_are_valid():
 
     assert gateway_config.runtime.role == "gateway"
     assert worker_config.runtime.role == "worker"
+
+
+def _ai_section(**fallback):
+    section = {
+        "provider": "openai_compatible",
+        "base_url": "https://api.example.com/v1",
+        "api_key": "key",
+        "model": "primary-model",
+    }
+    if fallback:
+        section["fallback"] = fallback["fallback"]
+    return section
+
+
+def test_ai_fallback_is_optional_and_defaults_to_none(tmp_path):
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({
+        "feishu": {"app_id": "app", "app_secret": "secret"},
+        "ai": _ai_section(),
+    }), encoding="utf-8")
+
+    assert load_config(config_path).ai.fallback is None
+
+
+def test_ai_fallback_is_loaded_and_inherits_primary_defaults(tmp_path):
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({
+        "feishu": {"app_id": "app", "app_secret": "secret"},
+        "ai": {
+            **_ai_section(),
+            "system_prompt": "主模型提示词",
+            "temperature": 0.4,
+            "max_tokens": 777,
+            "timeout_seconds": 33,
+            "fallback": {
+                "provider": "openai_compatible",
+                "base_url": "https://fallback.example.com/v1",
+                "api_key": "fb-key",
+                "model": "minimax-3.1",
+            },
+        },
+    }), encoding="utf-8")
+
+    config = load_config(config_path)
+    fallback = config.ai.fallback
+
+    assert fallback is not None
+    assert fallback.model == "minimax-3.1"
+    assert fallback.base_url == "https://fallback.example.com/v1"
+    assert fallback.system_prompt == "主模型提示词"
+    assert fallback.temperature == 0.4
+    assert fallback.max_tokens == 777
+    assert fallback.timeout_seconds == 33
+
+
+def test_ai_fallback_may_override_inherited_defaults(tmp_path):
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({
+        "feishu": {"app_id": "app", "app_secret": "secret"},
+        "ai": {
+            **_ai_section(),
+            "fallback": {
+                "provider": "claude_messages",
+                "base_url": "https://fallback.example.com/v1",
+                "api_key": "fb-key",
+                "model": "minimax-3.1",
+                "system_prompt": "兜底专用提示词",
+                "max_tokens": 512,
+            },
+        },
+    }), encoding="utf-8")
+
+    fallback = load_config(config_path).ai.fallback
+
+    assert fallback.provider == "claude_messages"
+    assert fallback.system_prompt == "兜底专用提示词"
+    assert fallback.max_tokens == 512
+
+
+@pytest.mark.parametrize("invalid, match", [
+    ({"provider": "openai_compatible", "base_url": "https://x", "api_key": "k"}, "ai.fallback.model"),
+    ({"base_url": "https://x", "api_key": "k", "model": "m"}, "ai.fallback.provider"),
+    ({"provider": "unknown", "base_url": "https://x", "api_key": "k", "model": "m"}, "Unsupported ai.fallback.provider"),
+])
+def test_ai_fallback_rejects_incomplete_or_unknown_shapes(tmp_path, invalid, match):
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({
+        "feishu": {"app_id": "app", "app_secret": "secret"},
+        "ai": {**_ai_section(), "fallback": invalid},
+    }), encoding="utf-8")
+
+    with pytest.raises(ConfigError, match=match):
+        load_config(config_path)

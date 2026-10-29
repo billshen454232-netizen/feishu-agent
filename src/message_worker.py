@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from .ai_client import degradation_notice, generate_with_provenance
 from .config import AppConfig
 from .conversation_log import ConversationLogEntry
 from .conversation import ConversationStore
@@ -20,6 +21,7 @@ from .muliu_planner import MuliuPlanGeneration, MuliuPlanGenerationError
 from .muliu_routing import MuliuPlanRouteResolver, MuliuRouteSnapshot, MuliuRoutingError
 from .operation_message import (
     build_execution_status_card,
+    build_job_failure_card,
     build_operation_status_card,
     build_plan_confirmation_card,
     clean_muliu_execution_log,
@@ -270,6 +272,7 @@ class MessageJobProcessor:
         except Exception as exc:  # noqa: BLE001 - persist unexpected operational failures
             self._store.mark_failed(message_id, str(exc))
             logger.exception("job failed message_id=%s error=%s", message_id, exc)
+            await self._notify_job_failure(message_id, exc)
 
     async def process_confirmation(self, chat_id: str, confirmation_token: str, message_id: str) -> bool:
         """Accept a text-confirmed plan and run it outside the shared message queue."""
@@ -582,8 +585,8 @@ class MessageJobProcessor:
             execution_data=execution_data,
         )
         try:
-            interpretation = await asyncio.wait_for(
-                self._ai_client.generate([], prompt),
+            generation = await asyncio.wait_for(
+                generate_with_provenance(self._ai_client, [], prompt),
                 timeout=self._config.execution_interpretation.timeout_seconds,
             )
         except asyncio.TimeoutError:
@@ -597,9 +600,10 @@ class MessageJobProcessor:
             )
             return fallback_reply
 
-        interpretation = mask_sensitive_operation_data(str(interpretation).strip())
+        interpretation = mask_sensitive_operation_data(str(generation.text).strip())
         if not interpretation:
             return fallback_reply
+        interpretation += degradation_notice(generation)
         return mask_sensitive_operation_data(
             "{}\n\n---\n\n执行明细：\n{}".format(
                 interpretation,
@@ -655,12 +659,14 @@ class MessageJobProcessor:
             "规划器的受限决策摘要：{}\n\n当前执行注册表：\n{}\n\n本地资料：\n{}\n\n来源列表：\n{}\n\n用户问题：{}"
         ).format(decision.summary, capability_context, document_context, sources or "（无）", job.text)
         ai_started = time.perf_counter()
-        reply = await self._ai_client.generate([], prompt)
+        generation = await generate_with_provenance(self._ai_client, [], prompt)
         ai_ms = self._elapsed_ms(ai_started)
+        reply = generation.text
         if source_paths:
             reply = "📚 以下回答基于当前执行注册表和本地脚本资料生成。\n\n{}\n\n来源：\n{}".format(reply, sources)
         else:
             reply = "📚 以下回答基于当前执行注册表生成。\n\n{}".format(reply)
+        reply += degradation_notice(generation)
 
         self._conversations.append(job.chat_id, "user", job.text)
         self._conversations.append(job.chat_id, "assistant", reply)
@@ -696,10 +702,12 @@ class MessageJobProcessor:
         else:
             ai_started = time.perf_counter()
             history = self._conversations.get(job.chat_id)
-            reply = await self._ai_client.generate(history, ai_user_text)
+            generation = await generate_with_provenance(self._ai_client, history, ai_user_text)
             ai_ms = self._elapsed_ms(ai_started)
+            reply = generation.text
             if local_knowledge_hit:
                 reply = self._format_local_knowledge_reply(reply, source_paths)
+            reply += degradation_notice(generation)
         self._conversations.append(job.chat_id, "user", job.text)
         self._conversations.append(job.chat_id, "assistant", reply)
         feishu_reply_started = time.perf_counter()
@@ -804,6 +812,18 @@ class MessageJobProcessor:
     async def _reply_and_finish(self, message_id: str, reply: str) -> None:
         await self._feishu_client.reply_text(message_id, reply)
         self._store.mark_done(message_id)
+
+    async def _notify_job_failure(self, message_id: str, exc: Exception) -> None:
+        """Tell the requester a job failed instead of leaving them with silence.
+
+        The failure reply is best-effort: if Feishu itself is unavailable the
+        job stays ``failed`` and the notification error is only logged, so a
+        broken notification can never mask or overwrite the original failure.
+        """
+        try:
+            await self._feishu_client.reply_card(message_id, build_job_failure_card(str(exc)))
+        except Exception:  # noqa: BLE001 - notification must not mask the original failure
+            logger.exception("job failure notify failed message_id=%s", message_id)
 
     def _confirmation_text(self, confirmation_token: str) -> str:
         return "{} {}".format(self._config.muliu.confirmation_prefix, confirmation_token)

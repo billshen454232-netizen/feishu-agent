@@ -244,6 +244,43 @@ def build_execution_status_card(
     )
 
 
+def _describe_job_failure(error: str) -> str:
+    """Map an internal exception to a short, actionable user-facing reason.
+
+    The full exception stays in the service log; the card only carries a
+    category the requester can act on, never raw transport or config details.
+    """
+    text = str(error)
+    lowered = text.lower()
+    if any(code in text for code in ("520", "521", "522", "524", "502", "503", "504")):
+        return "AI 服务暂时不可用（上游网关返回异常）"
+    if "timeout" in lowered or "timed out" in lowered:
+        return "请求超时"
+    if "401" in text or "403" in text:
+        return "AI 服务鉴权失败，请联系维护者检查配置"
+    if "400" in text:
+        return "AI 服务拒绝了该请求"
+    if "connect" in lowered:
+        return "无法连接 AI 服务"
+    return "处理请求时发生内部错误"
+
+
+def build_job_failure_card(error: str) -> dict[str, object]:
+    """Build a terminal failure card so a job can never end silently.
+
+    Used by the request-handling path before any plan reaches Muliu, so the
+    requester can safely resend; the exact exception is logged separately.
+    """
+    return build_operation_status_card(
+        "任务未能执行",
+        "请求已收到，但在准备执行阶段失败。",
+        "原因：{}\n\n详细错误已记入服务日志，请联系维护者排查。\n请稍后重新发送原消息再试；本次未向测试服提交任何操作。".format(
+            _describe_job_failure(error)
+        ),
+        template="red",
+    )
+
+
 def format_execution_result(result: MuliuExecutionResult) -> str:
     if result.succeeded:
         lines = ["✅ 执行完成：{}".format(result.summary), ""]

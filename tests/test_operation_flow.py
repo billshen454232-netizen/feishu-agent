@@ -81,6 +81,13 @@ class TraceFailingPlanner:
         )
 
 
+class TransportFailingPlanner:
+    """Raise a raw transport error, as the AI client does on a Cloudflare 5xx."""
+
+    async def create_plan(self, _text):
+        raise RuntimeError("Server error '520 <none>' for url 'https://cli.example.com/v1/chat/completions'")
+
+
 class FakeFeishuClient:
     def __init__(self):
         self.replies = []
@@ -101,6 +108,13 @@ class FakeFeishuClient:
 
 class FailingExecutionResultDeliveryClient(FakeFeishuClient):
     async def reply_text(self, message_id, text):
+        raise OSError("Feishu unavailable")
+
+
+class BrokenNotifyClient(FakeFeishuClient):
+    """Replying the failure card itself fails, as when Feishu is unavailable."""
+
+    async def reply_card(self, message_id, card):
         raise OSError("Feishu unavailable")
 
 
@@ -1400,5 +1414,64 @@ async def test_scenario_lookup_plan_passes_firewall_and_waits_for_confirmation(
     assert "2001" in card_text
     assert route_label in card_text
     assert route_identifier in card_text
+
+
+@pytest.mark.asyncio
+async def test_unexpected_planner_failure_replies_with_failure_card(tmp_path):
+    config = make_config()
+    store = MessageJobStore(tmp_path / "jobs.sqlite3")
+    store.initialize()
+    store.create_if_new("om_request", "evt_request", "oc_group", "ou_user", "查询 6001 服", chat_type="group")
+    feishu = FakeFeishuClient()
+    processor = MessageJobProcessor(
+        config,
+        store,
+        ConversationStore(4),
+        ai_client=None,
+        feishu_client=feishu,
+        operation_planner=TransportFailingPlanner(),
+        muliu_firewall=production_firewall(config),
+        route_resolver=production_route_resolver(),
+    )
+
+    await processor.process_one("om_request")
+
+    job = store.get("om_request")
+    assert job.status == "failed"
+    assert feishu.replies == []
+    assert len(feishu.cards) == 1
+    message_id, card = feishu.cards[0]
+    assert message_id == "om_request"
+    assert card["header"]["template"] == "red"
+    assert card["header"]["title"]["content"] == "任务未能执行"
+    body = str(card["elements"])
+    assert "AI 服务暂时不可用" in body
+    assert "520" not in body
+    assert "cli.example.com" not in body
+
+
+@pytest.mark.asyncio
+async def test_failure_notification_failure_keeps_job_failed_and_does_not_raise(tmp_path):
+    config = make_config()
+    store = MessageJobStore(tmp_path / "jobs.sqlite3")
+    store.initialize()
+    store.create_if_new("om_request", "evt_request", "oc_group", "ou_user", "查询 6001 服", chat_type="group")
+    feishu = BrokenNotifyClient()
+    processor = MessageJobProcessor(
+        config,
+        store,
+        ConversationStore(4),
+        ai_client=None,
+        feishu_client=feishu,
+        operation_planner=TransportFailingPlanner(),
+        muliu_firewall=production_firewall(config),
+        route_resolver=production_route_resolver(),
+    )
+
+    await processor.process_one("om_request")
+
+    job = store.get("om_request")
+    assert job.status == "failed"
+    assert "520" in (job.last_error or "")
 
 

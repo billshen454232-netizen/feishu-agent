@@ -2,6 +2,7 @@ from src.muliu_executor import MuliuExecutionResult, MuliuStepResult
 from src.muliu_plan import MuliuPlan, MuliuStep
 from src.operation_message import (
     build_execution_status_card,
+    build_job_failure_card,
     build_plan_confirmation_card,
     format_execution_result,
     format_plan_for_confirmation,
@@ -419,5 +420,41 @@ END"""
     assert "Running" not in message
     assert "START" not in message
     assert "END" not in message
+
+
+def test_job_failure_card_is_red_and_actionable():
+    card = build_job_failure_card("Server error '520 <none>' for url 'https://cli.example.com/v1/chat/completions'")
+
+    assert card["header"]["template"] == "red"
+    assert card["header"]["title"]["content"] == "任务未能执行"
+    body = str(card["elements"])
+    assert "AI 服务暂时不可用" in body
+    assert "请稍后重新发送原消息" in body
+    assert "详细错误已记入服务日志" in body
+
+
+def test_job_failure_card_never_echoes_the_raw_exception():
+    raw = "Server error '520 <none>' for url 'https://user:pass@10.0.0.5/v1/chat/completions'"
+    body = str(build_job_failure_card(raw)["elements"])
+
+    assert "10.0.0.5" not in body
+    assert "user:pass" not in body
+    assert "10.0.0.5" not in str(build_job_failure_card(raw))
+    assert "https://" not in body
+
+
+def test_job_failure_card_classifies_common_failures():
+    assert "请求超时" in str(build_job_failure_card("The read operation timed out")["elements"])
+    assert "鉴权失败" in str(build_job_failure_card("401 Unauthorized")["elements"])
+    assert "拒绝了该请求" in str(build_job_failure_card("400 Bad Request")["elements"])
+    assert "无法连接" in str(build_job_failure_card("ConnectError: connection refused")["elements"])
+    assert "内部错误" in str(build_job_failure_card("ValueError: unexpected shape")["elements"])
+
+
+def test_job_failure_card_hides_internal_paths_and_credentials():
+    body = str(build_job_failure_card("boom")["elements"])
+
+    assert "/home/serverGeneralScript" not in body
+    assert "route-cn" not in body
 
 

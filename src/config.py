@@ -51,6 +51,10 @@ class AIConfig:
     temperature: float = 0.2
     max_tokens: int = 2048
     timeout_seconds: float = 60.0
+    # Optional degraded-mode model. When set, it is only used after the primary
+    # model has exhausted its retries, and every answer it produces is labelled
+    # so a weaker model can never pass as the primary one.
+    fallback: "AIConfig | None" = None
 
 
 @dataclass(frozen=True)
@@ -299,6 +303,36 @@ def _load_runtime(raw: dict[str, Any]) -> RuntimeConfig:
     )
 
 
+def _load_ai_fallback(raw: Any, *, defaults: AIConfig) -> AIConfig | None:
+    """Load the optional degraded-mode model, inheriting unset fields from the primary.
+
+    The fallback is only reached after the primary model has exhausted its
+    retries, so it must stay cheap to configure: only provider, base_url,
+    api_key and model are required, and everything else defaults to the
+    primary model's values.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ConfigError("ai.fallback must be a JSON object")
+    provider = _require_str(raw, "provider", "ai.fallback")
+    if provider not in ("openai_compatible", "claude_messages"):
+        raise ConfigError(f"Unsupported ai.fallback.provider: {provider}")
+    return AIConfig(
+        provider=provider,  # type: ignore[arg-type]
+        base_url=_require_str(raw, "base_url", "ai.fallback").rstrip("/"),
+        api_key=_require_str(raw, "api_key", "ai.fallback"),
+        model=_require_str(raw, "model", "ai.fallback"),
+        system_prompt=str(raw.get("system_prompt", defaults.system_prompt)),
+        temperature=float(raw.get("temperature", defaults.temperature)),
+        max_tokens=int(raw.get("max_tokens", defaults.max_tokens)),
+        timeout_seconds=_require_positive_number(
+            float(raw.get("timeout_seconds", defaults.timeout_seconds)),
+            "ai.fallback.timeout_seconds",
+        ),
+    )
+
+
 def load_config(path: str | Path = "config/config.json") -> AppConfig:
     config_path = Path(path)
     try:
@@ -347,6 +381,36 @@ def load_config(path: str | Path = "config/config.json") -> AppConfig:
     if provider not in ("openai_compatible", "claude_messages"):
         raise ConfigError(f"Unsupported ai.provider: {provider}")
 
+    primary_ai = AIConfig(
+        provider=provider,  # type: ignore[arg-type]
+        base_url=(
+            str(ai_raw.get("base_url", "")).rstrip("/")
+            if runtime.role == "worker"
+            else _require_str(ai_raw, "base_url", "ai").rstrip("/")
+        ),
+        api_key=(
+            str(ai_raw.get("api_key", ""))
+            if runtime.role == "worker"
+            else _require_str(ai_raw, "api_key", "ai")
+        ),
+        model=(
+            str(ai_raw.get("model", ""))
+            if runtime.role == "worker"
+            else _require_str(ai_raw, "model", "ai")
+        ),
+        system_prompt=str(ai_raw.get("system_prompt", "你是一个飞书里的 AI 助手，请用简洁、准确的中文回答。")),
+        temperature=float(ai_raw.get("temperature", 0.2)),
+        max_tokens=int(ai_raw.get("max_tokens", 2048)),
+        timeout_seconds=_require_positive_number(
+            float(ai_raw.get("timeout_seconds", 60)),
+            "ai.timeout_seconds",
+        ),
+    )
+    ai_config = replace(
+        primary_ai,
+        fallback=_load_ai_fallback(ai_raw.get("fallback"), defaults=primary_ai),
+    )
+
     config = AppConfig(
         server=ServerConfig(
             host=str(server_raw.get("host", "127.0.0.1")),
@@ -367,31 +431,7 @@ def load_config(path: str | Path = "config/config.json") -> AppConfig:
             encrypt_key=str(feishu_raw.get("encrypt_key", "")),
             base_url=str(feishu_raw.get("base_url", "https://open.feishu.cn")).rstrip("/"),
         ),
-        ai=AIConfig(
-            provider=provider,  # type: ignore[arg-type]
-            base_url=(
-                str(ai_raw.get("base_url", "")).rstrip("/")
-                if runtime.role == "worker"
-                else _require_str(ai_raw, "base_url", "ai").rstrip("/")
-            ),
-            api_key=(
-                str(ai_raw.get("api_key", ""))
-                if runtime.role == "worker"
-                else _require_str(ai_raw, "api_key", "ai")
-            ),
-            model=(
-                str(ai_raw.get("model", ""))
-                if runtime.role == "worker"
-                else _require_str(ai_raw, "model", "ai")
-            ),
-            system_prompt=str(ai_raw.get("system_prompt", "你是一个飞书里的 AI 助手，请用简洁、准确的中文回答。")),
-            temperature=float(ai_raw.get("temperature", 0.2)),
-            max_tokens=int(ai_raw.get("max_tokens", 2048)),
-            timeout_seconds=_require_positive_number(
-                float(ai_raw.get("timeout_seconds", 60)),
-                "ai.timeout_seconds",
-            ),
-        ),
+        ai=ai_config,
         conversation=ConversationConfig(
             max_history_messages=int(conversation_raw.get("max_history_messages", 12))
             if isinstance(conversation_raw, dict)
