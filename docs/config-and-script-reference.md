@@ -57,13 +57,19 @@ worker  = 主动连 Gateway 领任务 + 本地 Muliu 执行（无飞书/AI 凭�
 
 ### AI 模型池
 
-`ai` 段是一个**模型池**，随机/轮询分摊调用负载，扩展就是往 `models` 数组加一项。
+`ai` 段是一个**模型池**，随机/轮询分摊调用负载。`models` 数组里每项形状一致，**无主次之分**；共享生成参数放在独立的 `defaults` 块。
 
 ```json
 "ai": {
   "strategy": "random",
+  "defaults": {
+    "system_prompt": "你是一个飞书里的 AI 助手，请用简洁、准确的中文回答。",
+    "temperature": 0.2,
+    "max_tokens": 2048,
+    "timeout_seconds": 60
+  },
   "models": [
-    { "provider": "openai_compatible", "base_url": "https://主模型网关", "api_key": "...", "model": "..." },
+    { "provider": "openai_compatible", "base_url": "https://模型A网关", "api_key": "...", "model": "模型A名" },
     { "provider": "openai_compatible", "base_url": "https://api.minimax.chat/v1", "api_key": "...", "model": "MiniMax-3.1-Flash" }
   ]
 }
@@ -79,9 +85,11 @@ worker  = 主动连 Gateway 领任务 + 本地 Muliu 执行（无飞书/AI 凭�
 
 边界：
 
-- 每个模型只需 `provider` / `base_url` / `api_key` / `model`；`system_prompt`、`temperature`、`max_tokens`、`timeout_seconds` 未填时**继承 `models[0]` 的值**；
-- **单模型写法兼容**：`ai` 直接写 `provider` / `base_url` 等（无 `models` 数组）时，视为单条目的 `fallback` 池，现有配置不改也能跑；
+- `models[]` 每项只需 `provider` / `base_url` / `api_key` / `model`；生成参数从 `defaults` 继承；
+- 某个模型要单独调参数（如更长的 `max_tokens`），在它自己那项加同名字段即可**覆盖 `defaults`**；
+- **扩展就是加一项**——第 3、4 个模型往 `models` 数组塞对象即可，代码不用改；
 - 池内每个模型各自带 5xx/超时重试（见 `_post_with_retry`），重试耗尽后才换下一个模型；
+- **单模型旧写法兼容**：`ai` 直接写 `provider` / `base_url` 等（无 `models` 数组）时，视为单条目 `fallback` 池，现有配置不改也能跑；
 - **不标注所用模型**：MiniMax 3.1 Flash 用于语言格式转化足够可靠，无需在回复里区分（用户 2026-10-29 决定）。如后续引入明显更弱的模型，再考虑按模型加标注；
 - worker 角色可完全不配 `ai` 段（它不调用 AI）。
 

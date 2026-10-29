@@ -352,9 +352,12 @@ def _load_ai_pool(raw: Any) -> AIPoolConfig:
 
     Two shapes are accepted:
 
-    * pool form — ``ai`` has a ``models`` array; ``strategy`` selects how the
-      first model is chosen, and every strategy falls through to the next on
-      failure;
+    * pool form — ``ai.models`` is a non-empty array of connection entries.
+      Shared generation parameters live in ``ai.defaults`` and apply to every
+      model unless the entry overrides them, so the entries stay flat and no
+      model looks like the "primary" one. ``strategy`` only decides which
+      model is tried first; every strategy falls through to the next on
+      failure.
     * legacy single-model form — ``ai`` carries ``provider`` / ``base_url``
       directly, treated as a one-entry pool so existing configs keep working.
     """
@@ -371,10 +374,19 @@ def _load_ai_pool(raw: Any) -> AIPoolConfig:
         raise ConfigError(
             "ai.strategy 必须是 {} 之一，当前为 {!r}".format(" / ".join(AI_POOL_STRATEGIES), strategy)
         )
-    defaults = _load_ai_model(models_raw[0], section="ai.models[0]")
-    models = (defaults,) + tuple(
-        _load_ai_model(item, section="ai.models[{}]".format(index), defaults=defaults)
-        for index, item in enumerate(models_raw[1:], start=1)
+
+    defaults_raw = raw.get("defaults", {})
+    if not isinstance(defaults_raw, dict):
+        raise ConfigError("ai.defaults 必须是 JSON 对象")
+    # defaults 本身不是可调用模型：只承载共享的生成参数，连接信息必须由每个
+    # model 自己给出。用一个占位连接把共享字段解析成 AIConfig 再被继承。
+    shared = _load_ai_model(
+        dict(defaults_raw, provider="openai_compatible", base_url="x", api_key="x", model="x"),
+        section="ai.defaults",
+    )
+    models = tuple(
+        _load_ai_model(item, section="ai.models[{}]".format(index), defaults=shared)
+        for index, item in enumerate(models_raw)
     )
     return AIPoolConfig(strategy=strategy, models=models)
 

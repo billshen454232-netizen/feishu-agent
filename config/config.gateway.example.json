@@ -22,16 +22,18 @@
   },
   "ai": {
     "strategy": "random",
+    "defaults": {
+      "system_prompt": "你是一个飞书里的 AI 助手，请用简洁、准确的中文回答。",
+      "temperature": 0.2,
+      "max_tokens": 2048,
+      "timeout_seconds": 60
+    },
     "models": [
       {
         "provider": "openai_compatible",
-        "base_url": "https://主模型网关",
-        "api_key": "主模型 API Key",
-        "model": "主模型名",
-        "system_prompt": "你是一个飞书里的 AI 助手，请用简洁、准确的中文回答。",
-        "temperature": 0.2,
-        "max_tokens": 2048,
-        "timeout_seconds": 60
+        "base_url": "https://模型A网关",
+        "api_key": "模型A API Key",
+        "model": "模型A名"
       },
       {
         "provider": "openai_compatible",

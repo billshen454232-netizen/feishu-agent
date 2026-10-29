@@ -383,25 +383,34 @@ def test_ai_pool_loads_multiple_models_and_strategy(tmp_path):
     assert [m.base_url for m in pool.models] == ["https://a.example.com/v1", "https://b.example.com/v1"]
 
 
-def test_ai_pool_second_model_inherits_generation_defaults(tmp_path):
+def test_ai_pool_models_inherit_shared_defaults(tmp_path):
     config_path = tmp_path / "config.json"
     config_path.write_text(json.dumps({
         "feishu": {"app_id": "app", "app_secret": "secret"},
         "ai": {
             "strategy": "random",
+            "defaults": {
+                "system_prompt": "共享提示词",
+                "temperature": 0.4,
+                "max_tokens": 777,
+                "timeout_seconds": 33,
+            },
             "models": [
-                _ai_model(system_prompt="主提示词", temperature=0.4, max_tokens=777, timeout_seconds=33),
+                _ai_model(base_url="https://a.example.com/v1", model="model-a"),
                 _ai_model(base_url="https://b.example.com/v1", model="model-b"),
             ],
         },
     }), encoding="utf-8")
 
-    second = load_config(config_path).ai.models[1]
+    pool = load_config(config_path).ai
 
-    assert second.system_prompt == "主提示词"
-    assert second.temperature == 0.4
-    assert second.max_tokens == 777
-    assert second.timeout_seconds == 33
+    for model in pool.models:
+        assert model.system_prompt == "共享提示词"
+        assert model.temperature == 0.4
+        assert model.max_tokens == 777
+        assert model.timeout_seconds == 33
+    # 两个模型连接信息各自独立，不因继承而混同
+    assert [m.model for m in pool.models] == ["model-a", "model-b"]
 
 
 def test_ai_pool_second_model_may_override_inherited_defaults(tmp_path):
