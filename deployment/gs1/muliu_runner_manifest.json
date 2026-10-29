@@ -249,6 +249,20 @@
       "risk": "write"
     },
     {
+      "name": "stop-combine-tool-on-target",
+      "path": "/home/serverGeneralScript/stop_combine_tool.sh",
+      "args": [
+        "{target_server_id}"
+      ],
+      "variables": {
+        "target_server_id": "[0-9]{3,8}"
+      },
+      "runner": [
+        "bash"
+      ],
+      "risk": "write"
+    },
+    {
       "name": "check-start-time",
       "path": "/home/serverGeneralScript/starttime",
       "args": [

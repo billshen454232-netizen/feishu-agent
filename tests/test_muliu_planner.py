@@ -194,6 +194,7 @@ async def test_scoped_scenario_lookup_keeps_the_scope_through_semantic_review():
         ("启动 5000 服", "/home/serverGeneralScript/start", ["5000"]),
         ("只启动 5000 服游戏服务", "/home/serverGeneralScript/start", ["5000", "noz"]),
         ("将 5000 服合到 5001 服，赛季 4、剧本 9", "/home/serverGeneralScript/exc_server_merge.sh", ["5000", "5001", "4", "9"]),
+        ("关闭 2018 的合服进程", "/home/serverGeneralScript/stop_combine_tool.sh", ["2018"]),
         ("开启 5000 服 GM 面板", "/home/serverGeneralScript/control_is_pub.sh", ["5000", "k"]),
         ("关闭 5000 服 GM 面板", "/home/serverGeneralScript/control_is_pub.sh", ["5000", "re"]),
         ("用外部开服脚本启动 5000 服", "/home/serverGeneralScript/control_is_pub.sh", ["5000", "op"]),

@@ -176,6 +176,20 @@ def test_contract_extracts_all_merge_source_and_target_server_ids():
     assert contracts.extract_server_ids(plan) == ("5000", "5001")
 
 
+def test_production_catalog_allows_only_a_target_server_for_stopping_combine_tool():
+    catalog_path = Path(__file__).parents[1] / "config" / "muliu_script_catalog.md"
+    contracts = parse_call_contracts(catalog_path.read_text(encoding="utf-8"))
+
+    plan = make_plan("/home/serverGeneralScript/stop_combine_tool.sh", ["2018"])
+    contracts.validate(plan)
+    assert contracts.extract_server_ids(plan) == ("2018",)
+
+    with pytest.raises(MuliuCallContractError, match="不符合任何已登记调用合同"):
+        contracts.validate(
+            make_plan("/home/serverGeneralScript/stop_combine_tool.sh", ["2018", "kill"])
+        )
+
+
 def test_contract_rejects_multiple_steps_over_catalog_limit():
     contracts = parse_call_contracts(CATALOG)
     plan = MuliuPlan(
@@ -228,6 +242,7 @@ def test_production_catalog_accepts_ordered_registered_steps():
         ("/home/serverGeneralScript/start", ["5000"]),
         ("/home/serverGeneralScript/start", ["5000", "noz"]),
         ("/home/serverGeneralScript/exc_server_merge.sh", ["5000", "5001", "4", "9"]),
+        ("/home/serverGeneralScript/stop_combine_tool.sh", ["5000"]),
         ("/home/serverGeneralScript/control_is_pub.sh", ["5000", "k"]),
         ("/home/serverGeneralScript/control_is_pub.sh", ["5000", "re"]),
         ("/home/serverGeneralScript/control_is_pub.sh", ["5000", "op"]),

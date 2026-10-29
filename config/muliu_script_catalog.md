@@ -286,6 +286,15 @@
 - **边界**：首批只允许一个来源服和一个目标服；脚本虽然支持多个目标服，但本合同不接受额外服号。所有服号必须属于同一受控路由区域；国服与海外服不能混合。缺少任一参数时必须要求补充，不能猜测。
 - **远端影响**：会生成配置并覆盖来源服节点上的 `combine_tool_cluster_config.lua`，可能停止已有合服工具进程，然后启动新的合服工具。脚本返回成功仅表示启动命令已返回，不代表合服完成或数据已验证；必须通过后续状态或日志核验确认。
 
+### 模式 N2：关闭目标服合服工具（stop_combine_tool.sh）
+
+- **用途**：仅关闭一个明确目标服上、由合服工具拉起的 `GROUP=combine` 进程。
+- **匹配的自然语言**：`关闭 2018 的合服进程`、`停止 2018 服合服工具`、`关闭目标服 2018 的 combine`。
+- **精确脚本路径**：`/home/serverGeneralScript/stop_combine_tool.sh`
+- **精确参数数组模板**：`["<target_server_id>"]`。
+- **参数边界**：`<target_server_id>` 必须是 3 至 8 位数字的合服目标服编号。不得提供 PID、主机、进程名、`kill` / `autokill` 模式或任何额外参数。
+- **远端影响**：脚本从受控 `config.ini` 精确定位 `<target_server_id>_game`，仅在该目标服执行固定的 `cd /data/app/game-server && bash bin/kill_combine.sh`。它不会关闭普通 `game`、`zone` 或 GVG 进程。属于高影响写操作，必须群内确认；脚本成功仅证明 `kill_combine.sh` 已以成功状态结束，不代表合服数据已经完成或验证。
+
 ### 模式 O：免重启热更服务器阈值配置（auto_hotfix_tool.py）
 
 - **用途**：通过自动生成内存 Patch 并触发热更，免重启秒级修改测试服的人数限制、开启阈值、名额等数值配置。
@@ -596,6 +605,18 @@
         "target_server_id": "[0-9]{3,8}",
         "season": "[0-9]{1,8}",
         "scenario": "[0-9]{1,8}"
+      },
+      "runner": "bash",
+      "risk": "write"
+    },
+    {
+      "name": "stop-combine-tool-on-target",
+      "path": "/home/serverGeneralScript/stop_combine_tool.sh",
+      "args": [
+        "{target_server_id}"
+      ],
+      "variables": {
+        "target_server_id": "[0-9]{3,8}"
       },
       "runner": "bash",
       "risk": "write"
