@@ -1,80 +1,62 @@
 # 内网 Muliu Worker 拆分
 
-**状态：已实现并通过单元测试**  
-**日期：2026-10-08**
+> **状态：已实现的架构记录；真实部署状态需单独核验。**
+>
+> **日期：2026-10-08；最后复核：2026-10-27**
+>
+> 当前总体说明见 [当前项目说明](../../architecture/current-project.md)。
 
-## 问题
+## 已实现的职责拆分
 
-阿里云可以接收飞书回调并调用 AI，但 Muliu 地址只在内网可达。当前确认后的执行如果在同一进程：
-
-```text
-message_worker._start_claimed_confirmation()
-→ message_worker._execute_confirmed_plan()
-→ muliu_executor.MuliuExecutor.execute_plan()
-→ MuliuHttpClient 直接请求 muliu.base_url
-```
-
-因此不能把整份 `config/config.json` 放到阿里云后直接启动。
-
-## 目标边界
+Muliu 仅在内网可达时，运行时分为以下角色：
 
 ```text
-阿里云 gateway
-  飞书事件、AI 计划、卡片确认、任务数据库、租约管理、结果回写飞书与审计
+gateway
+  飞书事件、AI 计划、确认卡、SQLite 状态、Worker 租约、结果回写与审计
 
-内网 worker
-  主动连接阿里云 HTTPS
-  原子领取已确认计划
-  防火墙二次校验
-  使用现有 MuliuExecutor 访问内网 Muliu
-  周期心跳续租并在结束时回传执行结果
+worker
+  主动 HTTPS 连接 Gateway
+  领取已确认计划
+  重新解析、重新执行调用合同 / 防火墙 / 路由校验
+  使用本机私有 Muliu profile 调用 Task 89
+  心跳续租并回传受限结果
 ```
 
-内网机器只出站访问阿里云 HTTPS，不开放入站端口，也不把 Muliu 暴露到公网。
+Worker 只接收 Gateway 已持久化的计划和 `route_region`，不接收飞书原文、自由 Shell、Muliu URL、账号或密码。内网 Worker 主动发起到 Gateway 的连接；此架构不要求将 Muliu 暴露到公网。
 
-## 不改的部分
+## 角色配置
 
-- `MuliuHttpClient`、`MuliuExecutor.execute_plan()`、起服后 60 秒核验、终态判断保持原样；Worker 只在执行前按已确认的受控路由选择本地 Muliu profile。
-- AI、调用合同、防火墙、卡片按钮协议保持原样。
-- Worker 只接收 gateway 数据库里已确认的 `plan_json`，不接收飞书用户文本或 Shell。
-- 已领取但没有最终结果的任务不自动重放。
+`runtime.role` 的当前职责：
 
-## 角色
+|角色|用途|不应持有的敏感信息|
+|---|---|---|
+|`local`|本地开发或单机验证，飞书、AI、SQLite、确认和执行在同一进程。|不作为 Gateway 生产部署的替代描述。|
+|`gateway`|飞书事件、AI、确认、任务状态、Worker claim / lease / 回传。|Muliu URL、账号、密码、Task ID。|
+|`worker`|领取已确认操作、重校验、按本地 profile 调用 Muliu。|飞书 App Secret、AI API Key。|
 
-配置增加 `runtime.role`：
+真实机器上的配置、服务管理、反向代理与环境变量不由本仓库证明；`config/config.json` 应继续保持 Git 忽略。
 
-```text
-local     单进程行为，测试和本机继续使用
-gateway   阿里云：不创建 MuliuExecutor，不要求 Muliu 账号密码
-worker    内网：只运行领取循环，不启动飞书服务
-```
+## 任务状态与租约
 
-## 状态机与租约设计
-
-在现有状态后增加：
+操作状态链路包括：
 
 ```text
 confirmed
-→ queued_for_worker      已确认，尚未被内网领取；重启后仍可领取
-→ leased                 已被某个 worker 领取；持有租约与心跳
+→ queued_for_worker
+→ leased
 → done | failed | submitted_result_unknown
 ```
 
-### 1. 全局 Task 89 串行化单租约
-由于 Task 89 是全局单任务（保存参数 → 执行），数据库领取逻辑 `claim_next_worker_job` 在事务中强制检查全局是否存在 `status='leased'` 任务。只要有任意任务在执行中，其他 Worker 不会抢领下一条任务，杜绝并发参数覆盖。
+- 同一 Task 89 使用全局单租约，防止“保存参数 → 执行”被并发任务覆盖；
+- Worker 执行期间定期心跳；
+- 租约到期转为 `submitted_result_unknown`，不自动重新入队或重放；
+- Gateway 仅接受仍由该 Worker 持有租约的结果，并校验回传结果与已确认计划相符。
 
-### 2. 心跳与租约保护
-- Gateway 暴露 `POST /internal/worker/jobs/{message_id}/heartbeat`。
-- Worker 在后台执行 Muliu 操作时，定期（默认 30 秒）续租。
-- 若 Worker 失联或异常崩溃，超过 `lease_timeout_seconds`（默认 180 秒）后租约过期。
-- 超期任务被转为 `submitted_result_unknown`（“已提交，结果尚未核验；请勿重复确认或重试”），**绝不重新入队自动重放**。
-- Gateway 租约观察器与 claim 路由会在租约超时时自动投递飞书卡片更新，避免静默丢失通知。
+`submitted_result_unknown` 不表示失败；它表示操作可能已提交但无法取得可信终态。不得让用户再次确认同一操作作为自动替代。
 
-## 接口协议
+## 内部接口与数据边界
 
-内部通信仅走 HTTPS，使用请求头认证：
-- `Authorization: Bearer <worker_token>`（使用常量时间比较 `hmac.compare_digest`）
-- `X-Feishu-Worker-ID: <worker_id>`（严格正则校验 `[A-Za-z0-9][A-Za-z0-9_.-]{0,63}`）
+当前内部 Worker API：
 
 ```text
 POST /internal/worker/jobs/claim
@@ -82,38 +64,17 @@ POST /internal/worker/jobs/{message_id}/heartbeat
 POST /internal/worker/jobs/{message_id}/result
 ```
 
-### 回传结果与已持久化计划匹配
-Gateway 收到 Worker 回传的 `result` 时，不仅校验 JSON Schema，还强制比对：
-- `result.summary` 必须与数据库中保存的计划 summary 一致；
-- 回传的步骤序列（`path`、`args`、`description`）必须是已确认计划及其确定性验证步（如起服的 basic_info.sh）的严格前缀；
-- 失败结果的失败步骤必须合法，防止恶意或错误 Worker 篡改审计日志。
+请求使用 Worker token 与受限 Worker ID 认证。Gateway 下发与审计中不得出现实际 URL、账号、密码、Cookie、Token、IP 或私有连接配置；Worker 选择的 Muliu profile 只能保存在其本地配置中。
 
-## Worker 循环
+当前确认卡显示固定逻辑标识 `route-cn` / `route-overseas`，不属于 Gateway 下发给 Worker 的私有连接配置；但其公开展示与旧有“route identifier 不外露”规则存在待决冲突，不能在本文中把它表述为已合规。
 
-```text
-claim
-→ parse_plan(plan_json)
-→ 现有防火墙再次校验
-→ MuliuExecutor.execute_plan(plan)（带并发心跳）
-→ POST result
-```
+## 不能由本文证明的事实
 
-Worker 自己保存 `muliu.base_url`、账号和密码。Gateway 不保存这些值。
+本文件和本地测试无法证明：
 
-## 部署分工
+- Gateway 或 Worker 当前运行在任何具体机器；
+- Worker 与 Gateway 的 HTTPS、token、代理或 systemd 服务已配置；
+- Task 89、GS-1 dispatcher、目标脚本或 Muliu profile 已部署；
+- 目标服实际执行效果或游戏内状态。
 
-```text
-阿里云：/opt/feishu-agent
-  runtime.role = gateway
-  飞书与 AI 配置
-  不放 Muliu 账号密码
-  Nginx 反代 127.0.0.1:8000
-
-内网 Linux（Jenkins 机器）：同一 Git 仓库的独立部署目录
-  runtime.role = worker
-  gateway 地址、共享令牌、Muliu 配置
-  systemd 常驻服务；只出站访问 https://你的公网域名
-```
-
-两台机器的 `config/config.json` 都继续被 Git 忽略。
-
+真实部署、配置覆盖、服务启动和 Muliu 调用均须由有权限维护者明确执行并独立记录。

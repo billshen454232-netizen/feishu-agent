@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Generate the Task 89 runner manifest from the single Muliu call catalog."""
+"""Generate a catalog-derived candidate GS-1 manifest for deployment review.
+
+The repository runtime does not read the output. Its presence or a successful
+consistency check is not evidence that GS-1 has deployed or consumes it.
+"""
 
 from __future__ import annotations
 
@@ -28,7 +32,7 @@ class RunnerManifestGenerationError(RuntimeError):
 
 
 def render_manifest(catalog_text: str) -> str:
-    """Render the only manifest form accepted by the GS-1 dispatcher."""
+    """Render the candidate manifest derived from one catalog snapshot."""
     try:
         manifest = MuliuScriptCatalog.from_text(catalog_text).read_runner_manifest()
     except (MuliuCallContractError, MuliuScriptCatalogError) as exc:
@@ -73,7 +77,7 @@ def generate(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Generate a fixed path-to-runner manifest from the Muliu call catalog."
+        description="Generate a catalog-derived candidate runner manifest for deployment review."
     )
     parser.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG_PATH)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_PATH)

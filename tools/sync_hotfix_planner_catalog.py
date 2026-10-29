@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""同步热更唯一注册表到 Planner 静态资料、运行镜像和 GS-1 manifest。"""
+"""同步当前热更 registry 到 Planner 静态资料和候选部署产物。
+
+当前 catalog 同步主链使用 ``tools.auto_hotfix_registry``。JSON registry
+``config/hotfix_thresholds.json`` 尚未接入该主链，不能与其并称唯一来源。
+"""
 
 from __future__ import print_function
 
@@ -162,7 +166,7 @@ def write_artifacts(catalog_path=DEFAULT_CATALOG_PATH, environment_path=DEFAULT_
 
 def main():
     parser = argparse.ArgumentParser(
-        description="同步热更注册表到 Planner catalog、运行镜像与 runner manifest。"
+        description="同步当前热更 registry 到 Planner catalog 与候选 manifest。"
     )
     parser.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG_PATH)
     parser.add_argument("--environments", type=Path, default=DEFAULT_ENVIRONMENT_PATH)

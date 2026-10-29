@@ -1,35 +1,37 @@
-# GS-1 部署：受控日志查询与 Task 89 runner manifest
+# GS-1 候选部署资料与人工核验清单
 
-本目录中的 [server_log_query.py](server_log_query.py) 是**待部署**到 GS-1 的受控日志诊断脚本。它不是通用 SSH、远程 Shell 或任意文件读取工具。
+> **资料状态：仓库候选部署物，不是 GS-1 当前状态证明。**
+>
+> 本目录中的文件只能说明仓库希望部署什么；它们不证明文件已复制到 GS-1、Task 89 已调用它们，或目标服已完成验证。
 
-部署后的唯一预期位置：
+## 1. 本目录包含什么
 
-```text
-/home/serverGeneralScript/server_log_query.py
+|文件|仓库中的定位|不能证明什么|
+|---|---|---|
+|[server_log_query.py](server_log_query.py)|待部署的受控日志诊断脚本候选。|它已存在于 `/home/serverGeneralScript`，或任何 profile 已经远端验收。|
+|[batch_server_query.py](batch_server_query.py)|待部署的批量版本查询脚本候选。|它已存在于 GS-1，或 GS-1 的路由与 SSH 权限可用。|
+|[muliu_runner_manifest.json](muliu_runner_manifest.json)|从 catalog 派生的无凭据候选 artifact。|GS-1 有该文件、dispatcher 读取它，或 dispatcher 据此拒绝未登记 argv。|
+
+机器人侧当前唯一执行合同仍是 [../../config/muliu_script_catalog.md](../../config/muliu_script_catalog.md)。该合同通过 Gateway 和 Worker 校验；Worker 向 Task 89 发送的 payload 只有 `path + args`。
+
+## 2. runner manifest 的准确边界
+
+[muliu_runner_manifest.json](muliu_runner_manifest.json) 记录当前 catalog 的精确 `path + args` 模板、变量正则、`runner` 与 `risk`，且不包含凭据。它由下列本地工具生成：
+
+```bash
+python tools/generate_runner_manifest.py --check
+python tools/sync_hotfix_planner_catalog.py --check
 ```
 
-当前注册表已登记其固定 `startup_errors` 档案；其他 profile 仍未开放给飞书。实际 Task 89 部署仍须先完成下方核验，且不能把本目录的参考文件误认为已经部署到 GS-1。
+这些命令只验证**本地仓库**的生成物是否与当前 catalog / registry 同步。
 
-## Task 89 runner manifest
+当前已确认的事实是：本仓库运行期不会读取 manifest，也不会将 `runner` 或 manifest 传给 Task 89。GS-1 的 dispatcher 源码与 Task 89 实际代码包不在本仓库中；是否消费 manifest、如何选择解释器、是否实施精确 argv 校验，都必须在 GS-1 上由有权限的维护者独立核验。
 
-[muliu_runner_manifest.json](muliu_runner_manifest.json) 是从飞书端调用注册表生成的无凭据部署产物。它同时登记每个精确 `path + args` 模板、变量正则、固定 runner 与风险级别；Task 89 分发器必须以它为唯一调用权威，例如：
+因此，不要把本地 artifact 同步检查写成“GS-1 已部署”或“Task 89 已受 manifest 保护”。
 
-```json
-{
-  "version": 1,
-  "contracts": [
-    {
-      "path": "/home/serverGeneralScript/start",
-      "args": ["{server_id}"],
-      "runner": ["bash"]
-    }
-  ]
-}
-```
+## 3. `server_log_query.py` 的候选接口
 
-有权限维护者必须将它与实际 Task 89 `../../code/ok_/muliu_ai_ops.sh`、`../../code/ok_/muliu_ai_ops.py` 成对部署到同一代码包；分发器不得通过扩展名或另一份无后缀脚本名单推断 runner，也不得只校验 path 而放行未登记 args。本仓库根目录的 `muliu_ai_ops.py` 仅为本地参考副本，不等于远端已同步。
-
-## 固定接口
+若有权限维护者审核并部署 [server_log_query.py](server_log_query.py)，其预期调用接口为：
 
 ```text
 python3.7 server_log_query.py \
@@ -38,88 +40,51 @@ python3.7 server_log_query.py \
   --max-lines <10-100>
 ```
 
-允许的 `profile`：
+脚本只允许固定 profile：
 
-|Profile|固定读取范围|目的|
+|profile|固定读取范围|用途|
 |---|---|---|
-|`layout`|`/data/log/` 下最多两层目录；`/data/log/bglog/game/` 中近期 `.log` 文件名|第一次核验日志目录和文件命名，不读取任意文件内容|
-|`startup_recent`|`/data/log/supervisor/supervisor_game_6.log` 的末尾|查看近期启动记录|
-|`startup_errors`|同一 supervisor 固定文件|提取固定的启动异常信号|
-|`game_recent`|`/data/log/bglog/game/` 最新 `.log` 文件的末尾|查看近期 game 日志|
-|`game_trace`|该固定目录中最多 20 个近期 `.log` 文件|提取固定 Trace / 异常信号|
-|`patch_errors`|同一固定目录|提取固定 Patch 异常信号|
+|`layout`|`/data/log/` 下受限目录与近期文件名|首次核对日志布局。|
+|`startup_recent`|固定 supervisor 日志尾部|查看近期启动记录。|
+|`startup_errors`|同一固定 supervisor 日志|提取固定启动异常信号。|
+|`game_recent`|固定 game 日志目录中的近期日志|查看近期 game 日志。|
+|`game_trace`|固定 game 日志目录中的受限近期日志|提取 Trace / 异常信号。|
+|`patch_errors`|同一固定目录|提取 Patch 异常信号。|
 
-不接受也不会传递：IP、主机名、日志路径、文件名、关键词、正则、`grep` / `tail` 参数、Shell 片段或命令。
+脚本不接受 IP、主机名、日志路径、文件名、关键词、正则、`grep` / `tail` 参数或 Shell 片段。它从同目录受控 `config.ini` 解析 `<server_id>_game`，使用固定 argv 和 `shell=False` 调用 SSH。
 
-## 安全机制
+本地 catalog 目前只登记 `startup_errors` 的精确调用形态。其他 profile 即使出现在候选脚本中，也不是机器人当前许可；是否真的已部署仍需下述核验。
 
-1. 仅接受 3–8 位数字的 `server_id`；只读取同目录 `config.ini` 中精确的 `<server_id>_game` 路由。
-2. 所有远程日志路径和匹配模式都写死在脚本内；调用者只能选择有限 profile 和输出行数。
-3. 使用 `subprocess.run(..., shell=False)` 启动既有 SSH 客户端；远端仅接收静态 Bash 程序和已经本地校验的 profile / 数字行数。
-4. SSH 与异常退出的原文不会回传，以免泄露内部主机信息；异常时仅允许回显固定 `LOG_QUERY_STATUS` 标记。成功输出会截断单行、总长度，并对 Authorization / Cookie、Bearer / Basic 凭据、常见 JSON 密钥字段、URL Basic Auth 与 IPv4 地址做二次脱敏。
-5. 远端查询使用固定目录、最多 20 个近期 `.log` 文件、每个 profile 10–100 行；`game_trace` / `patch_errors` 对每个文件只读取最近 2,000 行并用固定 AWK 规则筛选，避免为有限输出扫描整份大日志，也不会把文件名拼进 `sed`、AWK 或 Shell 程序。
-6. 每次成功远端调用都必须以唯一的 `LOG_QUERY_STATUS=<状态>` 结尾；本地会验证并保留该终态标记，即使日志正文被截断也不会丢失状态协议。
+## 4. 真实部署前必须核验的事实
 
-> 这些输出限制不能替代实际压测。首次部署后必须在 6000 等明确测试服核验命令耗时、日志体积与 Muliu 120 秒任务时限。
+以下任何一项缺证据时，应停止在该证据上处理；不要用自由 Shell、任意路径或跳过 SSH 安全检查绕过。
 
-## 部署前逐项确认
+1. **Task 89 入口**：在 GS-1 确认 Task 89 实际调用的 wrapper 和 dispatcher 路径、版本与 hash。
+2. **dispatcher 行为**：确认它当前接受的 payload、路径根目录校验、解释器选择方式，以及是否实际读取 manifest。不得从本目录推断。
+3. **脚本文件**：确认计划部署的候选脚本已复制到实际 `/home/serverGeneralScript`，并与审核版本逐项核对。
+4. **运行环境**：确认所需 Python、Bash、SSH 和其他固定依赖的版本及可用性。
+5. **路由与主机密钥**：确认已部署 `config.ini` 中目标服映射、SSH identity 与 `known_hosts`；不得将原文复制到 Git、飞书或模型上下文。
+6. **目标服权限与结构**：确认固定日志目录、文件模式、读取权限、输出体积、耗时和编码。候选脚本的假设不能替代实测。
+7. **Task 89 结果协议**：确认返回结果如何对应本次请求；本仓库当前没有 run nonce / run ID 的请求级日志绑定实现。
 
-以下项目缺任何一项，都不要复制脚本、改调用合同或让机器人执行：
+## 5. 受控人工核验顺序
 
-1. **实际入口**：Task 89 当前实际调用入口是 `../../code/ok_/muliu_ai_ops.sh`；该 wrapper、同目录 `muliu_ai_ops.py`、`muliu_runner_manifest.json` 与脚本根目录 `/home/serverGeneralScript` 已逐项核对为同一代码包。
-2. **运行时**：GS-1 上存在 `python3.7`、`bash`、`ssh`、`find`、`sort`、`grep`、`tail`、`sed` 和 `cut`；目标服 SSH 使用的已批准身份允许只读 `/data/log`。
-3. **路由格式**：GS-1 的 `config.ini` 与既有 `basic_info.sh` 一致，且 `<server_id>_game=<host>` 的值是单一主机名或 IPv4 地址；不得把配置原文复制到本仓库、飞书或模型上下文。
-4. **主机密钥**：运行 Task 89 的账户已为目标服建立正确 SSH known_hosts。脚本强制 `StrictHostKeyChecking=yes`，不会在自动化中接受新主机密钥。
-5. **编码链路**：确认 GS-1 stdout、Muliu 日志 API 和飞书回传能正确显示中文；如果仍乱码，先定位编码问题，不要为了“显示正常”删除脱敏或输出限制。
-6. **目标结构**：先运行 `layout`，核对 6000 的实际 `.log` 文件名、轮转方式、目录权限和各异常信号的位置；不能仅按已有人工目录清单假设所有服一致。
+部署会向 GS-1 写入或覆盖文件，应由有权限的环境维护者明确执行。复制后，先在单个明确测试服进行只读人工核验；记录耗时、返回状态、编码、敏感数据、截断行为和实际文件布局。
 
-## 受控人工核验顺序
-
-部署动作会向 GS-1 写入新文件，必须由有权限的环境维护者执行并明确确认。部署完成后，使用 Muliu 或 GS-1 控制台按以下顺序人工核验：
+若该候选日志脚本已部署，可按低风险到高信息量的顺序核验：
 
 ```text
-# 1. 只返回固定目录/文件概览
-python3.7 server_log_query.py --server-id 6000 --profile layout --max-lines 20
-
-# 2. 固定启动日志尾部
-python3.7 server_log_query.py --server-id 6000 --profile startup_recent --max-lines 30
-
-# 3. 固定 game 日志尾部
-python3.7 server_log_query.py --server-id 6000 --profile game_recent --max-lines 30
-
-# 4. 固定异常/Trace 档案
-python3.7 server_log_query.py --server-id 6000 --profile game_trace --max-lines 30
-
-# 5. 固定 Patch 异常档案
-python3.7 server_log_query.py --server-id 6000 --profile patch_errors --max-lines 30
+python3.7 server_log_query.py --server-id <明确测试服> --profile layout --max-lines 20
+python3.7 server_log_query.py --server-id <明确测试服> --profile startup_recent --max-lines 30
+python3.7 server_log_query.py --server-id <明确测试服> --profile startup_errors --max-lines 30
 ```
 
-每一步记录：耗时、返回状态、编码、实际文件名、是否含敏感数据、是否出现 `[LOG_QUERY_TRUNCATED]`。若发生 SSH、权限、目录或编码问题，先停在该证据上修正脚本或环境；不要改成任意路径、`StrictHostKeyChecking=no`、自由 grep 或自由命令来绕过。
+只有上述环境事实与输出边界核验完成后，才考虑在本地 catalog 登记额外 profile、更新测试，并通过飞书做一次受控的只读确认验证。
 
-## 注册到飞书机器人之前
+## 6. 结果表述边界
 
-只有所有人工核验通过后，才可在同一次变更中：
+- 成功复制候选文件，只代表文件复制完成；不代表 Task 89 已调用它。
+- Task 89 或脚本返回成功，只代表已获得对应层的终态；不代表日志诊断结论、服务就绪或游戏内效果已经验证。
+- 本地 `--check` 通过，只代表仓库生成物一致；不代表任何远端事实。
 
-1. 更新 [../../config/muliu_script_catalog.md](../../config/muliu_script_catalog.md) 的人类可读模式；
-2. 在 `MULIU_CALL_CONTRACTS` 中登记**完全精确**的 argv 模板；
-3. 增加 Planner、调用合同和消息展示的测试；
-4. 保持群内一次性确认机制；
-5. 重启 Uvicorn 后在飞书群做一次只读验证。
-
-建议第一批合同不开放 `layout` 给日常用户，只根据实际核验结果登记一到两个最有价值的诊断 profile。例如：
-
-```json
-{
-  "path": "/home/serverGeneralScript/server_log_query.py",
-  "args": [
-    "--server-id",
-    "{server_id}",
-    "--profile",
-    "game_trace",
-    "--max-lines",
-    "50"
-  ]
-}
-```
-
-上例仅说明合同形状，**目前尚未登记，不能执行**。
+当前运行架构、确认与路由边界见 [../../docs/architecture/current-project.md](../../docs/architecture/current-project.md)。

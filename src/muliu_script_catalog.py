@@ -60,11 +60,11 @@ class MuliuCallContract:
 
 @dataclass(frozen=True)
 class MuliuRunnerManifest:
-    """A deployable, closed path-to-runner-and-argv contract manifest.
+    """A catalog-derived candidate deployment artifact.
 
-    The GS-1 dispatcher must consume this artifact directly.  Keeping the argv
-    templates and variable regular expressions here means a payload altered after
-    the Feishu-side firewall still cannot add an otherwise valid runner argument.
+    It records the catalog's exact path, argv template, runner, and risk metadata
+    without credentials. The repository runtime does not consume this artifact,
+    and it is not evidence that a GS-1 dispatcher has deployed or reads it.
     """
 
     contracts: tuple[MuliuCallContract, ...]
@@ -230,7 +230,7 @@ class MuliuScriptCatalog:
         return self.read_call_contracts().runner_manifest()
 
     def write_runner_manifest(self, output_path: str | Path) -> Path:
-        """Write the deployable fixed-runner manifest derived from this catalog."""
+        """Write a catalog-derived candidate manifest for deployment review."""
         manifest_path = Path(output_path)
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
         manifest_path.write_text(
