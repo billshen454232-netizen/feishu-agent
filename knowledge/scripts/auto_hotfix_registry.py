@@ -24,7 +24,6 @@ class ThresholdDefinition(object):
         field_name,
         default_scenarios=(),
         description="",
-        default_patch_type="common",
         is_client=True,
         is_server=True,
         aliases=(),
@@ -37,10 +36,24 @@ class ThresholdDefinition(object):
         self.field_name = field_name
         self.default_scenarios = tuple(default_scenarios)
         self.description = description
-        self.default_patch_type = default_patch_type
         self.is_client = is_client
         self.is_server = is_server
         self.aliases = tuple(aliases)
+
+    def derived_patch_types(self):
+        """Return the patch types a threshold actually needs, by side.
+
+        The patch type decides which side loads the file: ``common`` is read by
+        the server, ``client_avatar`` by the client. A threshold visible to both
+        sides therefore needs one file in each directory with identical content,
+        which is why this returns a tuple rather than a single type.
+        """
+        types = []
+        if self.is_server:
+            types.append("common")
+        if self.is_client:
+            types.append("client_avatar")
+        return tuple(types) or ("common",)
 
 
 # 从原 auto_hotfix_tool.py 的内嵌映射迁入；执行端的 key、table、field 与
@@ -297,11 +310,11 @@ def render_planner_catalog_section(thresholds=None):
         if definition.aliases:
             aliases = "；别名：{}".format("、".join("`{}`".format(item) for item in definition.aliases))
         lines.append(
-            "- 中文标准名：`{}`{}；执行：`-k {}`；默认 Patch 类型：`{}`".format(
+            "- 中文标准名：`{}`{}；执行：`-k {}`；Patch 类型：{}".format(
                 definition.name,
                 aliases,
                 definition.key,
-                definition.default_patch_type,
+                " + ".join("`{}`".format(item) for item in definition.derived_patch_types()),
             )
         )
     return "\n".join(lines)

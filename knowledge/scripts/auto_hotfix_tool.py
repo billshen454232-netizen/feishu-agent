@@ -42,7 +42,8 @@ else:
 
 
 # 仅允许目标服已有的、经人工确认的 Patch 类型；不可把用户输入直接拼入远端路径。
-# common 类型可承载 IS_CLIENT 与 IS_SERVER 双端逻辑，是阈值热更的默认类型。
+# Patch 类型决定哪一侧加载该文件：common 由服务端加载，client_avatar 由客户端加载。
+# 两侧都要改的阈值必须各写一份内容相同的补丁；只写 common 不会触达客户端。
 SUPPORTED_PATCH_TYPES = frozenset((
     "avatar",
     "battle",
@@ -138,6 +139,18 @@ class AutoHotfixTool(object):
         logger.warning("未能自动解析出当前剧本，将默认通配全部剧本 (output: %s)", out)
         return 0
 
+    @staticmethod
+    def _scenario_condition(scenarios, scenario_var="G_SCENARIO_ID"):
+        """Render a scenario guard the way the proven hand-written patches do.
+
+        Empty ``scenarios`` means "every scenario" and renders no guard at all;
+        otherwise each id becomes a direct ``==`` comparison joined by ``or``.
+        """
+        if not scenarios:
+            return ""
+        checks = " or ".join("{} == {}".format(scenario_var, s) for s in scenarios)
+        return "if {} then".format(checks)
+
     def generate_lua_patch_content(
         self,
         table_name,
@@ -145,48 +158,56 @@ class AutoHotfixTool(object):
         value,
         scenarios=(),
     ):
-        """生成安全严密的双端 Lua Patch 脚本文本."""
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        scenario_array_str = "{" + ", ".join(str(s) for s in scenarios) + "}" if scenarios else "{}"
+        """生成与线上手写补丁同风格的双端 Lua Patch 脚本文本.
 
-        return f"""-- ======================================================================
+        内容对两侧完全通用：同时保留 IS_CLIENT / IS_SERVER 双 guard，靠文件
+        落位（common / client_avatar）决定哪一侧加载。这是服务端开发“写一份
+        脚本、放到两个文件、只改文件名”的做法，比为每侧裁剪不同内容更不易出错。
+        """
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        guard = self._scenario_condition(scenarios)
+        inner = "{table}[ [=[{field}]=] ].content = [=[{value}]=]".format(
+            table=table_name, field=field_name, value=value
+        )
+        if guard:
+            client_body = "\t{}\n\t\t\t{}\n\t\tend".format(guard, inner)
+            server_body = "\t{}\n\t\t\t{}\n\t\tend".format(guard, inner)
+        else:
+            client_body = "\t{}".format(inner)
+            server_body = "\t{}".format(inner)
+
+        return """-- ======================================================================
 -- [Auto-Generated Hotfix Patch]
 -- Target Field : {table_name}.{field_name} = {value}
 -- Generated At : {now_str}
+-- Patch Types  : {types_hint}
+-- 说明：内容对客户端 / 服务端通用；文件类型决定哪一侧加载。
 -- ======================================================================
-
-local TARGET_SCENARIOS = {scenario_array_str}
-
-local function is_target_scenario(scenario_id)
-    if not TARGET_SCENARIOS or #TARGET_SCENARIOS == 0 then
-        return true
-    end
-    for _, sid in ipairs(TARGET_SCENARIOS) do
-        if sid == scenario_id then return true end
-    end
-    return false
-end
 
 -- 客户端热更逻辑
 if IS_CLIENT then
-    if is_target_scenario(G_SCENARIO_ID) then
-        if {table_name} and {table_name}[ [=[{field_name}]=] ] then
-            {table_name}[ [=[{field_name}]=] ].content = [=[{value}]=]
-        end
+    do
+{client_body}
     end
 end
 
 -- 服务端热更逻辑
 if IS_SERVER then
-    local ok, holder = pcall(require, "server_helper.serverInfoHolder")
-    local cur_scenario = ok and holder and holder:GetServerScenario() or 0
-    if is_target_scenario(cur_scenario) then
-        if {table_name} and {table_name}[ [=[{field_name}]=] ] then
-            {table_name}[ [=[{field_name}]=] ].content = [=[{value}]=]
-        end
+    do
+        local serverInfoHolder = require "server_helper.serverInfoHolder"
+        local G_SCENARIO_ID = serverInfoHolder:GetServerScenario()
+{server_body}
     end
 end
-"""
+""".format(
+            table_name=table_name,
+            field_name=field_name,
+            value=value,
+            now_str=now_str,
+            types_hint="common(服务端) / client_avatar(客户端)",
+            client_body=client_body,
+            server_body=server_body,
+        )
 
     def apply_patch(
         self,
@@ -213,16 +234,22 @@ end
             field_name = key_or_field
             desc = f"自定义配置 {table_name}.{field_name}"
 
-        # 2. 确定受白名单约束的 Patch 类型。阈值配置默认使用支持双端逻辑的 common。
-        selected_patch_type = patch_type or (
-            definition.default_patch_type if definition else DEFAULT_PATCH_TYPE
-        )
-        if selected_patch_type not in SUPPORTED_PATCH_TYPES:
-            raise ValueError(
-                "不支持的补丁类型 '{}'; 仅允许: {}".format(
-                    selected_patch_type, ", ".join(sorted(SUPPORTED_PATCH_TYPES))
+        # 2. 确定需要写入的 Patch 类型。类型决定哪一侧加载文件：
+        #    common 由服务端加载，client_avatar 由客户端加载。两侧都要改的阈值
+        #    生成两份内容完全相同的补丁，仅文件名前缀不同。
+        if patch_type is not None:
+            patch_types = (patch_type,)
+        elif definition is not None:
+            patch_types = definition.derived_patch_types()
+        else:
+            patch_types = (DEFAULT_PATCH_TYPE,)
+        for item in patch_types:
+            if item not in SUPPORTED_PATCH_TYPES:
+                raise ValueError(
+                    "不支持的补丁类型 '{}'; 仅允许: {}".format(
+                        item, ", ".join(sorted(SUPPORTED_PATCH_TYPES))
+                    )
                 )
-            )
 
         # 3. 解析服务器 IP
         host = self.resolve_server_ip(server_id)
@@ -230,7 +257,7 @@ end
             "准备对服务器 %s (%s) 打 %s 类型补丁: %s = %s",
             server_id,
             host,
-            selected_patch_type,
+            " + ".join(patch_types),
             field_name,
             value,
         )
@@ -246,15 +273,8 @@ end
             if detected > 0:
                 scenarios = (detected,)
 
-        # 5. 同服同字段同类型复用已有 Patch；仅首次创建时使用固定文件名。
-        #    先读取清单再上传，避免把新文件写进远端目录后才发现已有同类 Patch。
-        patch_file_name = self._select_patch_file_name(
-            host, server_id, field_name, selected_patch_type
-        )
-        if not patch_file_name:
-            return False
-        local_temp_patch = f"/tmp/{patch_file_name}" if os.name != "nt" else os.path.join(os.environ.get("TEMP", "."), patch_file_name)
-
+        # 5. 补丁内容只生成一次：两侧用同一份通用脚本（含 IS_CLIENT / IS_SERVER
+        #    双 guard），靠文件落位区分谁加载。这与服务端开发的实践一致。
         patch_content = self.generate_lua_patch_content(
             table_name=table_name,
             field_name=field_name,
@@ -262,36 +282,47 @@ end
             scenarios=scenarios,
         )
 
-        with open(local_temp_patch, "w", encoding="utf-8") as f:
-            f.write(patch_content)
-        logger.info("本地已生成 Lua 补丁代码: %s", local_temp_patch)
+        # 6-7. 每个类型各写一份：同服同字段同类型复用已有文件，仅首次创建。
+        mounted_names = []
+        for selected_patch_type in patch_types:
+            patch_file_name = self._select_patch_file_name(
+                host, server_id, field_name, selected_patch_type
+            )
+            if not patch_file_name:
+                return False
+            local_temp_patch = f"/tmp/{patch_file_name}" if os.name != "nt" else os.path.join(os.environ.get("TEMP", "."), patch_file_name)
 
-        # 6. 上传 Patch 到目标类型的远端热更目录
-        remote_patch_dir = "{}/{}".format(self.REMOTE_PATCH_ROOT, selected_patch_type)
-        remote_patch_file_path = f"{remote_patch_dir}/{patch_file_name}"
-        logger.info("上传补丁文件到目标服: %s", remote_patch_file_path)
-        # 确保目标类型目录存在
-        self.run_remote_cmd(host, f"mkdir -p {remote_patch_dir}")
-        code, out = self.scp_to_remote(host, local_temp_patch, remote_patch_file_path)
-        if code != 0:
-            logger.error("上传补丁文件失败: %s", out)
-            return False
+            with open(local_temp_patch, "w", encoding="utf-8") as f:
+                f.write(patch_content)
+            logger.info("本地已生成 Lua 补丁代码: %s", local_temp_patch)
 
-        # 7. 更新远程 patch_order_list.json
-        logger.info("更新远端热更清单: %s", self.REMOTE_PATCH_LIST)
-        mount_success = self._mount_patch_to_remote_json(
-            host, patch_file_name, selected_patch_type
-        )
-        if not mount_success:
-            return False
+            remote_patch_dir = "{}/{}".format(self.REMOTE_PATCH_ROOT, selected_patch_type)
+            remote_patch_file_path = f"{remote_patch_dir}/{patch_file_name}"
+            logger.info("上传补丁文件到目标服: %s", remote_patch_file_path)
+            self.run_remote_cmd(host, f"mkdir -p {remote_patch_dir}")
+            code, out = self.scp_to_remote(host, local_temp_patch, remote_patch_file_path)
+            if code != 0:
+                logger.error("上传补丁文件失败: %s", out)
+                return False
 
-        # 8. 触发热更执行
+            logger.info("更新远端热更清单: %s", self.REMOTE_PATCH_LIST)
+            if not self._mount_patch_to_remote_json(host, patch_file_name, selected_patch_type):
+                return False
+            mounted_names.append("{}/{}".format(selected_patch_type, patch_file_name))
+
+        logger.info("本次挂载补丁: %s", ", ".join(mounted_names))
+
+        # 8. 触发热更执行（所有类型写完后只触发一次）
         logger.info("正在目标服触发热更 (run_patch_game.sh)...")
         code, out = self.run_remote_cmd(host, self.REMOTE_RUN_PATCH_CMD)
         logger.info("热更执行结果返回 (Exit Code: %d):\n%s", code, out)
 
         if code == 0:
-            logger.info("✅ 热更成功生效！配置 [%s] 已覆盖为 [%s]", desc, value)
+            logger.info("✅ 热更脚本已成功结束！配置 [%s] 目标值 [%s]", desc, value)
+            logger.info(
+                "注意：脚本成功不代表游戏内已生效；客户端侧还需观察 %s 是否触达客户端。",
+                "client_avatar" if "client_avatar" in patch_types else "（本次未写客户端侧）",
+            )
             return True
         else:
             logger.error("❌ 远端热更执行异常，请检查上述日志！")

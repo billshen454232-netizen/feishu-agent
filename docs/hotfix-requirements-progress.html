@@ -1,16 +1,17 @@
 <!DOCTYPE html>
 <!--
   飞书机器人 · 项目计划看板
-  【怎么改】日常进度只改下方 PLAN_DATA，不动 <style> 和渲染函数。
-  【新增计划】往 PLAN_DATA.steps 追加对象：
-      { id: "09", status: "todo", title: "标题", desc: "一句话",
-        done: ["已完成项"], current: ["正在做项"], remaining: ["待办项"] }
-    id 为两位数字字符串（加引号），递增。
-  【必须遵守】
-    1. status 只有三态 done / active / todo（已完成/进行中/未开始），禁止第四态。
-    2. done 只写有本地或环境证据支持的事项，不把候选物/推断标为已完成。
+  【完整维护指南】.claude/skills/plan-board/SKILL.md
+  【日常只改两个数据对象，不动 <style> 和渲染函数】
+    PLAN_DATA.steps  = 计划卡片   { id:"22", status:"todo|active|todo", title, desc,
+                                   done:[], current:[], remaining:[] }
+    FLOWS[stepId]    = 该步骤的时序图  { title, actors:[{id,name,sub}],
+                                   msgs:[{from,to,s:"done|active|todo",t,d}] }
+  【三条硬规则】
+    1. status / msg.s 都只有三态：done / active / todo，禁止第四态。
+    2. done 只写有本地或环境证据支持的事项；不把候选物、计划或推断标为已完成。
     3. 批注与疑问只存浏览器 localStorage，不写入 Git。
-  【相关】docs/hotfix-execution-master-plan.md §7 、docs/documentation-governance-plan.md
+  【已知待办默认上板，不反问】计划即备忘，上下文有限，不写进来就是用户忘、AI 也忘。
 -->
 <html lang="zh-CN" data-theme="dark">
 <head>
@@ -87,7 +88,16 @@
       transition: background-color 0.25s ease, color 0.25s ease;
     }
 
-    .wrap { width: 100%; max-width: 1180px; margin: 0 auto; }
+    .wrap { width: 100%; max-width: 1460px; margin: 0 auto; }
+
+    /* ==================== 内容列 ==================== */
+    .main-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
+      gap: 22px;
+      align-items: start;
+    }
+    .content-col { min-width: 0; }
 
     /* ==================== 顶栏 ==================== */
     .topbar {
@@ -397,6 +407,31 @@
       .grid { grid-template-columns: 1fr; }
       .detail-body, .detail-head { padding-left: 16px; padding-right: 16px; }
     }
+
+    /* ==================== 步骤时序图 ==================== */
+    .flow-block{border:1px solid var(--border-default);border-radius:12px;background:var(--bg-surface);overflow:hidden}
+    .flow-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:12px 16px;border-bottom:1px solid var(--border-subtle);font-weight:700;font-size:14px;color:var(--text-main)}
+    .flow-legend{margin-left:auto;display:flex;gap:12px;font-size:12px;font-weight:500;color:var(--text-sub)}
+    .flow-legend i{display:inline-block;width:18px;height:0;border-top:2px solid;vertical-align:middle;margin-right:5px}
+    .flow-scroll{overflow-x:auto;padding:8px 8px 0}
+    svg.seq{display:block;width:100%;height:auto}
+    svg.seq text{font-family:inherit;fill:var(--text-sub);font-size:12px}
+    svg.seq .a-box{fill:var(--bg-shell);stroke:var(--border-default)}
+    svg.seq .a-name{fill:var(--text-main);font-weight:700;font-size:13px}
+    svg.seq .life{stroke:var(--border-default);stroke-dasharray:4 5}
+    svg.seq .hop{cursor:pointer}
+    svg.seq .hop .hit{fill:transparent}
+    svg.seq .hop:hover .hit,svg.seq .hop.sel .hit{fill:var(--blue-soft)}
+    svg.seq .ln{fill:none;stroke-width:2}
+    svg.seq .st-done .ln{stroke:var(--emerald)} svg.seq .st-done .num{fill:var(--emerald)}
+    svg.seq .st-active .ln{stroke:var(--blue-bright)} svg.seq .st-active .num{fill:var(--blue)}
+    svg.seq .st-todo .ln{stroke:var(--text-muted);stroke-dasharray:6 4} svg.seq .st-todo .num{fill:var(--text-muted)}
+    svg.seq .num-t{fill:#fff;font-weight:700;font-size:11px;text-anchor:middle}
+    svg.seq .lbl{text-anchor:middle} svg.seq .hop.sel .lbl{fill:var(--text-main);font-weight:700}
+    .hop-panel{margin:10px 16px 16px;padding:12px 14px;border:1px solid var(--border-subtle);border-left:3px solid var(--border-active);border-radius:8px;background:var(--bg-shell);font-size:13px;line-height:1.7;color:var(--text-sub)}
+    .hop-panel b{color:var(--text-main)} .hop-panel code{font-size:12px;color:var(--blue-bright)}
+    .hop-nav{display:flex;gap:8px;margin-top:8px}
+    .hop-ph{padding:14px 16px;font-size:12px;color:var(--text-muted)}
   </style>
 </head>
 <body>
@@ -424,14 +459,14 @@
       <div><span class="principle-label">固定原则（防阻塞红线）：</span><span id="principleText"></span></div>
     </div>
 
-    <!-- 筛选 -->
-    <div class="filters" id="filters"></div>
-
-    <!-- 卡片网格 -->
-    <div class="grid" id="grid"></div>
-
-    <!-- 详情 -->
-    <div class="detail" id="detail"></div>
+    <!-- 筛选 + 内容 + 架构侧栏 -->
+    <div class="main-row">
+      <div class="content-col">
+        <div class="filters" id="filters"></div>
+        <div class="grid" id="grid"></div>
+        <div class="detail" id="detail"></div>
+      </div>
+    </div>
   </div>
 
   <script>
@@ -752,18 +787,17 @@
         },
         {
           id: "19",
-          status: "todo",
+          status: "done",
           title: "热更 catalog 同步检查修复",
           desc: "sync_hotfix_planner_catalog --check 未通过，需定位差异后再同步",
           done: [
-            "已确认本地检查未通过：catalog 自动生成区与当前热更注册表不同步"
+            "已确认本地检查未通过：catalog 自动生成区与当前热更注册表不同步",
+            "已定位差异：环境名「越南DEV环境」等未与 server_environments.json 同步（越南服DEV环境）",
+            "已随 STEP 21 重新生成 catalog 修复，sync_hotfix_planner_catalog.py --check 现已通过"
           ],
           current: [],
           remaining: [
-            "定位不同步的具体条目，只看差异，不直接覆盖调用合同",
-            "确认是注册表变更未同步，还是 catalog 手工改动会被覆盖",
-            "审阅后再决定是否运行同步工具写入 catalog 与候选 manifest",
-            "同步后重跑 pytest、compileall、manifest 检查"
+            "已解决；如再出现不同步，按同一定位→审阅→同步流程处理"
           ]
         },
         {
@@ -781,12 +815,141 @@
             "更新 SESSION-HANDOFF.md，供跨会话继续",
             "决定是否提交本次文档治理改动（Git commit / push 需用户明确授权）"
           ]
+        },
+        {
+          id: "21",
+          status: "active",
+          title: "客户端 Patch 类型改造",
+          desc: "客户端阈值必须打 client_avatar 类型才能生效，当前默认打 common 导致客户端不生效",
+          done: [
+            "已确认服务端开发结论：客户端的都要打 client_avatar patch",
+            "已定位根因：is_client / is_server 是死字段，全仓库无代码消费它们决定 patch 类型",
+            "已找回示范 patch 文件夹 C:\\Users\\v_shentao\\Desktop\\PATCH，含同字段正确样例",
+            "已实测定案机制：内容写一份（双 guard）复制到两个文件、只改文件名，common 供服务端、client_avatar 供客户端",
+            "已实现 derived_patch_types()：is_client/is_server 驱动类型，删除误导性的 default_patch_type",
+            "已实现双端阈值生成两份内容相同的 patch，同 key 分落 common/ 与 client_avatar/",
+            "已对齐 Lua 写法：G_SCENARIO_ID == 直接比较、do..end 包裹、去掉判空、保留双 guard",
+            "已修正 auto_hotfix_tool.py 类型语义注释（原第 45 行错误假设）",
+            "已更新 catalog 路由表显示实际类型 common + client_avatar，同步镜像副本",
+            "已补测试 3 个：类型推导、显式类型覆盖、双 guard 结构；全量 417 passed",
+            "附带修复 STEP 19：catalog 同步检查现已通过"
+          ],
+          current: [],
+          remaining: [
+            "部署到线上工具并真实热更一次，验证客户端数值实际变化",
+            "迁移已存在的 common 阈值 Patch：为客户端可见阈值补发 client_avatar 副本",
+            "逐条验证脚本成功 ≠ 客户端已生效，需游戏内/客户端实际观察"
+          ]
         }
       ]
     };
 
     /* ==================== 批注持久化 ==================== */
     const NOTES_KEY = "hotfix-plan-notes-v1";
+
+    /* ============================================================
+     * 时序图数据 FLOWS（按步骤 id 配置；没配置的步骤不显示图）
+     * actors: [{id,name,sub}]   msgs: [{from,to,t(箭头短标签),d(点击后的说明),s:"done|active|todo"}]
+     * from===to 表示自调用（画成回环箭头）。不需要任何外部 JS 库，纯内联 SVG。
+     * ============================================================ */
+    const FLOWS = {
+      "21": {
+        title: "客户端 Patch 类型改造 · 生成与落位时序",
+        actors: [
+          {id:"reg", name:"注册表", sub:"auto_hotfix_registry.py"},
+          {id:"cat", name:"调用合同", sub:"catalog 模式 O"},
+          {id:"gen", name:"生成器", sub:"auto_hotfix_tool.py"},
+          {id:"fs",  name:"落位", sub:"patch/<类型>/"},
+          {id:"srv", name:"服务端", sub:"加载 common"},
+          {id:"cli", name:"客户端", sub:"加载 client_avatar"}
+        ],
+        msgs: [
+          {from:"reg",to:"cat",s:"done",t:"24 个阈值同步",d:"注册表的 key / 表 / 字段 / 别名同步进 catalog。<code>is_client / is_server</code> 字段已在其中，但此前没有代码消费它们。"},
+          {from:"cat",to:"gen",s:"done",t:"中文名→key · path+args",d:"中文名自动生成路由表，机器人只传精确的 path + args。"},
+          {from:"gen",to:"gen",s:"active",t:"推导 patch 类型",d:"<b>当前改造点：</b>由 is_client / is_server 决定类型：客户端值 → <code>client_avatar</code>，服务端值 → <code>common</code>。此前默认打 common，导致客户端不生效。方案已由实测定案，待实施。"},
+          {from:"gen",to:"fs",s:"todo",t:"双端值写两份",d:"双端阈值生成<b>内容相同</b>的两份 patch，同 key 分落两个目录，只改文件名前缀；并向示范样本对齐 Lua 写法（含 guard）。"},
+          {from:"fs",to:"srv",s:"todo",t:"common/auto_common_*",d:"服务端只加载 common 类型。落位路径：<code>patch/common/auto_common_patch_&lt;字段&gt;_&lt;服号&gt;.lua</code>"},
+          {from:"fs",to:"cli",s:"todo",t:"client_avatar/auto_client_*",d:"客户端只加载 client_avatar 类型。已有的 common 阈值 Patch 需补发 client_avatar 副本。"}
+        ]
+      },
+      "05": {
+        title: "机器人执行链路 · 请求到目标服的时序",
+        actors: [
+          {id:"u",name:"飞书用户",sub:"@机器人"},
+          {id:"g",name:"Gateway",sub:"AI 计划 / SQLite"},
+          {id:"w",name:"Worker",sub:"内网"},
+          {id:"m",name:"Muliu Task 89",sub:"只收 path+args"},
+          {id:"d",name:"GS-1 dispatcher",sub:"/home/serverGeneralScript"},
+          {id:"t",name:"目标测试服",sub:"脚本执行"}
+        ],
+        msgs: [
+          {from:"u",to:"g",s:"done",t:"自然语言请求",d:"在飞书群 @机器人 提出需求。"},
+          {from:"g",to:"g",s:"done",t:"精确合同校验",d:"AI 计划 → 对照 catalog 精确 path+args 合同；推导 <code>route_region</code>。执行许可只由合同决定。"},
+          {from:"g",to:"u",s:"done",t:"确认卡",d:"写操作须原请求人确认；知识问答不授予执行权限。"},
+          {from:"g",to:"w",s:"done",t:"入队任务",d:"状态落 SQLite，Worker 领取。"},
+          {from:"w",to:"w",s:"done",t:"重校验 · region 二次推导",d:"Worker 独立重算 route_region，与 Gateway 严格比对，不一致即拒绝。"},
+          {from:"w",to:"m",s:"done",t:"path + args",d:"只传精确路径与参数。"},
+          {from:"m",to:"d",s:"todo",t:"分发",d:"<b>待 STEP 07：</b>catalog 登记 ≠ GS-1 已部署，需有权限者核验。"},
+          {from:"d",to:"t",s:"todo",t:"执行脚本",d:"<b>待 STEP 07：</b>核验 Task 89 与目标脚本。"},
+          {from:"t",to:"g",s:"todo",t:"可信终态回传",d:"回传链路与失败卡片均已实现（STEP 09）；但 GS-1 / 目标服尚未部署核验，端到端待 STEP 07 确认。"}
+        ]
+      }
+    };
+    FLOWS["07"] = FLOWS["05"];
+    const flowSel = {};
+
+    function flowInner(id) {
+      const f = FLOWS[id], sel = flowSel[id];
+      const colW = 170, top = 70, rowH = 64, W = f.actors.length * colW, H = top + f.msgs.length * rowH + 16;
+      const ix = {}; f.actors.forEach((a, i) => ix[a.id] = i);
+      const cx = i => colW * i + colW / 2;
+      let s = `<svg class="seq" viewBox="0 0 ${W} ${H}" style="min-width:${Math.min(W, 820)}px">
+        <defs>${[["done","--emerald"],["active","--blue-bright"],["todo","--text-muted"]].map(([k,v]) =>
+          `<marker id="ah-${k}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" style="fill:var(${v})"/></marker>`).join("")}</defs>`;
+      f.actors.forEach((a, i) => {
+        s += `<line class="life" x1="${cx(i)}" y1="52" x2="${cx(i)}" y2="${H}"/>
+          <rect class="a-box" x="${cx(i)-70}" y="4" width="140" height="48" rx="8"/>
+          <text class="a-name" x="${cx(i)}" y="25" text-anchor="middle">${escapeHtml(a.name)}</text>
+          <text x="${cx(i)}" y="42" text-anchor="middle" style="font-size:10px">${escapeHtml(a.sub||"")}</text>`;
+      });
+      f.msgs.forEach((m, i) => {
+        const y = top + i * rowH + 30, a = cx(ix[m.from]), b = cx(ix[m.to]);
+        let line, lx, ly, nx;
+        if (a === b) {
+          line = `<path class="ln" d="M${a} ${y-10} h46 v24 h-44" marker-end="url(#ah-${m.s})"/>`;
+          lx = a + 56; ly = y + 8; nx = a - 14;
+        } else {
+          line = `<line class="ln" x1="${a}" y1="${y}" x2="${b}" y2="${y}" marker-end="url(#ah-${m.s})"/>`;
+          lx = (a + b) / 2; ly = y - 9; nx = a + (b > a ? 16 : -16);
+        }
+        const anchor = a === b ? ' style="text-anchor:start"' : "";
+        s += `<g class="hop st-${m.s}${sel===i?" sel":""}" onclick="selectHop('${id}',${i})">
+          <rect class="hit" x="${Math.min(a,b)-24}" y="${y-26}" width="${Math.abs(b-a)+(a===b?190:48)}" height="${rowH-6}" rx="8"/>
+          ${line}<circle class="num" cx="${nx}" cy="${y}" r="10"/><text class="num-t" x="${nx}" y="${y+4}">${i+1}</text>
+          <text class="lbl" x="${lx}" y="${ly}"${anchor}>${escapeHtml(m.t)}</text></g>`;
+      });
+      s += "</svg>";
+      const SL = {done:"已完成", active:"进行中", todo:"待实现"};
+      let panel = `<div class="hop-ph">点击任一箭头查看这一步的说明（← → 也可切换）</div>`;
+      if (sel != null) {
+        const m = f.msgs[sel], A = k => f.actors[ix[k]].name;
+        panel = `<div class="hop-panel"><b>第 ${sel+1} 步 · ${escapeHtml(A(m.from))} ${m.from===m.to?"自处理":"→ "+escapeHtml(A(m.to))}</b>
+          <span class="status-tag status-${m.s}" style="margin-left:8px">${SL[m.s]}</span><div>${m.d}</div>
+          <div class="hop-nav"><button class="btn" onclick="selectHop('${id}',${sel-1})" ${sel===0?"disabled":""}>← 上一步</button>
+          <button class="btn" onclick="selectHop('${id}',${sel+1})" ${sel===f.msgs.length-1?"disabled":""}>下一步 →</button></div></div>`;
+      }
+      return `<div class="flow-head"><span>🔀</span>${escapeHtml(f.title)}
+        <span class="flow-legend"><span><i style="color:var(--emerald)"></i>已完成</span><span><i style="color:var(--blue-bright)"></i>进行中</span><span><i style="color:var(--text-muted);border-top-style:dashed"></i>待实现</span></span></div>
+        <div class="flow-scroll">${s}</div>${panel}`;
+    }
+    function renderFlow(id) { return FLOWS[id] ? `<div class="flow-block" id="flowWrap">${flowInner(id)}</div>` : ""; }
+    function selectHop(id, i) {
+      const n = FLOWS[id].msgs.length;
+      if (i < 0 || i >= n) return;
+      flowSel[id] = i;
+      document.getElementById("flowWrap").innerHTML = flowInner(id);
+    }
+
     function loadNotes() {
       try { return JSON.parse(localStorage.getItem(NOTES_KEY)) || {}; }
       catch (e) { return {}; }
@@ -886,6 +1049,7 @@
         </div>
 
         <div class="detail-body">
+          ${renderFlow(id)}
           <div class="block block-done">
             <div class="block-head"><span class="ico">✓</span>已完成<span class="n">${s.done.length} 项</span></div>
             ${listHtml(s.done, "✓")}

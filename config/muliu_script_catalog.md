@@ -203,9 +203,9 @@
 - `韩服weekly环境`：`6010,6011`
 - `韩服QA环境`：`6020,6021`
 - `韩服提审环境`：`6100,6101`
-- `越南DEV环境`：`7001,7002`
-- `越南weekly环境`：`7010,7011`
-- `越南QA环境`：`7020`
+- `越南服DEV环境`：`7001,7002`
+- `越南服weekly环境`：`7010,7011`
+- `越南服QA环境`：`7020`
 - `海外所有DEV环境`：`5000,5001,5500,6000,6001,7001,7002`
 - `海外所有weekly环境`：`5010,5011,5012,5013,6010,6011,7010,7011`
 - `海外所有QA环境`：`5020,5021,6020,6021,7020`
@@ -327,30 +327,30 @@
 
 > 唯一来源：`tools/auto_hotfix_registry.py`。仅本表中的中文标准名和别名可以映射到对应 `-k`；不得按相近词义创建别名。
 
-- 中文标准名：`弹劾发起同盟人数检查`；别名：`弹劾人数`、`弹劾发起同盟人数`；执行：`-k union_impeach_min`；默认 Patch 类型：`common`
-- 中文标准名：`弹劾发起者繁荣度检查`；执行：`-k union_impeach_power_min`；默认 Patch 类型：`common`
-- 中文标准名：`弹劾发起者同盟繁荣度排名要求`；执行：`-k union_impeach_power_rank`；默认 Patch 类型：`common`
-- 中文标准名：`同盟精锐AI大营人数要求`；执行：`-k union_rage_min_member`；默认 Patch 类型：`common`
-- 中文标准名：`同盟精锐AI大营等级`；执行：`-k union_rage_min_level`；默认 Patch 类型：`common`
-- 中文标准名：`同盟令获取同盟人数阈值`；别名：`同盟令人数`；执行：`-k union_token_least_member`；默认 Patch 类型：`common`
-- 中文标准名：`同盟初始人数上限`；执行：`-k union_max_member_init`；默认 Patch 类型：`common`
-- 中文标准名：`同盟人数最大上限`；执行：`-k union_max_member_limit`；默认 Patch 类型：`common`
-- 中文标准名：`合盟人数限制`；执行：`-k union_merge_min_member`；默认 Patch 类型：`common`
-- 中文标准名：`S7烽火台和黄天纸马开启人数限制`；别名：`S7专属建筑开启人数`、`S7 专属建筑开启人数`；执行：`-k faction_building_member_limit`；默认 Patch 类型：`common`
-- 中文标准名：`S7专属建筑宫殿等级限制`；执行：`-k faction_building_palace_level`；默认 Patch 类型：`common`
-- 中文标准名：`黄巾县域落城上限`；执行：`-k one_city_max_main_city_num`；默认 Patch 类型：`common`
-- 中文标准名：`国都/州府额外霸业名额`；别名：`霸业名额`、`国都霸业名额`、`州府霸业名额`；执行：`-k capital_city_extra_quota`；默认 Patch 类型：`common`
-- 中文标准名：`霸业名额服务端字段`；执行：`-k rank_quota`；默认 Patch 类型：`common`
-- 中文标准名：`战队选边人数`；执行：`-k team_mini_choose_region_group`；默认 Patch 类型：`common`
-- 中文标准名：`散人匹配战队人数阈值`；执行：`-k auto_join_team_min_limit`；默认 Patch 类型：`common`
-- 中文标准名：`阵营预选战队人数显示阈值`；别名：`剧本预选州战队人数显示阈值`、`预选州战队人数显示阈值`；执行：`-k faction_team_show_member_limit`；默认 Patch 类型：`common`
-- 中文标准名：`战队交换人数`；别名：`战队交换人数阈值`；执行：`-k faction_swap_team_member_min`；默认 Patch 类型：`common`
-- 中文标准名：`跨赛季组队成团人数阈值`；执行：`-k team_reward_member_count`；默认 Patch 类型：`common`
-- 中文标准名：`自选剧本人数最低限制`；执行：`-k final_default_open_scenario_limit`；默认 Patch 类型：`common`
-- 中文标准名：`俸禄发放人数阈值`；执行：`-k week_suppress_camp_success_limit`；默认 Patch 类型：`common`
-- 中文标准名：`软回收最低落堡人数要求`；执行：`-k soft_recycle_player_limit`；默认 Patch 类型：`common`
-- 中文标准名：`硬回收启动注册人数`；执行：`-k hard_recycle_player_limit`；默认 Patch 类型：`common`
-- 中文标准名：`虎视中原立国活动人数`；执行：`-k found_nation_reward_num_limit`；默认 Patch 类型：`common`
+- 中文标准名：`弹劾发起同盟人数检查`；别名：`弹劾人数`、`弹劾发起同盟人数`；执行：`-k union_impeach_min`；Patch 类型：`common` + `client_avatar`
+- 中文标准名：`弹劾发起者繁荣度检查`；执行：`-k union_impeach_power_min`；Patch 类型：`common` + `client_avatar`
+- 中文标准名：`弹劾发起者同盟繁荣度排名要求`；执行：`-k union_impeach_power_rank`；Patch 类型：`common` + `client_avatar`
+- 中文标准名：`同盟精锐AI大营人数要求`；执行：`-k union_rage_min_member`；Patch 类型：`common` + `client_avatar`
+- 中文标准名：`同盟精锐AI大营等级`；执行：`-k union_rage_min_level`；Patch 类型：`common` + `client_avatar`
+- 中文标准名：`同盟令获取同盟人数阈值`；别名：`同盟令人数`；执行：`-k union_token_least_member`；Patch 类型：`common` + `client_avatar`
+- 中文标准名：`同盟初始人数上限`；执行：`-k union_max_member_init`；Patch 类型：`common` + `client_avatar`
+- 中文标准名：`同盟人数最大上限`；执行：`-k union_max_member_limit`；Patch 类型：`common` + `client_avatar`
+- 中文标准名：`合盟人数限制`；执行：`-k union_merge_min_member`；Patch 类型：`common` + `client_avatar`
+- 中文标准名：`S7烽火台和黄天纸马开启人数限制`；别名：`S7专属建筑开启人数`、`S7 专属建筑开启人数`；执行：`-k faction_building_member_limit`；Patch 类型：`common` + `client_avatar`
+- 中文标准名：`S7专属建筑宫殿等级限制`；执行：`-k faction_building_palace_level`；Patch 类型：`common` + `client_avatar`
+- 中文标准名：`黄巾县域落城上限`；执行：`-k one_city_max_main_city_num`；Patch 类型：`common` + `client_avatar`
+- 中文标准名：`国都/州府额外霸业名额`；别名：`霸业名额`、`国都霸业名额`、`州府霸业名额`；执行：`-k capital_city_extra_quota`；Patch 类型：`common` + `client_avatar`
+- 中文标准名：`霸业名额服务端字段`；执行：`-k rank_quota`；Patch 类型：`common` + `client_avatar`
+- 中文标准名：`战队选边人数`；执行：`-k team_mini_choose_region_group`；Patch 类型：`common` + `client_avatar`
+- 中文标准名：`散人匹配战队人数阈值`；执行：`-k auto_join_team_min_limit`；Patch 类型：`common` + `client_avatar`
+- 中文标准名：`阵营预选战队人数显示阈值`；别名：`剧本预选州战队人数显示阈值`、`预选州战队人数显示阈值`；执行：`-k faction_team_show_member_limit`；Patch 类型：`common` + `client_avatar`
+- 中文标准名：`战队交换人数`；别名：`战队交换人数阈值`；执行：`-k faction_swap_team_member_min`；Patch 类型：`common` + `client_avatar`
+- 中文标准名：`跨赛季组队成团人数阈值`；执行：`-k team_reward_member_count`；Patch 类型：`common` + `client_avatar`
+- 中文标准名：`自选剧本人数最低限制`；执行：`-k final_default_open_scenario_limit`；Patch 类型：`common` + `client_avatar`
+- 中文标准名：`俸禄发放人数阈值`；执行：`-k week_suppress_camp_success_limit`；Patch 类型：`common` + `client_avatar`
+- 中文标准名：`软回收最低落堡人数要求`；执行：`-k soft_recycle_player_limit`；Patch 类型：`common` + `client_avatar`
+- 中文标准名：`硬回收启动注册人数`；执行：`-k hard_recycle_player_limit`；Patch 类型：`common` + `client_avatar`
+- 中文标准名：`虎视中原立国活动人数`；执行：`-k found_nation_reward_num_limit`；Patch 类型：`common` + `client_avatar`
 <!-- HOTFIX_THRESHOLD_REGISTRY:END -->
 
 标准计划示例：

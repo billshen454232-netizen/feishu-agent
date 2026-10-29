@@ -94,4 +94,4 @@ docs/documentation-governance-plan.md
 
 长期任务结束或切换机器前更新 `SESSION-HANDOFF.md`；稳定规则只维护在 `.claude/rules/core-governance.md`，不复制进 handoff。
 
-热更推进计划看板为 `docs/hotfix-requirements-progress.html`：进度更新只改其中的 `PLAN_DATA`（每个 step 的 `done` / `current` / `remaining` 数组与 `status` 三态），不改样式与渲染函数；页面顶部注释与 `docs/hotfix-execution-master-plan.md` §7 有完整约定。
+项目计划看板的维护（PLAN_DATA 三态、FLOWS 时序图、批注边界）统一在 `plan-board` skill，本文不重复；复杂任务的进展和待办直接上板。

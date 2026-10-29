@@ -30,7 +30,6 @@ def test_known_thresholds_are_reexported_from_registry_without_changes():
             definition.field_name,
             definition.default_scenarios,
             definition.description,
-            definition.default_patch_type,
             definition.is_client,
             definition.is_server,
             definition.aliases,
@@ -45,7 +44,6 @@ def test_known_thresholds_are_reexported_from_registry_without_changes():
             definition.field_name,
             definition.default_scenarios,
             definition.description,
-            definition.default_patch_type,
             definition.is_client,
             definition.is_server,
             definition.aliases,
@@ -122,11 +120,15 @@ def test_generate_lua_patch_content_with_specific_scenario():
         scenarios=(2001,),
     )
 
-    assert "TARGET_SCENARIOS = {2001}" in lua_code
+    assert "if G_SCENARIO_ID == 2001 then" in lua_code
     assert "IS_CLIENT" in lua_code
     assert "IS_SERVER" in lua_code
     assert "union_config_setting[ [=[union_impeach_union_member_min]=] ].content = [=[1]=]" in lua_code
-    assert "pcall(require, \"server_helper.serverInfoHolder\")" in lua_code
+    # 与线上手写补丁一致：直接 require，不用 pcall 吞掉错误
+    assert 'require "server_helper.serverInfoHolder"' in lua_code
+    assert "pcall" not in lua_code
+    # 通用内容：不再判空，字段写错应当显式暴露而不是静默不生效
+    assert "if union_config_setting and" not in lua_code
 
 
 def test_generate_lua_patch_content_with_all_scenarios():
@@ -138,7 +140,9 @@ def test_generate_lua_patch_content_with_all_scenarios():
         scenarios=(),
     )
 
-    assert "TARGET_SCENARIOS = {}" in lua_code
+    # 空剧本 = 全部剧本，不生成任何场景守卫
+    assert "G_SCENARIO_ID ==" not in lua_code
+    assert "TARGET_SCENARIOS" not in lua_code
     assert "game_config_common_config[ [=[week_suppress_camp_success_member_num_limit]=] ].content = [=[1]=]" in lua_code
 
 
@@ -263,8 +267,10 @@ def test_reuses_latest_same_type_patch_without_rewriting_list():
     tool.scp_to_remote = mock_scp
 
     assert tool.apply_patch("5010", "capital_city_extra_quota", "2") is True
+    # 双端阈值各写一份，且都复用已有文件名，不产生新条目
     assert uploaded_paths == [
-        tool.REMOTE_PATCH_ROOT + "/common/auto_common_patch_capital_city_extra_quota_5010.lua"
+        tool.REMOTE_PATCH_ROOT + "/common/auto_common_patch_capital_city_extra_quota_5010.lua",
+        tool.REMOTE_PATCH_ROOT + "/client_avatar/auto_patch_capital_city_extra_quota_5010_20261013_195804.lua",
     ]
     assert not any("cat << 'EOF'" in cmd for cmd in remote_commands)
 
@@ -444,3 +450,62 @@ def test_rollback_by_key_or_alias_delegates_to_full_restore():
 
     assert tool.rollback_patch("5010", "capital_city_extra_quota") is True
     assert calls == [("5010", "capital_city_extra_quota")]
+
+
+def test_derived_patch_types_follow_declared_sides():
+    both = RegistryThresholdDefinition(
+        key="k_both", name="双端", table_name="t", field_name="f_both",
+        is_client=True, is_server=True,
+    )
+    client_only = RegistryThresholdDefinition(
+        key="k_client", name="仅客户端", table_name="t", field_name="f_client",
+        is_client=True, is_server=False,
+    )
+    server_only = RegistryThresholdDefinition(
+        key="k_server", name="仅服务端", table_name="t", field_name="f_server",
+        is_client=False, is_server=True,
+    )
+
+    assert both.derived_patch_types() == ("common", "client_avatar")
+    assert client_only.derived_patch_types() == ("client_avatar",)
+    assert server_only.derived_patch_types() == ("common",)
+
+
+def test_explicit_patch_type_overrides_derived_sides():
+    tool = AutoHotfixTool(dry_run=False)
+    stored_json = json.dumps({"version": "1.0", "list": {}})
+    uploaded_paths = []
+
+    tool.resolve_server_ip = lambda server_id: "10.0.0.1"
+    tool.detect_server_scenario = lambda host: 2001
+
+    def mock_run_cmd(host, cmd):
+        if f"cat {tool.REMOTE_PATCH_LIST}" in cmd:
+            return 0, stored_json
+        return 0, ""
+
+    tool.run_remote_cmd = mock_run_cmd
+    tool.scp_to_remote = lambda host, local_file, remote_file: (uploaded_paths.append(remote_file) or (0, ""))
+
+    # 显式指定类型时只写该类型，不按 is_client/is_server 展开
+    assert tool.apply_patch("5010", "union_impeach_min", "1", patch_type="client_avatar") is True
+    assert len(uploaded_paths) == 1
+    assert "/client_avatar/" in uploaded_paths[0]
+    assert uploaded_paths[0].endswith("auto_client_avatar_patch_union_impeach_union_member_min_5010.lua")
+
+
+def test_generated_patch_has_both_guards_but_no_side_specific_content():
+    tool = AutoHotfixTool(dry_run=True)
+    lua_code = tool.generate_lua_patch_content(
+        table_name="union_config_setting",
+        field_name="union_impeach_union_member_min",
+        value="1",
+        scenarios=(3001,),
+    )
+
+    # 双 guard 都在，内容对两侧通用
+    assert "if IS_CLIENT then" in lua_code
+    assert "if IS_SERVER then" in lua_code
+    # 客户端侧直接用 G_SCENARIO_ID；服务端侧重新取服端剧本
+    assert lua_code.count("G_SCENARIO_ID == 3001") == 2
+    assert "server_helper.serverInfoHolder" in lua_code
