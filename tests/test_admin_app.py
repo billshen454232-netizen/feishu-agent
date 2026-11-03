@@ -175,3 +175,16 @@ def test_patterns_and_executions_are_paginated(tmp_path):
     assert {p["pattern_id"] for p in first["patterns"]}.isdisjoint({p["pattern_id"] for p in last["patterns"]})
     assert runs["total"] == 5 and [r["message_id"] for r in runs["executions"]] == ["om_2", "om_1"]
     assert client.get("/api/executions?page=0&page_size=999").json()["page_size"] == 100
+
+
+def test_admin_server_does_not_touch_process_logging(tmp_path):
+    import logging
+
+    from src.admin_app import AdminServer
+
+    names = ("uvicorn", "uvicorn.error", "uvicorn.access")
+    before = {name: (logging.getLogger(name).level, list(logging.getLogger(name).handlers)) for name in names}
+
+    AdminServer(create_admin_app(_store(tmp_path)), port=1)
+
+    assert {name: (logging.getLogger(name).level, list(logging.getLogger(name).handlers)) for name in names} == before

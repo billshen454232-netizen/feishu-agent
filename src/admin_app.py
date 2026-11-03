@@ -146,8 +146,18 @@ class AdminServer:
     def __init__(self, app: FastAPI, *, port: int) -> None:
         import uvicorn
 
+        # log_config/log_level=None: never reconfigure the process-wide uvicorn loggers.
+        # Doing so once silenced the main server's INFO logs ("Application startup complete").
         self._server = uvicorn.Server(
-            uvicorn.Config(app, host=ADMIN_HOST, port=port, log_level="warning", lifespan="off")
+            uvicorn.Config(
+                app,
+                host=ADMIN_HOST,
+                port=port,
+                lifespan="off",
+                log_config=None,
+                log_level=None,
+                access_log=False,
+            )
         )
         self._thread: threading.Thread | None = None
         self.port = port
