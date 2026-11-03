@@ -427,6 +427,15 @@ const clock = () => { const d = new Date(); return `${pad(d.getHours())}:${pad(d
 let state = { tab: "candidate", page: 1 };
 let total = 0;
 const dirty = new Set();
+// Client cache: switching tabs / pages reuses data until 刷新 or a change invalidates it.
+const cache = new Map();          // "tab:page" -> { data, at }
+let summaryCache = null;          // { data, at }
+const cacheKey = () => `${state.tab}:${state.page}`;
+function invalidateTemplates() {
+  for (const key of [...cache.keys()]) if (!key.startsWith("executions:")) cache.delete(key);
+  summaryCache = null;
+}
+function invalidateAll() { cache.clear(); summaryCache = null; }
 
 function readHash() {
   const params = new URLSearchParams(location.hash.slice(1));
@@ -467,7 +476,7 @@ function confirmDiscard() {
   return dirty.size === 0 || confirm(`有 ${dirty.size} 条诊断改动还没保存，确定放弃？`);
 }
 
-async function load() {
+async function load({ force = false } = {}) {
   writeHash();
   document.querySelectorAll("nav.tabs a").forEach((a) => {
     if (a.dataset.tab === state.tab) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
@@ -477,33 +486,41 @@ async function load() {
   $("#batch-approve").hidden = state.tab !== "candidate";
   $("#batch-revert").hidden = state.tab !== "verified";
   $("#select-all").checked = false;
-  $("#content").innerHTML = '<div class="state-box"><p>正在加载…</p></div>';
+  if (force) { cache.delete(cacheKey()); summaryCache = null; }
+  const cached = cache.get(cacheKey());
+  if (!cached) $("#content").innerHTML = '<div class="state-box"><p>正在加载…</p></div>';
   $("#refresh").disabled = true;
   try {
-    const summary = await api("GET", "/api/summary");
+    if (!summaryCache) summaryCache = { data: await api("GET", "/api/summary"), at: clock() };
+    const summary = summaryCache.data;
     $("#n-candidate").textContent = summary.counts.candidate;
     $("#n-verified").textContent = summary.counts.verified;
     setMode(summary.read_success_mode);
+    let entry = cached;
+    if (!entry) {
+      const url = isTemplates
+        ? `/api/patterns?status=${state.tab}&page=${state.page}&page_size=${PAGE_SIZE}`
+        : `/api/executions?page=${state.page}&page_size=${PAGE_SIZE}`;
+      entry = { data: await api("GET", url), at: clock() };
+      const items = isTemplates ? entry.data.patterns : entry.data.executions;
+      if (!items.length && state.page > 1) { state.page -= 1; return load(); }
+      cache.set(cacheKey(), entry);
+    }
+    total = entry.data.total;
     if (isTemplates) {
-      const data = await api("GET", `/api/patterns?status=${state.tab}&page=${state.page}&page_size=${PAGE_SIZE}`);
-      if (!data.patterns.length && state.page > 1) { state.page -= 1; return load(); }
-      total = data.total;
       dirty.clear();
-      renderTemplates(data.patterns);
+      renderTemplates(entry.data.patterns);
       $("#summary").textContent = `${state.tab === "candidate" ? "待审核" : "可用模板"} ${total} 条`;
     } else {
-      const data = await api("GET", `/api/executions?page=${state.page}&page_size=${PAGE_SIZE}`);
-      if (!data.executions.length && state.page > 1) { state.page -= 1; return load(); }
-      total = data.total;
-      renderExecutions(data.executions);
+      renderExecutions(entry.data.executions);
       $("#summary").textContent = `最近执行 ${total} 条`;
     }
     renderPager();
-    $("#stamp").textContent = `更新于 ${clock()}`;
+    $("#stamp").textContent = `数据更新于 ${entry.at}`;
   } catch (err) {
     $("#content").innerHTML = `<div class="state-box error"><p>加载失败：${esc(err.message)}</p>
       <p class="hint">检查 SSH 隧道是否仍然连接，然后重试。</p><p><button class="btn" id="retry">重试</button></p></div>`;
-    $("#retry").onclick = load;
+    $("#retry").onclick = () => load({ force: true });
     $("#pager").hidden = true;
   } finally {
     $("#refresh").disabled = false;
@@ -602,6 +619,7 @@ async function act(ids, action) {
     const r = await api("POST", "/api/patterns/batch", { ids, action });
     toast({ approve: "已通过", revert: "已退回待审核", delete: "已删除" }[action] + ` ${r.changed} 条`);
     ids.forEach((id) => dirty.delete(id));
+    invalidateTemplates();
     await load();
   } catch (err) { toast(`操作失败：${err.message}`, true); }
 }
@@ -623,6 +641,7 @@ $("#content").addEventListener("change", async (e) => {
     const id = Number(e.target.closest(".tpl").dataset.id);
     try {
       await api("PUT", `/api/patterns/${id}/outcome`, { outcome: e.target.value });
+      invalidateTemplates();
       toast(e.target.value === "warning" ? "已改为：执行成功，状态存疑" : "已改为：执行失败");
     } catch (err) { toast(`保存失败：${err.message}`, true); }
   }
@@ -643,6 +662,7 @@ $("#content").addEventListener("click", async (e) => {
       item.querySelector(".dirty").hidden = true;
       button.disabled = true;
       dirty.delete(id);
+      invalidateTemplates();
       toast("诊断已保存");
     } catch (err) { toast(`保存失败：${err.message}`, true); }
     return;
@@ -716,7 +736,7 @@ document.querySelectorAll("nav.tabs a").forEach((a) => a.addEventListener("click
   state = { tab: a.dataset.tab, page: 1 };
   load();
 }));
-$("#refresh").onclick = () => { if (confirmDiscard()) load(); };
+$("#refresh").onclick = () => { if (confirmDiscard()) load({ force: true }); };
 $("#prev").onclick = () => { if (confirmDiscard()) { state.page -= 1; load(); } };
 $("#next").onclick = () => { if (confirmDiscard()) { state.page += 1; load(); } };
 $("#select-all").onchange = (e) => { document.querySelectorAll(".pick").forEach((c) => { c.checked = e.target.checked; }); updateBatchButtons(); };
@@ -726,9 +746,10 @@ $("#batch-delete").onclick = () => act(selectedIds(), "delete");
 document.querySelectorAll("#mode input").forEach((input) => input.addEventListener("change", async () => {
   try {
     await api("PUT", "/api/settings/read-success-mode", { mode: input.value });
+    if (summaryCache) summaryCache.data.read_success_mode = input.value;
     setMode(input.value);
     toast(input.value === "ai" ? "查询成功后：AI 解读日志" : "查询成功后：只发程序结果");
-  } catch (err) { toast(`切换失败：${err.message}`, true); load(); }
+  } catch (err) { toast(`切换失败：${err.message}`, true); load({ force: true }); }
 }));
 window.addEventListener("hashchange", () => { readHash(); load(); });
 window.addEventListener("beforeunload", (e) => { if (dirty.size) { e.preventDefault(); e.returnValue = ""; } });
