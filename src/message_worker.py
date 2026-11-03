@@ -1057,24 +1057,14 @@ class MessageJobProcessor:
                     server_ids = list(dict.fromkeys(contracts.extract_server_ids(clear_plan)))
                 except Exception:  # noqa: BLE001 - server ids are best-effort context
                     server_ids = []
-            requester = {"open_id": job.user_id, "name": await self._member_name(job.chat_id, job.user_id)}
-            operator = (
-                requester
-                if operator_id == job.user_id
-                else {"open_id": operator_id, "name": await self._member_name(job.chat_id, operator_id)}
-            )
-            payload = self._clear_notifier.build_payload(
+            operator_name = await self._member_name(job.chat_id, operator_id) or operator_id
+            text = self._clear_notifier.build_text(
                 event,
-                message_id=job.message_id,
-                plan=plan,
-                clear_steps=list(clear_steps),
+                operator_name=operator_name,
                 server_ids=server_ids,
-                route_region=route_region,
-                request_text=job.text,
-                operator=operator,
-                requester=requester,
+                plan_summary=plan.summary,
             )
-            self._clear_notifier.publish(payload)
+            await self._clear_notifier.send(text)
         except Exception:  # noqa: BLE001 - notification must never affect the operation
             logger.exception("clear notification crashed message_id=%s event=%s", job.message_id, event)
 

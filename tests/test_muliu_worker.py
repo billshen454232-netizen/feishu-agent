@@ -532,29 +532,3 @@ def test_serialized_result_round_trip_is_bounded_to_protocol_shape():
 
     assert payload["summary"] == plan.summary
     assert payload["step_results"][0]["args"] == ["6001"]
-
-
-@pytest.mark.asyncio
-async def test_worker_client_claims_and_reports_events():
-    import httpx as _httpx
-
-    from src.muliu_worker import GatewayWorkerClient
-
-    seen = []
-
-    def handler(request):
-        seen.append((request.url.path, request.headers.get("Authorization"), request.content))
-        if request.url.path.endswith("/events/claim"):
-            return _httpx.Response(200, json={"events": [{"event_id": "e1", "kind": "clear_prepared", "payload": {"text": "t"}}, {"bad": 1}]})
-        return _httpx.Response(200, json={"status": "ok"})
-
-    client = GatewayWorkerClient(make_config(), http_client=_httpx.AsyncClient(transport=_httpx.MockTransport(handler)))
-
-    events = await client.claim_events()
-    await client.report_event("e1", True, "")
-
-    assert [e["event_id"] for e in events] == ["e1"]
-    assert seen[0][0] == "/internal/worker/events/claim"
-    assert seen[1][0] == "/internal/worker/events/result"
-    assert json.loads(seen[1][2]) == {"event_id": "e1", "delivered": True, "error": ""}
-    assert all(auth.startswith("Bearer ") for _path, auth, _body in seen)

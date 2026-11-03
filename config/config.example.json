@@ -79,7 +79,9 @@
   },
   "clear_notification": {
     "enabled": false,
-    "max_event_age_seconds": 3600
+    "webhook_url": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=填写企微群机器人key",
+    "mention_all": true,
+    "timeout_seconds": 5
   },
   "runtime": {
     "role": "local",

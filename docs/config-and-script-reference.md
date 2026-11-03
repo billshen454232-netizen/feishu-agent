@@ -149,66 +149,31 @@ worker  = 主动连 Gateway 领任务 + 本地 Muliu 执行（无飞书/AI 凭�
 - 需求分析模型与耗时：规划器记录每次 AI 调用的模型和耗时，存入 `message_jobs.planning_model / planning_ms / planning_calls`。
 - 模板库、研读任务、执行记录与 `message_jobs` 同一个 SQLite 文件；执行记录按 `artifact_retention_days` 清理，模板不清理。
 
-### 清档事件推送（可选）
+### 清档企微推送（可选）
 
-计划里含清档脚本时产生两次事件，**由内网 Worker 转发**到你自建的 HTTP 服务，是否继续转发由接收端决定。是否清档**按计划中的脚本路径判断**，不由 AI 判断。
-
-```text
-Gateway：生成事件 → 写入 SQLite 发件箱 outbound_events（不发 HTTP）
-Worker： 每 poll_interval_seconds 秒 POST /internal/worker/events/claim 拉取
-       → POST 到 webhook_url → POST /internal/worker/events/result 回报
-Gateway：成功 → delivered；失败 → 重新排队，5 次后 failed；超过 max_event_age_seconds → expired
-```
-
-阿里云 Gateway（只负责记录）：
-
-```json
-"clear_notification": { "enabled": true, "max_event_age_seconds": 3600 }
-```
-
-内网 Worker（负责投递）：
+计划里含清档脚本时，阿里云 Gateway 直接向企微群机器人推送两次消息（默认 @所有人）。是否清档**按计划中的脚本路径判断**，不由 AI 判断。
 
 ```json
 "clear_notification": {
   "enabled": true,
-  "webhook_url": "http://内网接收服务:端口/clear-events",
-  "secret": "可选，用于签名校验",
-  "timeout_seconds": 5,
-  "poll_interval_seconds": 5
+  "webhook_url": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=…",
+  "mention_all": true,
+  "timeout_seconds": 5
 }
 ```
 
-| 事件 | 触发时机 |
+| 时机 | 消息示例 |
 | --- | --- |
-| `clear_prepared` | AI 生成含清档的计划、确认卡已发出（组员可能还会取消） |
-| `clear_executing` | 组员确认执行、任务已进入执行队列 |
+| AI 生成含清档的计划、确认卡已发出 | `内网：沈涛 准备清档 2213 服（已生成计划，等待确认）` |
+| 组员确认执行、任务进入执行队列 | `内网：沈涛 正在操作清档 2213 服（已确认，开始执行）` |
 
-推送体（`POST`，`application/json`）：
+每条消息下面附「计划：…」「时间：…（北京时间）」两行。
 
-```json
-{
-  "event": "clear_executing",
-  "event_id": "om_xxx:clear_executing",
-  "occurred_at": 1794016800,
-  "occurred_at_text": "2026-11-07 10:00:00",
-  "text": "内网：沈涛 正在操作清档 2213 服",
-  "operator":  {"open_id": "ou_xxx", "name": "沈涛"},
-  "requester": {"open_id": "ou_xxx", "name": "沈涛"},
-  "server_ids": ["2213"],
-  "route_region": "cn",
-  "clear_steps": [{"script": "clear", "path": "/home/serverGeneralScript/clear", "args": ["2213"], "description": "清档 2213"}],
-  "plan_summary": "国服2213清档并启服",
-  "request_text": "国服2213清档 然后启服",
-  "message_id": "om_xxx"
-}
-```
-
-- 接收端返回 2xx 即视为送达；`event_id` 用于去重（租约超时或失败重试时可能重发）；
-- 配置了 `secret` 时带请求头 `X-Clear-Timestamp` 与 `X-Clear-Signature`，签名为 `hex(HMAC-SHA256(secret, timestamp + "." + 原始请求体))`；
-- `trigger_paths`（Gateway）默认包含 `clear`、`clear_logic_game.py`、`clear_zone.py`、`cleardb.py`；
-- 投递尽力而为：失败只影响通知，不影响操作本身；Worker 拉取失败时指数退避（最长 60 秒）；
-- 事件转发是 Worker 内独立的后台任务，不受执行中的长任务（如合服）阻塞；
-- `runtime.role=local` 时由本进程直接投递，需要填写 `webhook_url`。
+- 只配置在 **Gateway**；Worker 不参与，不用改；
+- `webhook_url` 含企微 key，属于密钥：只写在服务器的 `config.json`（已 `.gitignore`），不要写进示例配置或提交；
+- `trigger_paths` 默认包含 `clear`、`clear_logic_game.py`、`clear_zone.py`、`cleardb.py`；
+- 推送在后台进行，失败（网络错误、企微返回非 0 errcode）只记日志，不影响确认卡和执行；
+- 组员取消或确认超时时，只会有「准备清档」一条。
 
 ## 2. `src/` — 运行期 Python 模块
 
@@ -265,7 +230,7 @@ Gateway：成功 → delivered；失败 → 重新排队，5 次后 failed；超
 | [muliu_routing.py](../src/muliu_routing.py) | 从已验证计划派生唯一 `route_region`（cn / overseas），失败关闭。 | `MuliuPlanRouteResolver` | **不**生成脚本参数。 |
 | [muliu_executor.py](../src/muliu_executor.py) | 调用 Muliu Task 89：提交 `{"path","args"}`，轮询日志，解释终态。 | `MuliuExecutor`, `MuliuStepResult` | **不**修改计划或扩大能力。 |
 | [muliu_worker.py](../src/muliu_worker.py) | 内网 Worker：主动连接 Gateway，claim 已确认任务，本地重校验后执行。 | `MuliuWorker`, `GatewayWorkerClient` | **不**持有飞书 / AI 凭据。 |
-| [clear_notifier.py](../src/clear_notifier.py) / [outbound_events.py](../src/outbound_events.py) | 清档事件：Gateway 生成并写入发件箱，Worker 拉取后投递到内网服务。 | `ClearEventPublisher`, `ClearEventRelay`, `OutboundEventStore` | **不**影响操作执行结果。 |
+| [clear_notifier.py](../src/clear_notifier.py) | 清档企微推送：计划含清档脚本时，在生成计划和确认执行两个时机推送企微群消息。 | `ClearNotifier` | **不**影响操作执行结果。 |
 | [worker_protocol.py](../src/worker_protocol.py) | Gateway 与 Worker 之间的结果序列化、反序列化与计划比对。 | `serialize_execution_result`, `validate_execution_result_matches_plan` | **不**接触 Muliu。 |
 
 ### 2.4 知识问答与环境

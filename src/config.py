@@ -236,20 +236,13 @@ DEFAULT_CLEAR_TRIGGER_PATHS = (
 
 @dataclass(frozen=True)
 class ClearNotificationConfig:
-    """Clear-data events (prepared / executing), relayed to an intranet endpoint.
-
-    Gateway uses ``enabled`` / ``trigger_paths`` / ``max_event_age_seconds`` to
-    record events; the Worker (or ``local`` role) uses ``webhook_url`` /
-    ``secret`` / ``timeout_seconds`` / ``poll_interval_seconds`` to deliver them.
-    """
+    """Clear-data notices (prepared / executing) pushed by the Gateway to a WeCom group robot."""
 
     enabled: bool = False
     webhook_url: str = ""
-    secret: str = ""
+    mention_all: bool = True
     timeout_seconds: float = 5.0
     trigger_paths: tuple[str, ...] = DEFAULT_CLEAR_TRIGGER_PATHS
-    poll_interval_seconds: float = 5.0
-    max_event_age_seconds: int = 3600
 
 
 @dataclass(frozen=True)
@@ -400,15 +393,14 @@ def _load_ai_model(raw: Any, *, section: str, defaults: AIConfig | None = None) 
     )
 
 
-def _load_clear_notification(raw: Any, *, runtime_role: str) -> ClearNotificationConfig:
+def _load_clear_notification(raw: Any) -> ClearNotificationConfig:
     if not isinstance(raw, dict):
         raise ConfigError("clear_notification section must be a JSON object")
     enabled = bool(raw.get("enabled", False))
     webhook_url = str(raw.get("webhook_url", "")).strip()
-    # Gateway only records events; whoever delivers them (worker / local) needs the URL.
-    if enabled and runtime_role in ("worker", "local") and not webhook_url:
-        raise ConfigError("clear_notification.enabled 为 true 时，{} 角色必须填写 webhook_url".format(runtime_role))
-    if enabled and webhook_url and not webhook_url.startswith(("http://", "https://")):
+    if enabled and not webhook_url:
+        raise ConfigError("clear_notification.enabled 为 true 时必须填写 webhook_url")
+    if enabled and not webhook_url.startswith(("http://", "https://")):
         raise ConfigError("clear_notification.webhook_url 必须以 http:// 或 https:// 开头")
     trigger_paths = raw.get("trigger_paths", list(DEFAULT_CLEAR_TRIGGER_PATHS))
     if not isinstance(trigger_paths, list) or not trigger_paths or not all(isinstance(item, str) and item for item in trigger_paths):
@@ -416,17 +408,11 @@ def _load_clear_notification(raw: Any, *, runtime_role: str) -> ClearNotificatio
     return ClearNotificationConfig(
         enabled=enabled,
         webhook_url=webhook_url,
-        secret=str(raw.get("secret", "")),
+        mention_all=bool(raw.get("mention_all", True)),
         timeout_seconds=_require_positive_number(
             float(raw.get("timeout_seconds", 5)), "clear_notification.timeout_seconds"
         ),
         trigger_paths=tuple(trigger_paths),
-        poll_interval_seconds=_require_positive_number(
-            float(raw.get("poll_interval_seconds", 5)), "clear_notification.poll_interval_seconds"
-        ),
-        max_event_age_seconds=_require_positive_integer(
-            int(raw.get("max_event_age_seconds", 3600)), "clear_notification.max_event_age_seconds"
-        ),
     )
 
 
@@ -572,7 +558,7 @@ def load_config(path: str | Path = "config/config.json") -> AppConfig:
         raise ConfigError("execution_interpretation section must be a JSON object")
     if not isinstance(admin_raw, dict):
         raise ConfigError("admin section must be a JSON object")
-    clear_notification = _load_clear_notification(clear_notification_raw, runtime_role=runtime.role)
+    clear_notification = _load_clear_notification(clear_notification_raw)
 
     ai_routes: dict[str, AIPoolConfig] = {}
     if not ai_raw and runtime.role == "worker":
