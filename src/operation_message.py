@@ -27,6 +27,14 @@ _COOKIE_HEADER_PATTERN = re.compile(r"(?im)^\s*(?:set-)?cookie\s*:\s*.*$")
 _DATABASE_CONNECTION_PATTERN = re.compile(
     r"(?i)\b(?:jdbc:)?(?:mysql|postgres(?:ql)?|mongodb(?:\+srv)?|redis|amqp|mssql|oracle)://[^\s'\"`]+"
 )
+# Cloud database hosts printed by scripts, e.g. MongoClient(host=['dds-x.mongodb.rds.aliyuncs.com:3717']).
+_DATABASE_HOST_LIST_PATTERN = re.compile(r"(?i)\b(MongoClient\(host=)\[[^\]]*\]")
+_DATABASE_HOST_PATTERN = re.compile(
+    r"(?i)\b[a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)*\.(?:rds|mongodb|redis|kvstore|polardb|dds)\.aliyuncs\.com(?::\d+)?"
+)
+# Internal domains and server host names that leak via error pages / script output.
+_INTERNAL_DOMAIN_PATTERN = re.compile(r"(?i)\b(?:https?://)?[a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)*\.newslg\.com(?::\d+)?(?:/[^\s<>\"']*)?")
+_INTERNAL_HOSTNAME_PATTERN = re.compile(r"(?i)\bnslg-ali-[a-z0-9-]+")
 _URL_CREDENTIAL_PATTERN = re.compile(r"\b([a-z][a-z0-9+.-]*://)[^\s/@:]+(?::[^\s/@]*)?@", re.IGNORECASE)
 _SENSITIVE_CONFIG_LINE_PATTERN = re.compile(
     r"(?im)^.*(?:config\.ini|(?<![A-Za-z0-9_-])\.env(?:\.[A-Za-z0-9_-]+)?|settings\.ini).*$"
@@ -240,8 +248,18 @@ def build_execution_status_card(
     result: MuliuExecutionResult,
     *,
     detail: str = "",
+    resume: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """Build a terminal card with a bounded, auditable result summary."""
+    if resume is not None and not result.succeeded and not result.result_unknown:
+        card = build_operation_status_card(
+            "测试服操作执行失败",
+            result.summary,
+            detail or result.failure_reason,
+            template="red",
+        )
+        card["elements"].extend(_resume_elements(resume))  # type: ignore[union-attr]
+        return card
     if result.succeeded:
         return build_operation_status_card(
             "测试服操作已完成",
@@ -262,6 +280,47 @@ def build_execution_status_card(
         detail or result.failure_reason,
         template="red",
     )
+
+
+def _resume_elements(resume: dict[str, object]) -> list[dict[str, object]]:
+    """Offer to continue steps that were proven never submitted (original requester only)."""
+    steps = [str(item) for item in resume.get("steps", [])]  # type: ignore[union-attr]
+    from_step = int(resume["from_step"])  # type: ignore[arg-type]
+    listing = "\n".join("{}. {}".format(from_step + index, step) for index, step in enumerate(steps))
+    return [
+        {"tag": "hr"},
+        {
+            "tag": "note",
+            "elements": [{
+                "tag": "plain_text",
+                "content": mask_sensitive_operation_data(
+                    "第 {} 步未提交，前面的步骤已完成。可继续执行剩余步骤（仅原发起人、30 分钟内、限一次）：\n{}".format(
+                        from_step, listing
+                    )
+                ),
+            }],
+        },
+        {
+            "tag": "action",
+            "actions": [{
+                "tag": "button",
+                "type": "primary",
+                "text": {"tag": "plain_text", "content": "继续执行剩余 {} 步".format(len(steps))},
+                "value": {
+                    "action": "resume_operation",
+                    "request_message_id": str(resume["request_message_id"]),
+                    "confirmation_token": str(resume["confirmation_token"]),
+                },
+                "confirm": {
+                    "title": {"tag": "plain_text", "content": "继续执行剩余步骤"},
+                    "text": {
+                        "tag": "plain_text",
+                        "content": "将从第 {} 步开始提交剩余 {} 步，已完成的步骤不会重复执行。".format(from_step, len(steps)),
+                    },
+                },
+            }],
+        },
+    ]
 
 
 def _describe_job_failure(error: str) -> str:
@@ -353,6 +412,10 @@ def mask_sensitive_operation_data(text: str) -> str:
     text = _COOKIE_HEADER_PATTERN.sub("Cookie: [已脱敏]", text)
     text = _BEARER_TOKEN_PATTERN.sub("Bearer [已脱敏]", text)
     text = _DATABASE_CONNECTION_PATTERN.sub("[数据库连接已脱敏]", text)
+    text = _DATABASE_HOST_LIST_PATTERN.sub(r"\1[数据库主机]", text)
+    text = _DATABASE_HOST_PATTERN.sub("[数据库主机]", text)
+    text = _INTERNAL_DOMAIN_PATTERN.sub("[内部域名]", text)
+    text = _INTERNAL_HOSTNAME_PATTERN.sub("[内部主机]", text)
     text = _INTERNAL_IP_PATTERN.sub("[内部主机]", text)
     text = _URL_CREDENTIAL_PATTERN.sub(r"\1[已脱敏]@", text)
     text = _SENSITIVE_VALUE_PATTERN.sub(r"\1[已脱敏]", text)

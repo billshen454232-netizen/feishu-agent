@@ -46,6 +46,9 @@ from .worker_protocol import parse_execution_result, serialize_execution_result
 
 logger = logging.getLogger(__name__)
 
+# How long a "continue remaining steps" offer stays valid after a failed result.
+RESUME_OFFER_SECONDS = 1800
+
 
 @dataclass(frozen=True)
 class QueueItem:
@@ -369,6 +372,15 @@ class MessageJobProcessor:
                 template="grey",
             )
 
+        if action == "resume_operation":
+            return await self._resume_remaining_steps(
+                request_message_id=request_message_id,
+                confirmation_message_id=confirmation_message_id,
+                chat_id=chat_id,
+                user_id=user_id,
+                token=confirmation_token,
+            )
+
         if action != "confirm_operation":
             return None
         pending_job = self._store.claim_card_confirmation(
@@ -610,7 +622,11 @@ class MessageJobProcessor:
             fallback_reply = "⚠️ 按已审核模板判定：查询完成，服务器状态存疑（机器终态仍为失败）\n\n{}".format(fallback_reply)
             status_card = build_execution_warning_card(result, detail=presentation.detail)
         else:
-            status_card = build_execution_status_card(result, detail=presentation.detail)
+            status_card = build_execution_status_card(
+                result,
+                detail=presentation.detail,
+                resume=self._offer_resume(pending_job, result),
+            )
         await self.deliver_execution_result(
             pending_job,
             reply_message_id,
@@ -876,10 +892,17 @@ class MessageJobProcessor:
         reply_text: str = "",
     ) -> None:
         """Refresh only the explanation of an already-delivered result."""
+        consumed = getattr(self._store, "resume_consumed", None)
+        if callable(consumed) and consumed(job.message_id):
+            # The requester already continued the remaining steps; that card now tracks the new job.
+            return
         try:
             update_card = getattr(self._feishu_client, "update_card", None)
             if job.confirmation_method == "card" and job.confirmation_message_id and callable(update_card):
-                await update_card(job.confirmation_message_id, build_execution_status_card(result, detail=detail))
+                await update_card(
+                    job.confirmation_message_id,
+                    build_execution_status_card(result, detail=detail, resume=self._resume_card_info(job)),
+                )
             elif reply_text:
                 await self._feishu_client.reply_text(job.message_id, reply_text)
         except Exception:  # noqa: BLE001
@@ -991,6 +1014,121 @@ class MessageJobProcessor:
             source_paths=tuple(source_paths),
         )
         return knowledge_ms, ai_ms, self._elapsed_ms(feishu_reply_started), local_knowledge_hit
+
+    def _offer_resume(self, job: Any, result: MuliuExecutionResult) -> dict[str, object] | None:
+        """Record a one-time continue offer when the failed step was proven never submitted."""
+        from_step = result.resumable_from_step
+        offer = getattr(self._store, "offer_resume", None)
+        if not from_step or job.confirmation_method != "card" or not callable(offer):
+            return None
+        try:
+            remaining = parse_plan(job.plan_json, max_steps=self._config.muliu.max_steps).steps[from_step - 1:]
+        except MuliuPlanError:
+            return None
+        if not remaining:
+            return None
+        token = secrets.token_hex(8)
+        offer(job.message_id, from_step, token)
+        return {
+            "request_message_id": job.message_id,
+            "confirmation_token": token,
+            "from_step": from_step,
+            "steps": [step.description for step in remaining],
+        }
+
+    def _resume_card_info(self, job: Any) -> dict[str, object] | None:
+        getter = getattr(self._store, "get_resume_offer", None)
+        offer = getter(job.message_id) if callable(getter) else None
+        if offer is None:
+            return None
+        from_step, token = offer
+        try:
+            remaining = parse_plan(job.plan_json, max_steps=self._config.muliu.max_steps).steps[from_step - 1:]
+        except MuliuPlanError:
+            return None
+        return {
+            "request_message_id": job.message_id,
+            "confirmation_token": token,
+            "from_step": from_step,
+            "steps": [step.description for step in remaining],
+        }
+
+    async def _resume_remaining_steps(
+        self,
+        *,
+        request_message_id: str,
+        confirmation_message_id: str,
+        chat_id: str,
+        user_id: str,
+        token: str,
+    ) -> dict[str, object] | None:
+        """Continue the never-submitted steps of a failed plan, cut deterministically from the stored plan."""
+        original = self._store.get(request_message_id)
+        if original is None:
+            return None
+        from_step = self._store.claim_resume(
+            request_message_id,
+            confirmation_message_id=confirmation_message_id,
+            chat_id=chat_id,
+            user_id=user_id,
+            token=token,
+            max_age_seconds=RESUME_OFFER_SECONDS,
+        )
+        if from_step is None:
+            return None
+        try:
+            plan = parse_plan(original.plan_json, max_steps=self._config.muliu.max_steps)
+            steps = plan.steps[from_step - 1:]
+            if not steps:
+                raise MuliuPlanError("没有可继续执行的步骤")
+            remaining = MuliuPlan(
+                summary="{}（继续：第 {}–{} 步）".format(plan.summary, from_step, len(plan.steps)),
+                steps=list(steps),
+                kind=plan.kind,
+                route_scope=plan.route_scope,
+            )
+            if self._muliu_firewall is not None:
+                self._muliu_firewall.validate(remaining)
+            if self._route_resolver is not None:
+                snapshot = self._resolve_route_snapshot(remaining)
+                if snapshot.region != original.route_region:
+                    raise MuliuRoutingError("剩余步骤的路由与原计划不一致")
+        except (MuliuPlanError, MuliuFirewallError, MuliuRoutingError) as exc:
+            logger.warning("resume rejected message_id=%s error=%s", request_message_id, exc)
+            return build_operation_status_card(
+                "测试服操作未继续",
+                original.text,
+                "剩余步骤未通过校验，未执行任何操作：{}".format(exc),
+                template="red",
+            )
+
+        resume_job = self._store.create_resume_job(
+            original,
+            "{}-r{}".format(original.message_id, from_step),
+            text="继续执行第 {}–{} 步：{}".format(from_step, len(plan.steps), original.text),
+            plan_json=_plan_to_json(remaining),
+        )
+        if resume_job is None:
+            return None
+        self._append_conversation_log(resume_job, "operation_resumed", "继续执行剩余步骤：{}".format(remaining.summary))
+        accepted = await self._start_claimed_confirmation(resume_job, resume_job.confirmation_message_id, confirmer_id=user_id)
+        if not accepted:
+            return build_operation_status_card(
+                "测试服操作未继续",
+                resume_job.text,
+                "剩余步骤未进入执行队列。",
+                template="red",
+            )
+        return build_operation_status_card(
+            "测试服操作已提交（继续执行剩余步骤）",
+            remaining.summary,
+            "\n".join(
+                ["将从第 {} 步继续，已完成的步骤不会重复执行：".format(from_step)]
+                + ["{}. {}".format(from_step + index, step.description) for index, step in enumerate(steps)]
+                + ["请勿重复确认或重试。"]
+            ),
+            template="blue",
+        )
 
     def _schedule_background(self, coroutine: Any) -> None:
         task = asyncio.create_task(coroutine)

@@ -179,6 +179,7 @@ def _create_worker_app(config: Any) -> FastAPI:
             config.execution_interpretation.server_environments_path,
             call_contracts,
         ),
+        call_contracts=call_contracts,
     )
 
     @asynccontextmanager

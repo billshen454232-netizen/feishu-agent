@@ -758,3 +758,123 @@ async def test_non_clear_plan_and_push_failure_do_not_affect_flow(tmp_path):
     processor._notify_clear("clear_prepared", job, MuliuPlan(summary="s", steps=[MuliuStep("/home/serverGeneralScript/clear", ["2213"], "d")]), "cn", operator_id="ou_user")
     await processor.wait_for_background()
     assert len(calls) == 1  # 503 → logged, nothing raised
+
+
+def _resume_setup(tmp_path, *, region="overseas"):
+    from src.config import RuntimeConfig
+    from src.muliu_plan import MuliuPlan, MuliuPlanKind, MuliuStep
+    from src.muliu_routing import MuliuRouteSnapshot
+
+    plan = MuliuPlan(
+        summary="5001 清档改配置启服",
+        kind=MuliuPlanKind.OPERATION,
+        steps=[
+            MuliuStep("/home/serverGeneralScript/clear", ["5001"], "清档 5001"),
+            MuliuStep("/home/serverGeneralScript/modify_game_config.sh", ["5001", "7", "14"], "设置赛季 7 剧本 14"),
+            MuliuStep("/home/serverGeneralScript/start", ["5001"], "启服 5001"),
+        ],
+    )
+
+    class Firewall:
+        def __init__(self):
+            self.plans = []
+
+        def validate(self, plan):
+            self.plans.append(plan)
+
+    class Resolver:
+        def resolve(self, plan):
+            return MuliuRouteSnapshot.from_region(region)
+
+    from src.message_worker import _plan_to_json
+
+    store = MessageJobStore(tmp_path / "jobs.sqlite3")
+    store.initialize()
+    store.create_if_new("om_r", "evt_r", "oc_group", "ou_user", "海外服5001清档 切到赛季7剧本14 然后启服", chat_type="group")
+    store.mark_awaiting_confirmation(
+        "om_r", plan_json=_plan_to_json(plan), confirmation_message_id="card_r",
+        confirmation_token="tok", confirmation_method="card", route_region="overseas",
+    )
+    store.mark_failed("om_r", "第 2/3 步未执行")
+    firewall = Firewall()
+    feishu = FakeCardFeishuClient()
+    processor = MessageJobProcessor(
+        make_config(runtime=RuntimeConfig(role="gateway", worker_token="t")),
+        store, ConversationStore(4), FakeAIClient(), feishu,
+        muliu_firewall=firewall, route_resolver=Resolver(),
+    )
+    result = MuliuExecutionResult(
+        summary=plan.summary,
+        step_results=[MuliuStepResult(1, "清档 5001", "/home/serverGeneralScript/clear", ["5001"], True, "AI_OP_END status=success\nEND")],
+        failed_step_number=2,
+        failure_reason="第 2/3 步「设置赛季 7 剧本 14」未执行：Muliu 请求超时",
+        resumable_from_step=2,
+    )
+    return store, processor, feishu, firewall, result
+
+
+def _resume_button(card):
+    for element in card["elements"]:
+        if element.get("tag") == "action":
+            return element["actions"][0]
+    return None
+
+
+@pytest.mark.asyncio
+async def test_unsubmitted_step_offers_continue_button_and_requester_resumes_once(tmp_path):
+    store, processor, feishu, firewall, result = _resume_setup(tmp_path)
+
+    await processor.present_execution_result(store.get("om_r"), result, "card_r")
+    card = feishu.card_updates[-1][1]
+    button = _resume_button(card)
+    assert button["text"]["content"] == "继续执行剩余 2 步"
+    value = button["value"]
+    assert value["action"] == "resume_operation"
+
+    async def click(user_id="ou_user", token=value["confirmation_token"]):
+        return await processor.process_card_action(
+            action="resume_operation", request_message_id="om_r", confirmation_message_id="card_r",
+            chat_id="oc_group", user_id=user_id, confirmation_token=token,
+        )
+
+    assert await click(user_id="ou_other") is None
+    assert await click(token="forged") is None
+    submitted = await click()
+    assert submitted["header"]["title"]["content"] == "测试服操作已提交（继续执行剩余步骤）"
+
+    resumed = store.get("om_r-r2")
+    assert resumed.status == "queued_for_worker"
+    assert resumed.confirmation_message_id == "card_r" and resumed.route_region == "overseas"
+    import json as _json
+    steps = _json.loads(resumed.plan_json)["steps"]
+    assert [s["description"] for s in steps] == ["设置赛季 7 剧本 14", "启服 5001"]
+    assert len(firewall.plans) == 1
+    assert await click() is None  # one-time
+    assert store.get("om_r").status == "failed"
+
+
+@pytest.mark.asyncio
+async def test_resume_rejected_when_route_differs_and_offer_expires(tmp_path):
+    store, processor, feishu, _firewall, result = _resume_setup(tmp_path, region="cn")
+    await processor.present_execution_result(store.get("om_r"), result, "card_r")
+    token = _resume_button(feishu.card_updates[-1][1])["value"]["confirmation_token"]
+
+    card = await processor.process_card_action(
+        action="resume_operation", request_message_id="om_r", confirmation_message_id="card_r",
+        chat_id="oc_group", user_id="ou_user", confirmation_token=token,
+    )
+    assert card["header"]["title"]["content"] == "测试服操作未继续"
+    assert store.get("om_r-r2") is None
+
+    store.offer_resume("om_r", 2, "tok2", now=0)
+    assert store.claim_resume("om_r", confirmation_message_id="card_r", chat_id="oc_group", user_id="ou_user", token="tok2", max_age_seconds=1800) is None
+
+
+@pytest.mark.asyncio
+async def test_failure_without_resumable_step_has_no_button(tmp_path):
+    store, processor, feishu, _firewall, result = _resume_setup(tmp_path)
+    from dataclasses import replace as _replace
+
+    await processor.present_execution_result(store.get("om_r"), _replace(result, resumable_from_step=None), "card_r")
+
+    assert _resume_button(feishu.card_updates[-1][1]) is None

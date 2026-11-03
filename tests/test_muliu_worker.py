@@ -532,3 +532,88 @@ def test_serialized_result_round_trip_is_bounded_to_protocol_shape():
 
     assert payload["summary"] == plan.summary
     assert payload["step_results"][0]["args"] == ["6001"]
+
+
+def _claimed(plan):
+    return ClaimedWorkerJob("om_request", plan_json(plan), "overseas")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transient, expected_runs", [(True, 2), (False, 1)])
+async def test_worker_retries_read_only_plan_once_on_transient_failure(tmp_path, monkeypatch, transient, expected_runs):
+    plan = make_plan()
+    runs = []
+
+    class FlakyExecutor:
+        def __init__(self, config):
+            pass
+
+        async def execute_plan(self, plan):
+            runs.append(plan)
+            if len(runs) == 1:
+                return MuliuExecutionResult(
+                    summary=plan.summary, step_results=[], failed_step_number=1,
+                    failure_reason="第 1/1 步未执行：Muliu 请求超时", transient_error=transient,
+                )
+            return success_result(plan)
+
+    monkeypatch.setattr("src.muliu_worker.MuliuExecutor", FlakyExecutor)
+    resolver = make_route_resolver(tmp_path)
+    gateway = RecordingGatewayClient()
+    worker = MuliuWorker(make_config(), AcceptAllFirewall(), gateway, resolver, call_contracts=resolver._call_contracts)
+
+    await worker._execute_claimed_job(_claimed(plan))
+
+    assert len(runs) == expected_runs
+    assert gateway.results[0][1].succeeded is transient
+
+
+@pytest.mark.asyncio
+async def test_worker_never_retries_write_plans(tmp_path, monkeypatch):
+    from src.muliu_script_catalog import MuliuCallContract
+
+    plan = make_plan()
+    runs = []
+
+    class FailingExecutor:
+        def __init__(self, config):
+            pass
+
+        async def execute_plan(self, plan):
+            runs.append(plan)
+            return MuliuExecutionResult(summary=plan.summary, step_results=[], result_unknown_reason="未知", transient_error=True)
+
+    monkeypatch.setattr("src.muliu_worker.MuliuExecutor", FailingExecutor)
+    resolver = make_route_resolver(tmp_path)
+    write_contracts = MuliuCallContracts(
+        max_plan_steps=1,
+        contracts=tuple(
+            MuliuCallContract(c.name, c.path, c.args, c.variable_patterns, c.runner, "write", c.route_scopes)
+            for c in resolver._call_contracts.contracts
+        ),
+    )
+    worker = MuliuWorker(make_config(), AcceptAllFirewall(), RecordingGatewayClient(), resolver, call_contracts=write_contracts)
+
+    await worker._execute_claimed_job(_claimed(plan))
+
+    assert len(runs) == 1
+
+
+def test_resumable_step_round_trips_and_is_validated():
+    from src.worker_protocol import WorkerProtocolError, parse_execution_result
+
+    plan = MuliuPlan(summary="s", kind=MuliuPlanKind.OPERATION, steps=[
+        MuliuStep("/home/serverGeneralScript/basic_info.sh", ["6001"], "a"),
+        MuliuStep("/home/serverGeneralScript/basic_info.sh", ["6002"], "b"),
+    ])
+    done = success_result(make_plan()).step_results
+    result = MuliuExecutionResult(summary="s", step_results=done, failed_step_number=2, failure_reason="第 2/2 步未执行", resumable_from_step=2)
+
+    payload = serialize_execution_result(result)
+    parsed = parse_execution_result(payload, max_steps=10)
+
+    assert payload["resumable_from_step"] == 2
+    assert parsed.resumable_from_step == 2
+    assert "resumable_from_step" not in serialize_execution_result(success_result(make_plan()))
+    with pytest.raises(WorkerProtocolError, match="resumable_from_step"):
+        parse_execution_result(dict(payload, resumable_from_step=1), max_steps=10)

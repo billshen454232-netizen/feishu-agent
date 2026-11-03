@@ -128,6 +128,7 @@ class MuliuWorker:
         firewall: MuliuFirewall,
         gateway_client: GatewayWorkerClient,
         route_resolver: MuliuPlanRouteResolver,
+        call_contracts: Any | None = None,
     ) -> None:
         if config.runtime.role != "worker":
             raise ValueError("MuliuWorker 只能在 runtime.role=worker 时运行")
@@ -135,6 +136,7 @@ class MuliuWorker:
         self._firewall = firewall
         self._gateway_client = gateway_client
         self._route_resolver = route_resolver
+        self._call_contracts = call_contracts
         self._stopping = False
 
     async def run_forever(self) -> None:
@@ -187,7 +189,7 @@ class MuliuWorker:
             return
 
         routed_executor = MuliuExecutor(routed_config)
-        execution_task = asyncio.create_task(routed_executor.execute_plan(plan))
+        execution_task = asyncio.create_task(self._execute_with_read_only_retry(routed_executor, plan, job.message_id))
         heartbeat_task = asyncio.create_task(self._heartbeat_until_done(job.message_id, execution_task))
         try:
             result = await execution_task
@@ -213,6 +215,7 @@ class MuliuWorker:
                 failure_reason=str(exc),
             )
         except Exception as exc:  # noqa: BLE001 - execution may have reached Muliu
+            logger.exception("worker execution crashed message_id=%s", job.message_id)
             result = MuliuExecutionResult(
                 summary=plan.summary,
                 step_results=[],
@@ -225,6 +228,23 @@ class MuliuWorker:
         accepted = await self._gateway_client.submit_result(job.message_id, result)
         if not accepted:
             logger.error("gateway no longer accepts result message_id=%s", job.message_id)
+
+    async def _execute_with_read_only_retry(self, executor: MuliuExecutor, plan: Any, message_id: str) -> MuliuExecutionResult:
+        """Read-only plans that failed on Muliu transport trouble are re-run once (no side effects)."""
+        result = await executor.execute_plan(plan)
+        if (
+            not result.succeeded
+            and result.transient_error
+            and self._call_contracts is not None
+            and self._call_contracts.is_read_only(plan)
+        ):
+            logger.warning(
+                "read-only plan failed transiently, retrying once message_id=%s reason=%s",
+                message_id,
+                result.failure_reason or result.result_unknown_reason,
+            )
+            result = await executor.execute_plan(plan)
+        return result
 
     async def _heartbeat_until_done(self, message_id: str, execution_task: asyncio.Task[MuliuExecutionResult]) -> None:
         while not execution_task.done():

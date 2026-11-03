@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 import html
 import json
+import logging
 import re
 import time
 from dataclasses import dataclass
+from http.client import HTTPException
 from http.cookiejar import CookieJar
-from typing import Any
+from typing import Any, Callable, TypeVar
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import HTTPCookieProcessor, Request, build_opener
@@ -25,6 +27,15 @@ _DISPATCHER_TERMINAL_MARKER_RE = re.compile(
     r"AI_OP_END\s+status=(?:success|failed)(?:\s+error=.*)?"
 )
 _MULIU_TASK_END_RE = re.compile(r"^END\s*$", flags=re.MULTILINE)
+# Unique per Muliu task run; used to tell "a new run started" from "stale previous log".
+_RUN_MARKER_RE = re.compile(r"^MULIU_RUN_VERSION:\s*(\S+)", flags=re.MULTILINE)
+# Pre-submission requests (read version, save arguments) are safe to retry: nothing runs yet.
+PRE_SUBMIT_ATTEMPTS = 3
+# After a lost execute response, how many log polls to look for a new run before deciding.
+SUBMISSION_RECONCILE_POLLS = 6
+
+logger = logging.getLogger(__name__)
+_T = TypeVar("_T")
 
 
 class MuliuExecutionError(RuntimeError):
@@ -44,12 +55,20 @@ class MuliuSubmissionUnknownError(MuliuExecutionError):
 
 
 class MuliuHttpResponseError(MuliuExecutionError):
-    """Raised when Muliu returned an HTTP error response."""
+    """Raised when Muliu returned an HTTP error response.
+
+    The message keeps only the status and a short page title; the raw body
+    (often a full HTML error page with internal hosts) stays in ``body``.
+    """
 
     def __init__(self, status: int, body: str) -> None:
         self.status = status
         self.body = body
-        super().__init__("Muliu HTTP {}: {}".format(status, body))
+        super().__init__("Muliu HTTP {}：{}".format(status, _brief_http_body(body)))
+
+
+class MuliuSessionExpiredError(MuliuExecutionError):
+    """Muliu redirected to its login page: the session was dropped or expired."""
 
 
 class MuliuTransportError(MuliuExecutionError):
@@ -84,6 +103,12 @@ class MuliuExecutionResult:
     failed_step_number: int | None = None
     failure_reason: str = ""
     result_unknown_reason: str = ""
+    # Set only when the failed step was proven never submitted: steps from here
+    # can be offered to the requester as "continue remaining steps".
+    resumable_from_step: int | None = None
+    # Worker-local: the failure came from Muliu transport/HTTP trouble, not from
+    # the script's own terminal marker. Never serialized.
+    transient_error: bool = False
 
     @property
     def succeeded(self) -> bool:
@@ -130,12 +155,23 @@ class MuliuHttpClient:
     def execute_step(self, step: MuliuStep) -> str:
         accepted = False
         try:
-            version = self.get_current_version()
-            self.save_arguments(version, step)
-            version = self.get_current_version()
-            self.execute_task(version)
+            previous_run = self.latest_run_marker()
+            version = self.retry_before_submit(self.get_current_version, "读取任务版本")
+            self.retry_before_submit(lambda: self.save_arguments(version, step), "保存执行参数")
+            version = self.retry_before_submit(self.get_current_version, "读取任务版本")
+            try:
+                self.execute_task(version)
+            except MuliuSubmissionUnknownError:
+                started = self.wait_for_new_run(previous_run)
+                if started is False:
+                    raise MuliuExecutionError(
+                        "提交请求未得到 Muliu 响应，且随后未出现新的运行记录，判定本步未执行"
+                    )
+                if started is None:
+                    raise
+                logger.warning("muliu execute response lost but a new run started; continuing")
             accepted = True
-            return self.wait_for_completed_step_log()
+            return self.wait_for_completed_step_log(previous_run)
         except MuliuSubmittedError:
             raise
         except MuliuSubmissionUnknownError as exc:
@@ -143,13 +179,41 @@ class MuliuHttpClient:
         except MuliuExecutionError as exc:
             raise MuliuSubmittedError(exc, submitted=accepted) from exc
 
-    def wait_for_completed_step_log(self) -> str:
+    def retry_before_submit(self, action: Callable[[], _T], label: str) -> _T:
+        return retry_before_submit(action, label, delay_seconds=self._config.log_wait_seconds)
+
+    def latest_run_marker(self) -> str | None:
+        """Marker of the latest Muliu run; ``""`` when none exists, ``None`` when unreadable."""
+        try:
+            return run_marker(self.get_latest_step_log())
+        except MuliuLogPendingError:
+            return ""
+        except MuliuExecutionError:
+            return None
+
+    def wait_for_new_run(self, previous_run: str | None) -> bool | None:
+        """After a lost execute response: True if a new run appeared, False if not, None if unknowable."""
+        if previous_run is None:
+            return None
+        for poll in range(SUBMISSION_RECONCILE_POLLS):
+            current = self.latest_run_marker()
+            if current is None:
+                return None
+            if current and current != previous_run:
+                return True
+            if poll < SUBMISSION_RECONCILE_POLLS - 1:
+                time.sleep(self._config.log_wait_seconds)
+        return False
+
+    def wait_for_completed_step_log(self, previous_run: str | None = None) -> str:
         """Wait for the selected Muliu task run to emit a dispatcher terminal marker.
 
         The Muliu log endpoint can return live ``Running`` output before the
         child script has ended. That is an in-progress state, not a failed script.
         Accept a result only after both the Task wrapper and dispatcher have
-        reached their terminal markers.
+        reached their terminal markers. A log still carrying ``previous_run``'s
+        marker belongs to the previous step and is ignored. Transient read
+        failures are retried until the deadline (polling is read-only).
         """
         interval_seconds = self._config.log_wait_seconds
         timeout_seconds = self._config.log_completion_timeout_seconds
@@ -160,6 +224,13 @@ class MuliuHttpClient:
             try:
                 latest_log = self.get_latest_step_log()
             except MuliuLogPendingError:
+                latest_log = ""
+            except (MuliuTransportError, MuliuHttpResponseError) as exc:
+                if isinstance(exc, MuliuHttpResponseError) and exc.status < 500:
+                    raise
+                logger.warning("muliu log poll failed, will retry error=%s", exc)
+                latest_log = ""
+            if latest_log and previous_run and run_marker(latest_log) == previous_run:
                 latest_log = ""
             if latest_log and is_completed_step_log(latest_log):
                 return latest_log
@@ -184,6 +255,15 @@ class MuliuHttpClient:
         return version
 
     def save_arguments(self, version: int, step: MuliuStep) -> None:
+        """Save the step's arguments; re-login once if the session dropped (nothing runs yet)."""
+        try:
+            self._save_arguments_once(version, step)
+        except MuliuSessionExpiredError:
+            logger.warning("muliu session expired before submit, logging in again")
+            self.login()
+            self._save_arguments_once(version, step)
+
+    def _save_arguments_once(self, version: int, step: MuliuStep) -> None:
         execution_request = json.dumps(
             {"path": step.path, "args": step.args},
             ensure_ascii=False,
@@ -217,7 +297,8 @@ class MuliuHttpClient:
                 },
                 include_csrf=True,
             )
-        except (MuliuTransportError, MuliuHttpResponseError) as exc:
+        except (MuliuTransportError, MuliuHttpResponseError, MuliuSessionExpiredError) as exc:
+            # Never resubmit blindly: the caller reconciles against Muliu's run marker.
             raise MuliuSubmissionUnknownError(
                 "提交受控 Muliu 任务时未取得可确认的 Muliu 接受结果；远端可能已开始执行，请勿重复确认或重试：{}".format(exc)
             ) from exc
@@ -253,9 +334,14 @@ class MuliuHttpClient:
 
     def _request_read_json_with_session_recovery(self, path: str) -> tuple[int, Any]:
         """Retry one safe task-read request after an expired Muliu session."""
-        status, result = self.request_json("GET", path)
-        if not _is_muliu_login_page(result):
+        try:
+            status, result = self.request_json("GET", path)
+            expired = _is_muliu_login_page(result)
+        except MuliuSessionExpiredError:
+            expired = True
+        if not expired:
             return status, result
+        logger.warning("muliu session expired on read, logging in again")
 
         self.login()
         status, result = self.request_json("GET", path)
@@ -332,9 +418,14 @@ class MuliuHttpClient:
                 exc.read(),
                 exc.headers.get_content_charset() if exc.headers else None,
             )
+            if "/muliu/login" in str(getattr(exc, "url", "") or exc.geturl() or "") and not path.startswith("/muliu/login"):
+                raise MuliuSessionExpiredError("Muliu 会话已失效（被重定向到登录页，HTTP {}）".format(exc.code)) from exc
             raise MuliuHttpResponseError(exc.code, text) from exc
         except URLError as exc:
             raise MuliuTransportError("Muliu 请求失败：{}".format(exc.reason)) from exc
+        except (TimeoutError, ConnectionError, HTTPException) as exc:
+            # A read timeout after the connection is up is not wrapped in URLError.
+            raise MuliuTransportError("Muliu 请求超时或连接中断：{}".format(exc)) from exc
 
 
 class MuliuExecutor:
@@ -353,24 +444,39 @@ class MuliuExecutor:
 
     def _execute_plan_blocking(self, plan: MuliuPlan) -> MuliuExecutionResult:
         client = MuliuHttpClient(self._config)
-        client.login()
+        retry_before_submit(client.login, "登录", delay_seconds=self._config.log_wait_seconds)
         results: list[MuliuStepResult] = []
+        total = len(plan.steps)
 
         for step_number, step in enumerate(plan.steps, start=1):
+            label = "第 {}/{} 步「{}」".format(step_number, total, step.description)
             try:
                 log = client.execute_step(step)
             except MuliuSubmittedError as exc:
                 if exc.submitted:
+                    logger.warning("muliu step result unknown step=%s/%s error=%s", step_number, total, exc)
                     return MuliuExecutionResult(
                         summary=plan.summary,
                         step_results=results,
-                        result_unknown_reason=str(exc),
+                        result_unknown_reason="{}已提交，结果未知：{}".format(label, exc),
+                        transient_error=True,
                     )
+                logger.warning("muliu step not executed step=%s/%s error=%s", step_number, total, exc)
                 return MuliuExecutionResult(
                     summary=plan.summary,
                     step_results=results,
                     failed_step_number=step_number,
-                    failure_reason=str(exc),
+                    failure_reason="{}未执行：{}".format(label, exc),
+                    resumable_from_step=step_number,
+                    transient_error=True,
+                )
+            except Exception as exc:  # noqa: BLE001 - keep completed steps; this step may have run
+                logger.exception("muliu step crashed step=%s/%s", step_number, total)
+                return MuliuExecutionResult(
+                    summary=plan.summary,
+                    step_results=results,
+                    result_unknown_reason="{}执行时发生异常，是否已执行未知：{}；请勿重复确认或重试".format(label, exc),
+                    transient_error=True,
                 )
             step_succeeded, failure_reason = interpret_script_outcome(log)
             results.append(
@@ -422,6 +528,33 @@ class MuliuExecutor:
                     )
 
         return MuliuExecutionResult(summary=plan.summary, step_results=results)
+
+
+def _brief_http_body(body: str, limit: int = 120) -> str:
+    """Page title or a short tag-free excerpt of an HTTP error body."""
+    title = re.search(r"(?is)<title>(.*?)</title>", body or "")
+    text = title.group(1) if title else re.sub(r"(?s)<[^>]+>", " ", body or "")
+    text = re.sub(r"\s+", " ", html.unescape(text)).strip()
+    return text[:limit] or "（无内容）"
+
+
+def retry_before_submit(action: Callable[[], _T], label: str, *, delay_seconds: float) -> _T:
+    """Retry a request made before ``execute``: nothing has run yet, so it is safe."""
+    for attempt in range(1, PRE_SUBMIT_ATTEMPTS + 1):
+        try:
+            return action()
+        except (MuliuTransportError, MuliuHttpResponseError) as exc:
+            retryable = isinstance(exc, MuliuTransportError) or exc.status >= 500
+            if not retryable or attempt == PRE_SUBMIT_ATTEMPTS:
+                raise
+            logger.warning("muliu %s failed, retrying attempt=%s/%s error=%s", label, attempt, PRE_SUBMIT_ATTEMPTS, exc)
+            time.sleep(delay_seconds)
+    raise AssertionError("unreachable")
+
+
+def run_marker(log: str) -> str:
+    match = _RUN_MARKER_RE.search(log or "")
+    return match.group(1) if match else ""
 
 
 def is_completed_step_log(log: str) -> bool:

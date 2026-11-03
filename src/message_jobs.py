@@ -90,6 +90,10 @@ class MessageJobStore:
             self._add_column_if_missing(conn, "planning_ms", "INTEGER NOT NULL DEFAULT 0")
             self._add_column_if_missing(conn, "planning_calls", "INTEGER NOT NULL DEFAULT 0")
             self._add_column_if_missing(conn, "user_name", "TEXT NOT NULL DEFAULT ''")
+            self._add_column_if_missing(conn, "resume_token", "TEXT NOT NULL DEFAULT ''")
+            self._add_column_if_missing(conn, "resume_from_step", "INTEGER")
+            self._add_column_if_missing(conn, "resume_offered_at", "INTEGER")
+            self._add_column_if_missing(conn, "resume_used", "INTEGER NOT NULL DEFAULT 0")
             conn.commit()
 
     def create_if_new(
@@ -458,6 +462,102 @@ class MessageJobStore:
                 return None
             conn.commit()
         return self._row_to_job(row)
+
+    def offer_resume(self, message_id: str, from_step: int, token: str, now: int | None = None) -> None:
+        """Remember that steps from ``from_step`` were never submitted and may be continued once."""
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE message_jobs SET resume_token = ?, resume_from_step = ?, resume_offered_at = ?, resume_used = 0 "
+                "WHERE message_id = ? AND status = 'failed'",
+                (token, from_step, self._now(now), message_id),
+            )
+            conn.commit()
+
+    def get_resume_offer(self, message_id: str) -> tuple[int, str] | None:
+        """``(from_step, token)`` of an unused continue offer, if any."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT resume_from_step, resume_token FROM message_jobs "
+                "WHERE message_id = ? AND status = 'failed' AND resume_used = 0 AND resume_token != ''",
+                (message_id,),
+            ).fetchone()
+        return (int(row["resume_from_step"]), str(row["resume_token"])) if row and row["resume_from_step"] else None
+
+    def resume_consumed(self, message_id: str) -> bool:
+        """True once the requester continued this job; its card now belongs to the resumed job."""
+        with self._connect() as conn:
+            row = conn.execute("SELECT resume_used FROM message_jobs WHERE message_id = ?", (message_id,)).fetchone()
+        return bool(row and row["resume_used"])
+
+    def claim_resume(
+        self,
+        message_id: str,
+        *,
+        confirmation_message_id: str,
+        chat_id: str,
+        user_id: str,
+        token: str,
+        max_age_seconds: int,
+        now: int | None = None,
+    ) -> int | None:
+        """Atomically consume a continue offer; only the original requester, once, within the window."""
+        timestamp = self._now(now)
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """
+                SELECT resume_from_step FROM message_jobs
+                WHERE message_id = ? AND status = 'failed' AND resume_used = 0 AND resume_token = ?
+                      AND resume_token != '' AND confirmation_message_id = ? AND chat_id = ? AND user_id = ?
+                      AND resume_offered_at >= ?
+                """,
+                (message_id, token, confirmation_message_id, chat_id, user_id, timestamp - max_age_seconds),
+            ).fetchone()
+            if row is None or not row["resume_from_step"]:
+                conn.rollback()
+                return None
+            conn.execute("UPDATE message_jobs SET resume_used = 1 WHERE message_id = ?", (message_id,))
+            conn.commit()
+        return int(row["resume_from_step"])
+
+    def create_resume_job(
+        self,
+        original: MessageJob,
+        message_id: str,
+        *,
+        text: str,
+        plan_json: str,
+        now: int | None = None,
+    ) -> MessageJob | None:
+        """Create the already-confirmed job that runs the remaining steps of ``original``."""
+        timestamp = self._now(now)
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT OR IGNORE INTO message_jobs (
+                    message_id, event_id, chat_id, chat_type, user_id, text, status, attempts,
+                    created_at, updated_at, last_error, plan_json, confirmation_message_id,
+                    confirmation_token, confirmation_method, include_execution_logs, route_region
+                )
+                VALUES (?, ?, ?, ?, ?, ?, 'confirmed', 0, ?, ?, '', ?, ?, '', 'card', ?, ?)
+                """,
+                (
+                    message_id,
+                    "{}:resume".format(original.event_id),
+                    original.chat_id,
+                    original.chat_type,
+                    original.user_id,
+                    text,
+                    timestamp,
+                    timestamp,
+                    plan_json,
+                    original.confirmation_message_id,
+                    1 if original.include_execution_logs else 0,
+                    original.route_region,
+                ),
+            )
+            conn.commit()
+        return self.get(message_id) if cursor.rowcount > 0 else None
 
     def set_user_name(self, message_id: str, user_name: str) -> None:
         """Store the requester's Feishu display name (review page only; never sent to AI)."""

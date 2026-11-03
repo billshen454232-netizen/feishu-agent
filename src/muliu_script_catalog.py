@@ -141,6 +141,16 @@ class MuliuCallContracts:
         if len(matched_contracts) != 1 or not self.permits_route_scope(plan, plan.route_scope):
             raise MuliuCallContractError("计划声明的范围路由未由已登记只读调用合同允许")
 
+    def is_read_only(self, plan: MuliuPlan) -> bool:
+        """True only when every step matches exactly one ``risk=read`` contract."""
+        if not plan.steps:
+            return False
+        for step in plan.steps:
+            matching = [contract for contract in self.contracts if contract.matches(step)]
+            if len(matching) != 1 or matching[0].risk != "read":
+                return False
+        return True
+
     def runner_manifest(self) -> MuliuRunnerManifest:
         runners_by_path: dict[str, str] = {}
         for contract in self.contracts:

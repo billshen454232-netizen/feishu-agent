@@ -190,14 +190,17 @@ def test_execute_step_recovers_detail_read_without_replaying_control_posts(monke
             return 200, {"code": 0}
         if path == "/muliu/api/task/execute":
             return 200, {"code": 0}
+        if path.startswith("/muliu/api/task/log"):
+            return 200, {"code": 0, "data": [{"content": "MULIU_RUN_VERSION: run-0\nAI_OP_END status=success\nEND"}]}
         raise AssertionError("unexpected request: {} {}".format(method, path))
 
     monkeypatch.setattr(client, "request_json", fake_request_json)
     monkeypatch.setattr(client, "login", lambda: calls.append(("LOGIN", "")))
-    monkeypatch.setattr(client, "wait_for_completed_step_log", lambda: "AI_OP_END status=success\\nEND")
+    monkeypatch.setattr(client, "wait_for_completed_step_log", lambda *_: "AI_OP_END status=success\\nEND")
 
     assert client.execute_step(MuliuStep("/home/serverGeneralScript/start", ["5000"], "启动 5000 服"))
     assert calls == [
+        ("GET", "/muliu/api/task/log?id=89&step=11&num=0"),
         ("GET", "/muliu/api/task/detail?id=89"),
         ("LOGIN", ""),
         ("GET", "/muliu/api/task/detail?id=89"),
@@ -262,10 +265,11 @@ def test_step_timeout_after_muliu_acceptance_is_marked_result_unknown(monkeypatc
     monkeypatch.setattr(client, "get_current_version", lambda: 1)
     monkeypatch.setattr(client, "save_arguments", lambda _version, _step: None)
     monkeypatch.setattr(client, "execute_task", lambda _version: None)
+    monkeypatch.setattr(client, "latest_run_marker", lambda: "run-0")
     monkeypatch.setattr(
         client,
         "wait_for_completed_step_log",
-        lambda: (_ for _ in ()).throw(MuliuResultUnknownError("未取得终态")),
+        lambda *_: (_ for _ in ()).throw(MuliuResultUnknownError("未取得终态")),
     )
 
     with pytest.raises(MuliuSubmittedError) as raised:
@@ -342,7 +346,7 @@ async def test_executor_returns_result_unknown_after_muliu_accepts_a_step(monkey
     assert result.result_unknown is True
     assert result.succeeded is False
     assert result.failed_step_number is None
-    assert result.result_unknown_reason == "未取得终态"
+    assert result.result_unknown_reason == "第 1/1 步「启动 5000 服」已提交，结果未知：未取得终态"
 
 
 @pytest.mark.asyncio
@@ -529,3 +533,262 @@ async def test_executor_stops_after_first_failed_step(monkeypatch):
     assert result.succeeded is False
     assert result.failed_step_number == 2
     assert len(result.step_results) == 1
+
+
+# ---------------------------------------------------------------- timeouts, retries and step reconciliation
+
+
+def test_read_timeout_after_connect_is_a_transport_error():
+    client = MuliuHttpClient(make_config())
+
+    class TimeoutOpener:
+        def open(self, request, timeout=None):
+            raise TimeoutError("The read operation timed out")
+
+    client._opener = TimeoutOpener()
+
+    with pytest.raises(MuliuTransportError, match="请求超时或连接中断"):
+        client.request_json("GET", "/muliu/api/task/detail?id=89")
+
+
+def test_pre_submit_requests_retry_transport_errors_but_not_client_errors(monkeypatch):
+    from src.muliu_executor import retry_before_submit
+
+    monkeypatch.setattr("src.muliu_executor.time.sleep", lambda _s: None)
+    attempts = []
+
+    def flaky():
+        attempts.append(1)
+        if len(attempts) < 3:
+            raise MuliuTransportError("timeout")
+        return 42
+
+    assert retry_before_submit(flaky, "读取任务版本", delay_seconds=0) == 42
+    assert len(attempts) == 3
+
+    rejected = []
+    with pytest.raises(MuliuHttpResponseError):
+        retry_before_submit(lambda: rejected.append(1) or (_ for _ in ()).throw(MuliuHttpResponseError(403, "no")), "x", delay_seconds=0)
+    assert len(rejected) == 1
+
+
+def _client_with(monkeypatch, *, markers, execute_error=None, completed_log="MULIU_RUN_VERSION: run-1\nAI_OP_END status=success\nEND"):
+    client = MuliuHttpClient(make_config())
+    marker_iter = iter(markers)
+    monkeypatch.setattr("src.muliu_executor.time.sleep", lambda _s: None)
+    monkeypatch.setattr(client, "latest_run_marker", lambda: next(marker_iter))
+    monkeypatch.setattr(client, "get_current_version", lambda: 1)
+    monkeypatch.setattr(client, "save_arguments", lambda _v, _s: None)
+
+    def execute(_version):
+        if execute_error:
+            raise execute_error
+
+    monkeypatch.setattr(client, "execute_task", execute)
+    monkeypatch.setattr(client, "wait_for_completed_step_log", lambda previous_run=None: completed_log)
+    return client
+
+
+STEP = MuliuStep("/home/serverGeneralScript/modify_game_config.sh", ["5001", "7", "14"], "设置赛季 7 剧本 14")
+
+
+def test_lost_execute_response_without_new_run_is_not_executed(monkeypatch):
+    client = _client_with(monkeypatch, markers=["run-0"] * 10, execute_error=MuliuSubmissionUnknownError("lost"))
+
+    with pytest.raises(MuliuSubmittedError, match="判定本步未执行") as raised:
+        client.execute_step(STEP)
+
+    assert raised.value.submitted is False
+
+
+def test_lost_execute_response_with_new_run_continues_to_the_result(monkeypatch):
+    client = _client_with(monkeypatch, markers=["run-0", "run-0", "run-1"], execute_error=MuliuSubmissionUnknownError("lost"))
+
+    assert client.execute_step(STEP).endswith("END")
+
+
+def test_lost_execute_response_with_unreadable_log_stays_unknown(monkeypatch):
+    client = _client_with(monkeypatch, markers=["run-0", None], execute_error=MuliuSubmissionUnknownError("lost"))
+
+    with pytest.raises(MuliuSubmittedError) as raised:
+        client.execute_step(STEP)
+
+    assert raised.value.submitted is True
+
+
+def test_log_poll_ignores_previous_run_and_retries_transient_errors(monkeypatch):
+    client = MuliuHttpClient(make_config())
+    responses = iter([
+        "MULIU_RUN_VERSION: run-0\nAI_OP_END status=success\nEND",  # previous step's finished log
+        MuliuTransportError("The read operation timed out"),
+        MuliuHttpResponseError(502, "bad gateway"),
+        "MULIU_RUN_VERSION: run-1\nRunning",
+        "MULIU_RUN_VERSION: run-1\nAI_OP_END status=success\nEND",
+    ])
+
+    def next_log():
+        value = next(responses)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    monkeypatch.setattr(client, "get_latest_step_log", next_log)
+    monkeypatch.setattr("src.muliu_executor.time.sleep", lambda _s: None)
+
+    assert client.wait_for_completed_step_log("run-0").startswith("MULIU_RUN_VERSION: run-1")
+
+
+@pytest.mark.asyncio
+async def test_plan_keeps_completed_steps_and_marks_unsubmitted_step_resumable(monkeypatch):
+    executor = MuliuExecutor(make_config())
+
+    class FakeClient:
+        def __init__(self, _config):
+            self.calls = 0
+
+        def login(self):
+            pass
+
+        def execute_step(self, step):
+            self.calls += 1
+            if self.calls == 1:
+                return "AI_OP_END status=success\nEND"
+            raise MuliuSubmittedError(MuliuExecutionError("提交请求未得到 Muliu 响应，判定本步未执行"), submitted=False)
+
+    monkeypatch.setattr("src.muliu_executor.MuliuHttpClient", FakeClient)
+    plan = MuliuPlan(summary="5001 清档改配置启服", steps=[
+        MuliuStep("/home/serverGeneralScript/clear", ["5001"], "清档 5001"),
+        STEP,
+        MuliuStep(START_SCRIPT_PATH, ["5001"], "启服 5001"),
+    ])
+
+    result = await executor.execute_plan(plan)
+
+    assert result.failed_step_number == 2
+    assert result.resumable_from_step == 2
+    assert [s.description for s in result.step_results] == ["清档 5001"]
+    assert result.failure_reason.startswith("第 2/3 步「设置赛季 7 剧本 14」未执行")
+
+
+@pytest.mark.asyncio
+async def test_plan_unexpected_exception_keeps_completed_steps_as_unknown(monkeypatch):
+    executor = MuliuExecutor(make_config())
+
+    class FakeClient:
+        def __init__(self, _config):
+            self.calls = 0
+
+        def login(self):
+            pass
+
+        def execute_step(self, step):
+            self.calls += 1
+            if self.calls == 1:
+                return "AI_OP_END status=success\nEND"
+            raise TimeoutError("The read operation timed out")
+
+    monkeypatch.setattr("src.muliu_executor.MuliuHttpClient", FakeClient)
+    plan = MuliuPlan(summary="s", steps=[MuliuStep("/home/serverGeneralScript/clear", ["5001"], "清档 5001"), STEP])
+
+    result = await executor.execute_plan(plan)
+
+    assert result.result_unknown is True
+    assert result.resumable_from_step is None
+    assert [s.description for s in result.step_results] == ["清档 5001"]
+    assert "第 2/2 步「设置赛季 7 剧本 14」执行时发生异常" in result.result_unknown_reason
+
+
+# ---------------------------------------------------------------- dropped session (redirect to /muliu/login → 404)
+
+NOT_FOUND_PAGE = (
+    '<!DOCTYPE HTML PUBLIC "-//IETF//DTD HTML 2.0//EN"><html><head><title>404 Not Found</title></head>'
+    "<body><h1>404 Not Found</h1><td>http://za-all-gm-nslghk.newslg.com/muliu/login</td>"
+    "<td>nslg-ali-hk-test-all-gs-08</td></body></html>"
+)
+
+
+def _http_error(url, code=404, body=NOT_FOUND_PAGE):
+    import io
+    from email.message import Message
+    from urllib.error import HTTPError
+
+    headers = Message()
+    headers["Content-Type"] = "text/html; charset=utf-8"
+    return HTTPError(url, code, "Not Found", headers, io.BytesIO(body.encode("utf-8")))
+
+
+class _ScriptedOpener:
+    def __init__(self, outcomes):
+        self.outcomes = list(outcomes)
+        self.paths = []
+
+    def open(self, request, timeout=None):
+        import io
+
+        self.paths.append(request.full_url.replace("https://muliu.example.com", ""))
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+
+        class Response(io.BytesIO):
+            status = 200
+            headers = type("H", (), {"get_content_charset": staticmethod(lambda: "utf-8")})()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        return Response(json.dumps(outcome).encode("utf-8"))
+
+
+def test_redirect_to_login_is_recognized_and_read_recovers_by_logging_in(monkeypatch):
+    client = MuliuHttpClient(make_config())
+    client._opener = _ScriptedOpener([
+        _http_error("http://za-all-gm-nslghk.newslg.com/muliu/login"),
+        {"code": 0, "data": {"version": 7}},
+    ])
+    logins = []
+    monkeypatch.setattr(client, "login", lambda: logins.append(1))
+
+    assert client.get_current_version() == 7
+    assert logins == [1]
+
+
+def test_save_arguments_relogs_once_when_session_dropped(monkeypatch):
+    client = MuliuHttpClient(make_config())
+    client._csrf_token = "csrf"
+    client._opener = _ScriptedOpener([
+        _http_error("http://za-all-gm-nslghk.newslg.com/muliu/login"),
+        {"code": 0},
+    ])
+    logins = []
+    monkeypatch.setattr(client, "login", lambda: logins.append(1))
+
+    client.save_arguments(1, MuliuStep("/home/serverGeneralScript/start", ["5001"], "启服 5001"))
+
+    assert logins == [1]
+    assert client._opener.paths == ["/muliu/api/task/argument/save", "/muliu/api/task/argument/save"]
+
+
+def test_execute_with_dropped_session_is_reconciled_not_resubmitted(monkeypatch):
+    client = MuliuHttpClient(make_config())
+    client._csrf_token = "csrf"
+    client._opener = _ScriptedOpener([_http_error("http://za-all-gm-nslghk.newslg.com/muliu/login")])
+
+    with pytest.raises(MuliuSubmissionUnknownError):
+        client.execute_task(1)
+    assert len(client._opener.paths) == 1  # never retried blindly
+
+
+def test_http_error_message_drops_html_and_internal_hosts():
+    from src.operation_message import mask_sensitive_operation_data as _mask
+
+    error = MuliuHttpResponseError(404, NOT_FOUND_PAGE)
+
+    assert str(error) == "Muliu HTTP 404：404 Not Found"
+    assert error.body == NOT_FOUND_PAGE
+    masked = _mask("见 http://za-all-gm-nslghk.newslg.com/muliu/login 与 nslg-ali-hk-test-all-gs-08")
+    assert "newslg.com" not in masked and "nslg-ali" not in masked
+    assert "[内部域名]" in masked and "[内部主机]" in masked

@@ -23,7 +23,7 @@ _MAX_ERROR_CHARS = 4_000
 
 def serialize_execution_result(result: MuliuExecutionResult) -> dict[str, object]:
     """Convert an execution outcome into the worker's fixed JSON response shape."""
-    return {
+    payload: dict[str, object] = {
         "summary": result.summary,
         "step_results": [
             {
@@ -40,6 +40,10 @@ def serialize_execution_result(result: MuliuExecutionResult) -> dict[str, object
         "failure_reason": result.failure_reason,
         "result_unknown_reason": result.result_unknown_reason,
     }
+    # Sent only when set, so results without it stay readable by older gateways.
+    if result.resumable_from_step is not None:
+        payload["resumable_from_step"] = result.resumable_from_step
+    return payload
 
 
 def parse_execution_result(value: Any, *, max_steps: int) -> MuliuExecutionResult:
@@ -56,6 +60,7 @@ def parse_execution_result(value: Any, *, max_steps: int) -> MuliuExecutionResul
         "failed_step_number",
         "failure_reason",
         "result_unknown_reason",
+        "resumable_from_step",
     }
     _reject_unknown_fields(value, allowed, "worker result")
     summary = _require_text(value.get("summary"), "summary", 120)
@@ -81,6 +86,15 @@ def parse_execution_result(value: Any, *, max_steps: int) -> MuliuExecutionResul
         raise WorkerProtocolError("失败结果必须包含 failed_step_number")
     if failed_step_number is not None and not failure_reason:
         raise WorkerProtocolError("failed_step_number 必须配套 failure_reason")
+    resumable_from_step = value.get("resumable_from_step")
+    if resumable_from_step is not None:
+        if (
+            isinstance(resumable_from_step, bool)
+            or not isinstance(resumable_from_step, int)
+            or resumable_from_step != failed_step_number
+            or any(not step.succeeded for step in step_results)
+        ):
+            raise WorkerProtocolError("resumable_from_step 只能指向未提交的失败步骤")
 
     return MuliuExecutionResult(
         summary=summary,
@@ -88,6 +102,7 @@ def parse_execution_result(value: Any, *, max_steps: int) -> MuliuExecutionResul
         failed_step_number=failed_step_number,
         failure_reason=failure_reason,
         result_unknown_reason=result_unknown_reason,
+        resumable_from_step=resumable_from_step,
     )
 
 

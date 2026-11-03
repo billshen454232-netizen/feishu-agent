@@ -471,3 +471,13 @@ def test_execution_status_card_renders_markdown_but_escapes_tags():
     assert text["tag"] == "lark_md"
     assert "**服务器**" in text["content"]
     assert "<at" not in text["content"] and "&lt;at" in text["content"]
+
+
+def test_masks_cloud_database_hosts_printed_by_scripts():
+    from src.operation_message import mask_sensitive_operation_data as _mask
+
+    text = _mask("Database(MongoClient(host=['dds-3ns5abc.mongodb.rds.aliyuncs.com:3717'], document_class=dict), 'nslg_game_500101')\nredis r-abc.redis.rds.aliyuncs.com:6379")
+
+    assert "aliyuncs.com" not in text and "dds-3ns5abc" not in text
+    assert "MongoClient(host=[数据库主机]" in text
+    assert "nslg_game_500101" in text
