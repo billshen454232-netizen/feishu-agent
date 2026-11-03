@@ -141,6 +141,11 @@ class MuliuWorker:
 
     async def run_forever(self) -> None:
         self._stopping = False
+        logger.warning(
+            "worker polling started worker_id=%s gateway=%s",
+            self._config.runtime.worker_id,
+            self._config.runtime.gateway_base_url,
+        )
         try:
             while not self._stopping:
                 try:

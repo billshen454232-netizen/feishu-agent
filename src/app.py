@@ -31,6 +31,7 @@ from .muliu_script_catalog import MuliuScriptCatalog
 from .muliu_worker import GatewayWorkerClient, MuliuWorker
 from .operation_message import build_execution_status_card, format_execution_result
 from .script_knowledge_base import ScriptKnowledgeBase
+from .utils.diagnostics import install_stack_dump_signals
 from .worker_protocol import (
     WorkerProtocolError,
     parse_execution_result,
@@ -106,6 +107,7 @@ def create_app(config_path: str | Path = "config/config.json") -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        install_stack_dump_signals()
         expired = job_store.expire_stale_unfinished(None, config.job_queue.recovery_window_seconds)
         for job in expired:
             logger.warning("job expired message_id=%s", job.message_id)
@@ -184,6 +186,8 @@ def _create_worker_app(config: Any) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        if install_stack_dump_signals():
+            logger.warning("stack dumps enabled: kill -USR1 (threads) / -USR2 (asyncio tasks) pid")
         task = asyncio.create_task(worker.run_forever())
         try:
             yield
