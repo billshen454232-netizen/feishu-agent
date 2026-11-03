@@ -263,16 +263,41 @@ AI 分析 ──自动收集──→ 待审核 ──通过──→ 可用模�
 
 ### 7.4 部署位置与访问
 
-**已确认（2026-11-03）：审批页挂在阿里云 Gateway，不对公网开放。**
+> **决策变更（2026-11-03 晚）**：最初决定「只经 SSH 隧道访问、不对公网开放」；当晚改为**经 Cloudflare Access 对外访问，源站自行校验 Access 令牌**。下面是当前做法与理由，旧做法保留为备用通道。
 
-模板库在 Gateway SQLite 中，审批页由 Gateway 提供，**只监听 127.0.0.1**，通过 SSH 端口转发访问，不新增公网鉴权面。
+审批页仍是 Gateway 进程内**独立监听 `127.0.0.1:<admin_port>` 的第二个服务**（不挂在对外的 FastAPI 应用上），有两条访问通道：
 
-实现约束：
+```text
+公网：浏览器 → Cloudflare（Access 应用 ops，策略 owner-only，Google 登录）
+      → 阿里云 nginx ops.ttlink.asia（源站证书 ttlink-origin）
+      → 127.0.0.1:8901（审批页自行校验 Access JWT）
+备用：ssh -L 8901:127.0.0.1:8901 <gateway> → http://127.0.0.1:8901（不需要令牌）
+```
 
-- 审批页**不能**作为路由挂在现有对外服务的 FastAPI 应用上（那个应用对公网监听，挂上去就等于公开）；必须是 Gateway 进程内**独立监听 `127.0.0.1:<admin_port>` 的第二个服务**，与对外端口完全分开；
-- `admin_port` 写入配置，默认不启用；安全组/防火墙不放行该端口；
-- 访问方式：本机执行 `ssh -L <本地端口>:127.0.0.1:<admin_port> <gateway>`，浏览器打开 `http://127.0.0.1:<本地端口>`；
-- 验收：从公网访问 `admin_port` 必须连接失败；对外端口上请求审批页路径必须返回 404。
+**为什么不能只靠 Cloudflare 邮箱认证**：Access 只拦经过 Cloudflare 的请求；知道源站 IP 的人可以直连 443、带上 `Host: ops.ttlink.asia` 绕过。nginx 也无法按 Cloudflare IP 段限制来源（这台机器开了 `real_ip`，看到的是真实用户 IP）。所以审批页自己校验令牌。
+
+实现约束（代码：`src/access_auth.py`、`src/admin_app.py`）：
+
+- nginx 对每个转发请求**强制设置** `X-Admin-Proxy: cloudflare-access` 和 `Host: 127.0.0.1`（客户端无法去掉或伪造）；
+- 带该标记的请求必须携带有效的 `Cf-Access-Jwt-Assertion`（或 `CF_Authorization` cookie）：RS256 签名对团队公钥（`https://<team>/cdn-cgi/access/certs`，缓存 1 小时，未知 kid 时刷新）、`aud` = 应用 AUD 标签、`iss` = 团队域名、未过期；否则 403；
+- `admin.access_team_domain` / `admin.access_aud` 未配置时，公网请求一律 403（失败即关闭）；
+- 不带标记的请求只能来自 127.0.0.1（SSH 隧道），照常放行；Host 必须是回环地址（防 DNS 重绑定），写操作必须带 `X-Admin-Request: 1`（防跨站提交）；
+- 审批改动日志记录操作人邮箱（`operator=`），隧道访问记为 `ssh-tunnel`；
+- 依赖 `PyJWT[crypto]==2.10.1`；`admin_port` 仍不在安全组放行。
+
+当前部署（2026-11-03）：
+
+| 项 | 值 |
+| --- | --- |
+| 域名 | `ops.ttlink.asia`（Cloudflare 代理开启） |
+| Cloudflare Access | 应用 `ops`，策略 `owner-only`，登录方式 Google，会话 24 小时 |
+| 团队域名 | `billshen454232.cloudflareaccess.com` |
+| nginx | `/etc/nginx/sites-available/ops.ttlink.asia.conf`（已启用），证书 `/etc/ssl/cloudflare/ttlink-origin.{pem,key}` |
+| Gateway 配置 | `config.json` → `admin.enabled / port / access_team_domain / access_aud` |
+
+上线验收（均已通过）：经 Cloudflare 访问 → 302 到 Access 登录；直连源站 IP 无令牌 / 伪造令牌 → 403；SSH 隧道 → 200；其他站点不受影响。
+
+**回退**：删除 `sites-enabled/ops.ttlink.asia.conf` 并 `nginx -t && systemctl reload nginx`，即回到仅 SSH 隧道访问；审批页本身无需改动。
 
 与 [热更阈值网页管理](2026-10-30-threshold-registry-web.md)（开发机）是两个独立页面，后续可统一入口。
 
