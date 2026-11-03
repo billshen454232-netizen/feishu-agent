@@ -102,7 +102,9 @@ def _write(tmp_path, section):
 
 
 @pytest.mark.parametrize("section, match", [
-    ({"enabled": True}, "必须填写 webhook_url"),
+    ({"enabled": True}, "必须填写 webhook_url 或 region_webhooks"),
+    ({"enabled": True, "region_webhooks": {"cn": "ftp://x"}}, "region_webhooks.cn 必须以"),
+    ({"enabled": True, "region_webhooks": ["x"]}, "region_webhooks 必须是"),
     ({"enabled": True, "webhook_url": "ftp://x"}, "http:// 或 https://"),
     ({"trigger_paths": []}, "trigger_paths"),
 ])
@@ -116,3 +118,10 @@ def test_config_defaults(tmp_path):
 
     assert config.mention_all is True
     assert CLEAR in config.trigger_paths and len(config.trigger_paths) == 4
+
+
+def test_region_webhooks_alone_enable_notifications(tmp_path):
+    config = load_config(_write(tmp_path, {"enabled": True, "region_webhooks": {"cn": WEBHOOK}})).clear_notification
+
+    assert config.region_webhooks == {"cn": WEBHOOK}
+    assert ClearNotifier(config).enabled is True

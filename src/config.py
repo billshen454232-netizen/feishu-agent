@@ -239,7 +239,10 @@ class ClearNotificationConfig:
     """Clear-data notices (prepared / executing) pushed by the Gateway to a WeCom group robot."""
 
     enabled: bool = False
+    # Fallback group: used for servers whose region has no entry in ``region_webhooks``.
     webhook_url: str = ""
+    # Region key (``server_environments.json`` regions) -> WeCom group robot URL.
+    region_webhooks: dict[str, str] = field(default_factory=dict)
     mention_all: bool = True
     timeout_seconds: float = 5.0
     trigger_paths: tuple[str, ...] = DEFAULT_CLEAR_TRIGGER_PATHS
@@ -398,16 +401,27 @@ def _load_clear_notification(raw: Any) -> ClearNotificationConfig:
         raise ConfigError("clear_notification section must be a JSON object")
     enabled = bool(raw.get("enabled", False))
     webhook_url = str(raw.get("webhook_url", "")).strip()
-    if enabled and not webhook_url:
-        raise ConfigError("clear_notification.enabled 为 true 时必须填写 webhook_url")
-    if enabled and not webhook_url.startswith(("http://", "https://")):
-        raise ConfigError("clear_notification.webhook_url 必须以 http:// 或 https:// 开头")
+    region_raw = raw.get("region_webhooks", {})
+    if not isinstance(region_raw, dict) or not all(
+        isinstance(key, str) and key and isinstance(value, str) for key, value in region_raw.items()
+    ):
+        raise ConfigError("clear_notification.region_webhooks 必须是 {区服: 企微地址} 对象")
+    region_webhooks = {key: value.strip() for key, value in region_raw.items() if value.strip()}
+    if enabled and not webhook_url and not region_webhooks:
+        raise ConfigError("clear_notification.enabled 为 true 时必须填写 webhook_url 或 region_webhooks")
+    if enabled:
+        for label, url in [("webhook_url", webhook_url)] + [
+            ("region_webhooks.{}".format(key), value) for key, value in region_webhooks.items()
+        ]:
+            if url and not url.startswith(("http://", "https://")):
+                raise ConfigError("clear_notification.{} 必须以 http:// 或 https:// 开头".format(label))
     trigger_paths = raw.get("trigger_paths", list(DEFAULT_CLEAR_TRIGGER_PATHS))
     if not isinstance(trigger_paths, list) or not trigger_paths or not all(isinstance(item, str) and item for item in trigger_paths):
         raise ConfigError("clear_notification.trigger_paths 必须是非空字符串数组")
     return ClearNotificationConfig(
         enabled=enabled,
         webhook_url=webhook_url,
+        region_webhooks=region_webhooks,
         mention_all=bool(raw.get("mention_all", True)),
         timeout_seconds=_require_positive_number(
             float(raw.get("timeout_seconds", 5)), "clear_notification.timeout_seconds"

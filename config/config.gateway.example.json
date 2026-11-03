@@ -75,7 +75,11 @@
   },
   "clear_notification": {
     "enabled": false,
-    "webhook_url": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=填写企微群机器人key",
+    "webhook_url": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=默认群key（未配置区服时使用，可留空）",
+    "region_webhooks": {
+      "cn": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=国服群key",
+      "hmt": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=港澳台群key"
+    },
     "mention_all": true,
     "timeout_seconds": 5
   },

@@ -1196,13 +1196,21 @@ class MessageJobProcessor:
                 except Exception:  # noqa: BLE001 - server ids are best-effort context
                     server_ids = []
             operator_name = await self._member_name(job.chat_id, operator_id) or operator_id
-            text = self._clear_notifier.build_text(
-                event,
-                operator_name=operator_name,
-                server_ids=server_ids,
-                plan_summary=plan.summary,
-            )
-            await self._clear_notifier.send(text)
+            for region_key, region_name, region_servers in self._group_servers_by_region(server_ids):
+                webhook_url = self._clear_notifier.webhook_for_region(region_key)
+                if not webhook_url:
+                    logger.warning(
+                        "clear notification skipped: no webhook for region=%s message_id=%s", region_key, job.message_id
+                    )
+                    continue
+                text = self._clear_notifier.build_text(
+                    event,
+                    operator_name=operator_name,
+                    server_ids=region_servers,
+                    plan_summary=plan.summary,
+                    region_name=region_name,
+                )
+                await self._clear_notifier.send(text, webhook_url)
         except Exception:  # noqa: BLE001 - notification must never affect the operation
             logger.exception("clear notification crashed message_id=%s event=%s", job.message_id, event)
 
@@ -1210,6 +1218,22 @@ class MessageJobProcessor:
         """Test helper: wait for display-only background tasks."""
         while self._background_tasks:
             await asyncio.gather(*tuple(self._background_tasks), return_exceptions=True)
+
+    def _group_servers_by_region(self, server_ids: list[str]) -> list[tuple[str | None, str, list[str]]]:
+        """Split servers by owning region (first-seen order); unknown servers go to a ``None`` group."""
+        try:
+            environments = ServerEnvironments.load(self._config.execution_interpretation.server_environments_path)
+        except ServerEnvironmentsError:
+            logger.warning("clear notification: environments unavailable, using fallback group", exc_info=True)
+            return [(None, "", list(server_ids))]
+        groups: dict[str | None, tuple[str, list[str]]] = {}
+        for server_id in server_ids:
+            owner = environments.region_for_server_id(server_id)
+            key, name = owner if owner else (None, "")
+            groups.setdefault(key, (name, []))[1].append(server_id)
+        if not groups:
+            return [(None, "", [])]
+        return [(key, name, servers) for key, (name, servers) in groups.items()]
 
     def _record_planning(self, message_id: str, generation: MuliuPlanGeneration) -> None:
         record = getattr(self._store, "record_planning", None)

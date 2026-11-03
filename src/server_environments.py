@@ -187,6 +187,14 @@ class ServerEnvironments:
             raise ServerEnvironmentsError("同一计划不能同时包含国服和海外服目标")
         return next(iter(route_regions))
 
+    def region_for_server_id(self, server_id: str) -> tuple[str, str] | None:
+        """``(region_key, region_name)`` owning ``server_id``, or None when unregistered."""
+        try:
+            region_key = self._owning_region_for_server_id(server_id)
+        except ServerEnvironmentsError:
+            return None
+        return region_key, str(self.regions[region_key]["name"])
+
     def _owning_region_for_server_id(self, server_id: str) -> str:
         if not isinstance(server_id, str) or _SERVER_ID_PATTERN.fullmatch(server_id) is None:
             raise ServerEnvironmentsError("目标服号格式无效：{}".format(server_id))

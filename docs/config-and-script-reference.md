@@ -151,12 +151,16 @@ worker  = 主动连 Gateway 领任务 + 本地 Muliu 执行（无飞书/AI 凭�
 
 ### 清档企微推送（可选）
 
-计划里含清档脚本时，阿里云 Gateway 直接向企微群机器人推送两次消息（默认 @所有人）。是否清档**按计划中的脚本路径判断**，不由 AI 判断。
+计划里含清档脚本时，阿里云 Gateway 直接向企微群机器人推送两次消息（默认 @所有人），**按区服分群**。是否清档**按计划中的脚本路径判断**，不由 AI 判断。
 
 ```json
 "clear_notification": {
   "enabled": true,
-  "webhook_url": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=…",
+  "webhook_url": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=…默认群（可选）",
+  "region_webhooks": {
+    "cn": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=…国服群",
+    "hmt": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=…港澳台群"
+  },
   "mention_all": true,
   "timeout_seconds": 5
 }
@@ -164,13 +168,16 @@ worker  = 主动连 Gateway 领任务 + 本地 Muliu 执行（无飞书/AI 凭�
 
 | 时机 | 消息示例 |
 | --- | --- |
-| AI 生成含清档的计划、确认卡已发出 | `内网：沈涛 准备清档 2213 服（已生成计划，等待确认）` |
-| 组员确认执行、任务进入执行队列 | `内网：沈涛 正在操作清档 2213 服（已确认，开始执行）` |
+| AI 生成含清档的计划、确认卡已发出 | `内网：沈涛 准备清档 港澳台繁体 5001 服（已生成计划，等待确认）` |
+| 组员确认执行、任务进入执行队列 | `内网：沈涛 正在操作清档 港澳台繁体 5001 服（已确认，开始执行）` |
 
 每条消息下面附「计划：…」「时间：…（北京时间）」两行。
 
+- `region_webhooks` 的 key 是 `server_environments.json` 中 `regions` 的区服名（`cn`、`hmt`、`global`、`kr`、`vn`）；
+- 一次清档涉及多个区服时按群拆开发送，每个群只收到自己负责的服号；
+- 区服没有单独配置时发到 `webhook_url`（默认群）；默认群也没填时不发，只记日志；`enabled` 为 true 时两者至少填一个；
 - 只配置在 **Gateway**；Worker 不参与，不用改；
-- `webhook_url` 含企微 key，属于密钥：只写在服务器的 `config.json`（已 `.gitignore`），不要写进示例配置或提交；
+- 企微地址含 key，属于密钥：只写在服务器的 `config.json`（已 `.gitignore`），不要写进示例配置或提交；
 - `trigger_paths` 默认包含 `clear`、`clear_logic_game.py`、`clear_zone.py`、`cleardb.py`；
 - 推送在后台进行，失败（网络错误、企微返回非 0 errcode）只记日志，不影响确认卡和执行；
 - 组员取消或确认超时时，只会有「准备清档」一条。

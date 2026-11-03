@@ -37,7 +37,13 @@ class ClearNotifier:
 
     @property
     def enabled(self) -> bool:
-        return self._config.enabled and bool(self._config.webhook_url)
+        return self._config.enabled and bool(self._config.webhook_url or self._config.region_webhooks)
+
+    def webhook_for_region(self, region_key: str | None) -> str:
+        """Region group if configured, else the fallback group ("" means: do not send)."""
+        if region_key and region_key in self._config.region_webhooks:
+            return self._config.region_webhooks[region_key]
+        return self._config.webhook_url
 
     def clear_steps(self, plan: MuliuPlan) -> list[MuliuStep]:
         triggers = set(self._config.trigger_paths)
@@ -50,27 +56,30 @@ class ClearNotifier:
         operator_name: str,
         server_ids: list[str],
         plan_summary: str,
+        region_name: str = "",
         now: float | None = None,
     ) -> str:
         occurred_at = datetime.fromtimestamp(time.time() if now is None else now, BEIJING)
         servers = "、".join(server_ids) if server_ids else "（未识别服号）"
+        target = "{} {}".format(region_name, servers) if region_name else servers
         return "\n".join([
             "内网：{} {} {} 服{}".format(
-                operator_name or "未知成员", _EVENT_VERBS.get(event, event), servers, _EVENT_NOTES.get(event, "")
+                operator_name or "未知成员", _EVENT_VERBS.get(event, event), target, _EVENT_NOTES.get(event, "")
             ),
             "计划：{}".format(mask_sensitive_operation_data(plan_summary)),
             "时间：{}".format(occurred_at.strftime("%Y-%m-%d %H:%M:%S")),
         ])
 
-    async def send(self, text: str) -> bool:
+    async def send(self, text: str, webhook_url: str | None = None) -> bool:
         """Post a WeCom group-robot text message, optionally @all."""
-        if not self.enabled:
+        url = self._config.webhook_url if webhook_url is None else webhook_url
+        if not self.enabled or not url:
             return False
         content: dict[str, object] = {"content": text}
         if self._config.mention_all:
             content["mentioned_mobile_list"] = ["@all"]
         try:
-            response = await self._client.post(self._config.webhook_url, json={"msgtype": "text", "text": content})
+            response = await self._client.post(url, json={"msgtype": "text", "text": content})
             response.raise_for_status()
             body = response.json()
         except Exception as exc:  # noqa: BLE001 - notification must never affect the operation

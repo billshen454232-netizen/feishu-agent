@@ -714,7 +714,7 @@ async def test_clear_plan_pushes_prepared_then_executing_to_wecom(tmp_path):
     job = store.get("om_c")
     assert job.status == "awaiting_confirmation"
     assert len(pushed) == 1
-    assert pushed[0]["text"]["content"].startswith("内网：沈涛 准备清档 2213 服")
+    assert pushed[0]["text"]["content"].startswith("内网：沈涛 准备清档 国服 2213 服")
     assert pushed[0]["text"]["mentioned_mobile_list"] == ["@all"]
 
     card = await processor.process_card_action(
@@ -730,7 +730,7 @@ async def test_clear_plan_pushes_prepared_then_executing_to_wecom(tmp_path):
     assert card["header"]["title"]["content"] == "测试服操作已提交"
     assert store.get("om_c").status == "queued_for_worker"
     assert len(pushed) == 2
-    assert pushed[1]["text"]["content"].startswith("内网：沈涛 正在操作清档 2213 服")
+    assert pushed[1]["text"]["content"].startswith("内网：沈涛 正在操作清档 国服 2213 服")
 
 
 @pytest.mark.asyncio
@@ -878,3 +878,86 @@ async def test_failure_without_resumable_step_has_no_button(tmp_path):
     await processor.present_execution_result(store.get("om_r"), _replace(result, resumable_from_step=None), "card_r")
 
     assert _resume_button(feishu.card_updates[-1][1]) is None
+
+
+@pytest.mark.asyncio
+async def test_clear_notice_is_split_by_region_and_falls_back_to_default_group(tmp_path):
+    import json as _json
+
+    import httpx
+
+    from src.clear_notifier import ClearNotifier
+    from src.config import ClearNotificationConfig
+    from src.muliu_plan import MuliuPlan, MuliuStep
+
+    environment_path = tmp_path / "server_environments.json"
+    environment_path.write_text(_json.dumps({
+        "regions": {
+            "cn": {"name": "国服", "environments": {"weekly": ["2213"]}},
+            "hmt": {"name": "港澳台繁体", "environments": {"qa": ["5001", "5002"]}},
+            "kr": {"name": "韩服", "environments": {"dev": ["6000"]}},
+        },
+        "groups": {},
+    }), encoding="utf-8")
+    pushed = []
+    notifier = ClearNotifier(
+        ClearNotificationConfig(
+            enabled=True,
+            webhook_url="https://hook.example/default",
+            region_webhooks={"cn": "https://hook.example/cn", "hmt": "https://hook.example/hmt"},
+        ),
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(
+            lambda request: pushed.append((str(request.url), _json.loads(request.content)["text"]["content"]))
+            or httpx.Response(200, json={"errcode": 0})
+        )),
+    )
+    store = MessageJobStore(tmp_path / "jobs.sqlite3")
+    store.initialize()
+    job = store.create_if_new("om_m", "evt_m", "oc_group", "ou_user", "多服清档", chat_type="group")[0]
+    processor = MessageJobProcessor(
+        make_config(execution_interpretation=ExecutionInterpretationConfig(server_environments_path=str(environment_path))),
+        store, ConversationStore(4), FakeAIClient(), FakeFeishuClient(),
+        script_catalog=_production_catalog(),
+        clear_notifier=notifier,
+    )
+    plan = MuliuPlan(summary="多服清档", steps=[
+        MuliuStep("/home/serverGeneralScript/clear", ["5001"], "清档 5001"),
+        MuliuStep("/home/serverGeneralScript/clear", ["2213"], "清档 2213"),
+        MuliuStep("/home/serverGeneralScript/clear", ["5002"], "清档 5002"),
+        MuliuStep("/home/serverGeneralScript/clear", ["6000"], "清档 6000"),
+    ])
+
+    processor._notify_clear("clear_executing", job, plan, "cn", operator_id="ou_user")
+    await processor.wait_for_background()
+
+    by_url = {url: text.splitlines()[0] for url, text in pushed}
+    assert by_url == {
+        "https://hook.example/hmt": "内网：ou_user 正在操作清档 港澳台繁体 5001、5002 服（已确认，开始执行）",
+        "https://hook.example/cn": "内网：ou_user 正在操作清档 国服 2213 服（已确认，开始执行）",
+        "https://hook.example/default": "内网：ou_user 正在操作清档 韩服 6000 服（已确认，开始执行）",
+    }
+
+
+def _production_catalog():
+    from src.muliu_script_catalog import MuliuScriptCatalog
+
+    return MuliuScriptCatalog("config/muliu_script_catalog.md")
+
+
+@pytest.mark.asyncio
+async def test_region_without_webhook_and_no_default_is_skipped(tmp_path):
+    import httpx
+
+    from src.clear_notifier import ClearNotifier
+    from src.config import ClearNotificationConfig
+
+    pushed = []
+    notifier = ClearNotifier(
+        ClearNotificationConfig(enabled=True, region_webhooks={"cn": "https://hook.example/cn"}),
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(lambda r: pushed.append(r) or httpx.Response(200, json={"errcode": 0}))),
+    )
+
+    assert notifier.webhook_for_region("cn") == "https://hook.example/cn"
+    assert notifier.webhook_for_region("hmt") == ""
+    assert await notifier.send("t", "") is False
+    assert pushed == []
