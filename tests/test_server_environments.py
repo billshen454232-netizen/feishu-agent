@@ -21,8 +21,8 @@ def test_checked_in_environment_registry_derives_global_and_overseas_dev_once():
     )
 
     assert global_dev.name == "全球服DEV环境"
-    assert global_dev.server_ids == ("5500",)
-    assert overseas_dev.server_ids == ("5000", "5001", "5500", "6000", "6001", "7001", "7002")
+    assert global_dev.server_ids == ("5500", "5501")
+    assert overseas_dev.server_ids == ("5000", "5001", "5500", "5501", "6000", "6001", "7001", "7002")
 
 
 def test_environment_registry_derives_closed_worker_route_from_registered_region():

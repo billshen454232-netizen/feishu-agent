@@ -17,8 +17,8 @@ def test_generated_catalog_contains_requested_chinese_routes_and_strict_keys():
     rendered = expected_artifacts()[CATALOG_PATH]
 
     assert "全球服DEV环境" in rendered
-    assert "海外所有DEV环境`：`5000,5001,5500,6000,6001,7001,7002" in rendered
-    assert '"--servers", "5000,5001,5500,6000,6001,7001,7002"' in rendered
+    assert "海外所有DEV环境`：`5000,5001,5500,5501,6000,6001,7001,7002" in rendered
+    assert '"--servers", "5000,5001,5500,5501,6000,6001,7001,7002"' in rendered
     assert "剧本预选州战队人数显示阈值" in rendered
     assert "-k faction_team_show_member_limit" in rendered
     assert "战队交换人数" in rendered
