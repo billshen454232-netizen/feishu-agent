@@ -211,9 +211,15 @@ def build_operation_status_card(
         "elements": [
             {"tag": "div", "text": {"tag": "plain_text", "content": mask_sensitive_operation_data(summary)}},
             {"tag": "hr"},
-            {"tag": "div", "text": {"tag": "plain_text", "content": mask_sensitive_operation_data(detail)}},
+            # Detail may carry AI Markdown (bold, lists); render it, but neutralize tags.
+            {"tag": "div", "text": {"tag": "lark_md", "content": _lark_md_safe(mask_sensitive_operation_data(detail))}},
         ],
     }
+
+
+def _lark_md_safe(text: str) -> str:
+    """Escape angle brackets so script/AI text cannot inject ``<at>``/``<font>`` tags."""
+    return text.replace("<", "&lt;").replace(">", "&gt;")
 
 
 def build_execution_status_card(

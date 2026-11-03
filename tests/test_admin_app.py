@@ -103,3 +103,28 @@ def test_admin_server_binds_loopback_only(tmp_path):
         assert server._server.config.host == "127.0.0.1"
     finally:
         server.stop()
+
+
+def test_recent_executions_view_joins_request_and_reading(tmp_path):
+    from src.message_jobs import MessageJobStore
+
+    jobs = MessageJobStore(tmp_path / "db.sqlite3")
+    jobs.initialize()
+    jobs.create_if_new("om_q", "evt_q", "oc", "ou", "查询2007服务器状态 password=hunter2")
+    store = _store(tmp_path)
+    store.record_artifact("om_q", "done", "ai_read", "✅ 执行完成：查询 2007 服")
+    store.enqueue_interpretation("om_q", "read_success", {"summary": "s", "step_results": []})
+    store.claim_interpretation("om_q")
+    store.finish_interpretation("om_q", "done", summary="2007 已开服", model_name="gpt-5.6-terra", elapsed_ms=6731)
+    store.record_artifact("om_w", "done", "template", "✅ 执行完成：启服")
+
+    rows = _client(store).get("/api/executions").json()["executions"]
+
+    by_id = {row["message_id"]: row for row in rows}
+    assert by_id["om_q"]["request_text"].startswith("查询2007服务器状态")
+    assert "hunter2" not in by_id["om_q"]["request_text"]
+    assert by_id["om_q"]["model_name"] == "gpt-5.6-terra"
+    assert by_id["om_q"]["elapsed_ms"] == 6731
+    assert by_id["om_q"]["ai_summary"] == "2007 已开服"
+    assert by_id["om_w"]["report_source"] == "template" and by_id["om_w"]["model_name"] == ""
+    assert "最近执行" in _client(store).get("/").text

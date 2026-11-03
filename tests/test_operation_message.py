@@ -458,3 +458,16 @@ def test_job_failure_card_hides_internal_paths_and_credentials():
     assert "route-cn" not in body
 
 
+
+
+def test_execution_status_card_renders_markdown_but_escapes_tags():
+    from src.muliu_executor import MuliuExecutionResult as _Result
+    from src.operation_message import build_execution_status_card as _card
+
+    result = _Result("查询", [])
+    card = _card(result, detail='**服务器**：2007\n<at user_id="all"></at>')
+    text = card["elements"][2]["text"]
+
+    assert text["tag"] == "lark_md"
+    assert "**服务器**" in text["content"]
+    assert "<at" not in text["content"] and "&lt;at" in text["content"]

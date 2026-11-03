@@ -55,6 +55,10 @@ def create_admin_app(store: ExecutionReportStore) -> FastAPI:
             raise HTTPException(status_code=400, detail="unknown status")
         return {"patterns": [pattern.as_jsonable() for pattern in store.list_patterns(status)]}
 
+    @app.get("/api/executions")
+    async def executions(limit: int = 50) -> dict[str, Any]:
+        return {"executions": store.list_recent_executions(max(1, min(limit, 200)))}
+
     @app.get("/api/patterns/{pattern_id}/samples")
     async def samples(pattern_id: int) -> dict[str, Any]:
         pattern = store.get_pattern(pattern_id)
@@ -160,6 +164,10 @@ _INDEX_HTML = """<!doctype html>
   .row-actions { display:flex; gap:8px; margin-top:8px; flex-wrap:wrap; }
   .empty { color:var(--muted); padding:40px; text-align:center; }
   details summary { cursor:pointer; color:var(--accent); font-size:12px; }
+  table.exec { width:100%; border-collapse:collapse; background:var(--card); border:1px solid var(--line); border-radius:8px; }
+  table.exec th, table.exec td { padding:8px 10px; border-bottom:1px solid var(--line); text-align:left; vertical-align:top; font-size:13px; }
+  table.exec th { color:var(--muted); font-weight:500; background:#fafbfc; }
+  .st-done { color:var(--ok); } .st-failed { color:var(--bad); } .st-submitted_result_unknown { color:var(--warn); }
   .toast { position:fixed; bottom:20px; right:20px; background:#111; color:#fff; padding:8px 14px; border-radius:6px; opacity:0; transition:opacity .2s; }
   .toast.show { opacity:.9; }
 </style>
@@ -170,6 +178,7 @@ _INDEX_HTML = """<!doctype html>
   <div class="tabs">
     <button data-tab="candidate" class="active">待审核 <span id="n-candidate">0</span></button>
     <button data-tab="verified">可用模板 <span id="n-verified">0</span></button>
+    <button data-tab="executions">最近执行</button>
   </div>
   <div class="mode">
     查询成功时：
@@ -180,7 +189,7 @@ _INDEX_HTML = """<!doctype html>
   </div>
 </header>
 <main>
-  <div class="toolbar">
+  <div class="toolbar" id="toolbar">
     <label><input type="checkbox" id="select-all"> 全选</label>
     <button id="batch-approve" class="primary">批量通过</button>
     <button id="batch-revert">批量退回未审核</button>
@@ -207,13 +216,37 @@ async function api(method, url, body) {
 }
 function toast(msg) { const t = $("#toast"); t.textContent = msg; t.classList.add("show"); setTimeout(() => t.classList.remove("show"), 1800); }
 
+const STATUS = { done: "执行完成", failed: "执行失败", submitted_result_unknown: "结果未核验" };
+const SOURCE = {
+  template: "程序模板", ai_pending: "AI 分析中", ai_read: "AI 解读", ai_new: "AI 新分析",
+  candidate_template: "复用待审核模板", verified_template: "复用可用模板",
+};
+
 async function refresh() {
   const summary = await api("GET", "/api/summary");
   $("#n-candidate").textContent = summary.counts.candidate;
   $("#n-verified").textContent = summary.counts.verified;
   $("#mode").value = summary.read_success_mode;
+  $("#toolbar").style.display = tab === "executions" ? "none" : "";
+  if (tab === "executions") { renderExecutions((await api("GET", "/api/executions?limit=50")).executions); return; }
   patterns = (await api("GET", "/api/patterns?status=" + tab)).patterns;
   render();
+}
+
+function renderExecutions(rows) {
+  if (!rows.length) { $("#list").innerHTML = '<div class="empty">暂无执行记录</div>'; return; }
+  $("#list").innerHTML = `<table class="exec"><thead><tr>
+      <th>时间</th><th>请求</th><th>终态</th><th>说明来源</th><th>模型 / 耗时</th><th>详情</th></tr></thead><tbody>` +
+    rows.map((r) => `<tr>
+      <td>${fmt(r.created_at)}</td>
+      <td>${esc(r.request_text) || "-"}</td>
+      <td class="st-${esc(r.terminal_status)}">${STATUS[r.terminal_status] || esc(r.terminal_status)}</td>
+      <td>${SOURCE[r.report_source] || esc(r.report_source)}${r.interpretation_status && r.interpretation_status !== "done" ? "<div class=meta>研读：" + esc(r.interpretation_status) + (r.error_kind ? " / " + esc(r.error_kind) : "") + "</div>" : ""}</td>
+      <td>${esc(r.model_name) || "-"}${r.elapsed_ms ? "<div class=meta>" + (r.elapsed_ms / 1000).toFixed(1) + " 秒</div>" : ""}</td>
+      <td><details><summary>展开</summary>
+        ${r.ai_summary ? "<div class=meta>AI 说明</div><pre>" + esc(r.ai_summary) + "</pre>" : ""}
+        <div class="meta">执行明细</div><pre>${esc(r.summary_text)}</pre></details></td>
+    </tr>`).join("") + "</tbody></table>";
 }
 
 function render() {

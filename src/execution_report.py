@@ -524,6 +524,38 @@ class ExecutionReportStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def list_recent_executions(self, limit: int = 50) -> list[dict[str, Any]]:
+        """Recent results with how they were explained (read-only review view)."""
+        with self._connect() as conn:
+            has_jobs = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'message_jobs'"
+            ).fetchone() is not None
+            request_column = "COALESCE(j.text, '')" if has_jobs else "''"
+            join_jobs = "LEFT JOIN message_jobs j ON j.message_id = a.message_id" if has_jobs else ""
+            rows = conn.execute(
+                """
+                SELECT a.message_id, a.terminal_status, a.report_source, a.error_fingerprint,
+                       a.summary_text, a.created_at,
+                       {request_column} AS request_text,
+                       COALESCE(i.kind, '') AS interpretation_kind,
+                       COALESCE(i.status, '') AS interpretation_status,
+                       COALESCE(i.model_name, '') AS model_name,
+                       COALESCE(i.elapsed_ms, 0) AS elapsed_ms,
+                       COALESCE(i.error_kind, '') AS error_kind,
+                       COALESCE(i.summary, '') AS ai_summary
+                FROM execution_artifacts a
+                LEFT JOIN execution_interpretations i ON i.message_id = a.message_id
+                {join_jobs}
+                ORDER BY a.created_at DESC
+                LIMIT ?
+                """.format(request_column=request_column, join_jobs=join_jobs),
+                (limit,),
+            ).fetchall()
+        return [
+            {**dict(row), "request_text": mask_sensitive_operation_data(str(row["request_text"]))[:300]}
+            for row in rows
+        ]
+
     def prune_artifacts(self, retention_days: int, now: int | None = None) -> int:
         cutoff = self._now(now) - retention_days * 86400
         with self._connect() as conn:
