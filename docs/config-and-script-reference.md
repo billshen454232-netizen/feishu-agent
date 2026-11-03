@@ -145,6 +145,8 @@ worker  = 主动连 Gateway 领任务 + 本地 Muliu 执行（无飞书/AI 凭�
 
 - `background_timeout_seconds`：后台研读总预算，**不阻塞** Worker `/result` 与首张结果卡。旧字段 `timeout_seconds` 已废弃并被忽略。
 - `admin.port`：审批页端口，固定绑定 `127.0.0.1`，不可配置 host；安全组不要放行。访问：`ssh -L 8901:127.0.0.1:8901 <gateway>` 后浏览器开 `http://127.0.0.1:8901`。
+- 发起人昵称：收到群消息时后台调飞书群成员接口（应用需开通 `im:chat.members:read`），按 open_id 缓存，存入 `message_jobs.user_name`；只在审批页显示，不进 AI 提示词与飞书卡片。查询失败不影响请求处理。
+- 需求分析模型与耗时：规划器记录每次 AI 调用的模型和耗时，存入 `message_jobs.planning_model / planning_ms / planning_calls`。
 - 模板库、研读任务、执行记录与 `message_jobs` 同一个 SQLite 文件；执行记录按 `artifact_retention_days` 清理，模板不清理。
 
 ## 2. `src/` — 运行期 Python 模块
@@ -168,7 +170,7 @@ worker  = 主动连 Gateway 领任务 + 本地 Muliu 执行（无飞书/AI 凭�
 | [message_jobs.py](../src/message_jobs.py) | 任务状态机与持久化：`awaiting_confirmation → confirmed → submission_in_progress → queued_for_worker/leased → done/failed/submitted_result_unknown`。 | `MessageJob`, `MessageJobStore` |
 | [message_worker.py](../src/message_worker.py) | 消息处理主循环：AI 计划生成、确认卡投递、任务领取、结果回写；结果展示先投递可信卡，再按需后台 AI 研读并只更新卡片说明。 | `MessageJobProcessor`, `MessageJobQueue`, `present_execution_result` |
 | [execution_report.py](../src/execution_report.py) | 执行结果展示分流与典型故障模板库：错误特征（匹配键）计算、模板 / 后台研读任务 / 执行记录 / 运行时设置的 SQLite 存储。不改变任何终态。 | `compute_error_signature`, `ExecutionReportStore`, `is_read_only_result` |
-| [admin_app.py](../src/admin_app.py) | 模板审批页：待审核 / 可用模板两个页签（通过 / 退回 / 删除 / 编辑 / 批量）、只读「最近执行」页签（终态、说明来源、模型、耗时、AI 说明）、查询成功模式开关。独立服务，**只监听 127.0.0.1**，经 SSH 端口转发访问。 | `create_admin_app`, `AdminServer` |
+| [admin_app.py](../src/admin_app.py) | 模板审批页：待审核 / 可用模板两个页签（通过 / 退回 / 删除 / 编辑 / 批量）、只读「最近执行」页签（发起人昵称、需求分析模型与耗时、终态、说明来源、结果研读模型与耗时、AI 说明）、查询成功模式开关。独立服务，**只监听 127.0.0.1**，经 SSH 端口转发访问。 | `create_admin_app`, `AdminServer` |
 | [operation_message.py](../src/operation_message.py) | 计划与结果的飞书文本/卡片格式化，含敏感信息遮罩。 | `format_plan_for_confirmation`, `build_plan_confirmation_card`, `format_execution_result`, `mask_sensitive_operation_data` |
 | [conversation.py](../src/conversation.py) | 会话历史存取。 | `ConversationStore` |
 | [conversation_log.py](../src/conversation_log.py) | 对话归档为按日期的可读 Markdown。 | `ConversationLog` |

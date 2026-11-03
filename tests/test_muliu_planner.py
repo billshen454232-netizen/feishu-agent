@@ -649,3 +649,32 @@ async def test_repair_does_not_accept_unknown_step_fields():
 
     with pytest.raises(MuliuPlanError, match="不允许的字段"):
         await planner.create_plan("查询 6001 服 Patch 列表")
+
+
+@pytest.mark.asyncio
+async def test_plan_generation_records_model_and_time_of_every_ai_call():
+    from src.ai_client import AIGeneration
+
+    class ModelAwareAI(FakeAIClient):
+        async def generate_with_provenance(self, history, prompt):
+            return AIGeneration(await self.generate(history, prompt), "gpt-6-luna", False)
+
+    ai = ModelAwareAI([
+        '{"kind":"operation","summary":"s","steps":[{"path":"/home/serverGeneralScript/cc_patch.py","args":["-s","6001","-ck"],"description":"d"}]}'
+    ])
+    generation = await MuliuPlanner(ai, FakeCatalog(), max_steps=10).create_plan_with_trace("查询 6001 服 Patch 列表")
+
+    assert [model for model, _ms in generation.ai_calls] == ["gpt-6-luna", "gpt-6-luna"]
+    assert generation.ai_models == "gpt-6-luna"
+    assert generation.ai_ms == sum(ms for _model, ms in generation.ai_calls)
+
+
+@pytest.mark.asyncio
+async def test_plan_generation_without_provenance_still_records_calls():
+    ai = FakeAIClient([
+        '{"kind":"operation","summary":"s","steps":[{"path":"/home/serverGeneralScript/cc_patch.py","args":["-s","6001","-ck"],"description":"d"}]}'
+    ])
+    generation = await MuliuPlanner(ai, FakeCatalog(), max_steps=10).create_plan_with_trace("查询 6001 服 Patch 列表")
+
+    assert len(generation.ai_calls) == 2
+    assert generation.ai_models == "未知模型"

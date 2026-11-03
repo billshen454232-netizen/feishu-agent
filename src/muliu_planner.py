@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import json
 import logging
+import time
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from typing import Any
 
+from .ai_client import generate_with_provenance
 from .muliu_plan import MuliuPlan, MuliuPlanError, MuliuPlanKind, parse_plan
 from .muliu_script_catalog import MuliuCallContracts, MuliuScriptCatalog, template_variable_name
 from .utils.time_text import TimeTextError, parse_time_text
@@ -23,6 +26,21 @@ class MuliuPlanGeneration:
     response_stages: tuple[str, ...] = ()
     normalized_single_step: bool = False
     repair_attempts: int = 0
+    # (model name, elapsed ms) of every AI call made for this decision.
+    ai_calls: tuple[tuple[str, int], ...] = ()
+
+    @property
+    def ai_models(self) -> str:
+        """Distinct models in call order, e.g. ``gpt-6-luna``."""
+        return " / ".join(dict.fromkeys(model for model, _ms in self.ai_calls))
+
+    @property
+    def ai_ms(self) -> int:
+        return sum(ms for _model, ms in self.ai_calls)
+
+
+# Collects AI calls of the decision currently being planned (one list per task).
+_PLANNING_CALLS: ContextVar[list[tuple[str, int]] | None] = ContextVar("planning_calls", default=None)
 
 
 class MuliuPlanGenerationError(MuliuPlanError):
@@ -72,9 +90,27 @@ class MuliuPlanner:
         return (await self.create_plan_with_trace(user_text)).plan
 
     async def create_plan_with_trace(self, user_text: str) -> MuliuPlanGeneration:
+        calls: list[tuple[str, int]] = []
+        token = _PLANNING_CALLS.set(calls)
+        try:
+            generation = await self._create_plan_with_trace(user_text)
+        finally:
+            _PLANNING_CALLS.reset(token)
+        return replace(generation, ai_calls=tuple(calls))
+
+    async def _generate(self, prompt: str) -> str:
+        """Call the planning model and record which model answered and how long it took."""
+        started = time.perf_counter()
+        generation = await generate_with_provenance(self._ai_client, [], prompt)
+        calls = _PLANNING_CALLS.get()
+        if calls is not None:
+            calls.append((str(generation.model or ""), int((time.perf_counter() - started) * 1000)))
+        return generation.text
+
+    async def _create_plan_with_trace(self, user_text: str) -> MuliuPlanGeneration:
         script_catalog = self._script_catalog.read()
         call_contracts = self._script_catalog.read_call_contracts()
-        raw_plan = await self._ai_client.generate([], self._build_prompt(user_text, script_catalog))
+        raw_plan = await self._generate(self._build_prompt(user_text, script_catalog))
         try:
             plan, normalized_single_step = self._parse_and_validate_contract(raw_plan, call_contracts)
         except MuliuPlanError as first_error:
@@ -112,7 +148,7 @@ class MuliuPlanner:
             script_catalog=script_catalog,
             candidate_plan=candidate_plan,
         )
-        reviewed_response = await self._ai_client.generate([], review_prompt)
+        reviewed_response = await self._generate(review_prompt)
         try:
             reviewed_plan, reviewed_normalized = self._parse_and_validate_contract(
                 reviewed_response,
@@ -167,7 +203,7 @@ class MuliuPlanner:
                 invalid_response=latest_response,
                 validation_error=str(latest_error),
             )
-            latest_response = await self._ai_client.generate([], repair_prompt)
+            latest_response = await self._generate(repair_prompt)
             raw_responses.append(latest_response)
             stages.append("semantic_review_repair")
             try:
@@ -225,7 +261,7 @@ class MuliuPlanner:
                 invalid_response=latest_response,
                 validation_error=str(latest_error),
             )
-            latest_response = await self._ai_client.generate([], repair_prompt)
+            latest_response = await self._generate(repair_prompt)
             raw_responses.append(latest_response)
             stages.append("initial_repair")
             try:

@@ -597,3 +597,49 @@ async def test_warning_verdict_never_applies_to_write_scripts(tmp_path):
     card = feishu.card_updates[-1][1]
     assert card["header"]["template"] == "red"
     assert "已审核典型故障" in _card_detail(card)
+
+
+@pytest.mark.asyncio
+async def test_requester_name_is_looked_up_once_per_chat_and_stored(tmp_path):
+    class MemberFeishu(FakeFeishuClient):
+        def __init__(self):
+            super().__init__()
+            self.lookups = []
+
+        async def list_chat_member_names(self, chat_id):
+            self.lookups.append(chat_id)
+            return {"ou_user": "沈涛"}
+
+    store = MessageJobStore(tmp_path / "jobs.sqlite3")
+    store.initialize()
+    feishu = MemberFeishu()
+    processor = MessageJobProcessor(make_config(), store, ConversationStore(4), FakeAIClient(), feishu)
+    for message_id in ("om_1", "om_2"):
+        store.create_if_new(message_id, "evt_" + message_id, "oc_group", "ou_user", "你好", chat_type="group")
+        job = store.get(message_id)
+        await processor._remember_requester_name(job)
+
+    unknown = store.create_if_new("om_3", "evt_3", "oc_group", "ou_other", "你好", chat_type="group")[0]
+    await processor._remember_requester_name(unknown)  # within 5 min of last lookup → no refetch
+
+    assert feishu.lookups == ["oc_group"]
+    import sqlite3
+    rows = dict(sqlite3.connect(tmp_path / "jobs.sqlite3").execute("select message_id, user_name from message_jobs").fetchall())
+    assert rows == {"om_1": "沈涛", "om_2": "沈涛", "om_3": ""}
+
+
+@pytest.mark.asyncio
+async def test_requester_name_lookup_failure_never_breaks_processing(tmp_path):
+    class BrokenFeishu(FakeFeishuClient):
+        async def list_chat_member_names(self, chat_id):
+            raise RuntimeError("99991672 no permission")
+
+    store = MessageJobStore(tmp_path / "jobs.sqlite3")
+    store.initialize()
+    store.create_if_new("om_1", "evt_1", "oc_group", "ou_user", "你好", chat_type="group")
+    processor = MessageJobProcessor(make_config(), store, ConversationStore(4), FakeAIClient(), BrokenFeishu())
+
+    await processor.process_one("om_1")
+    await processor.wait_for_background()
+
+    assert store.get("om_1").status == "done"

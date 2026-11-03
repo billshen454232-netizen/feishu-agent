@@ -86,6 +86,10 @@ class MessageJobStore:
             self._add_column_if_missing(conn, "route_region", "TEXT NOT NULL DEFAULT ''")
             self._add_column_if_missing(conn, "worker_id", "TEXT NOT NULL DEFAULT ''")
             self._add_column_if_missing(conn, "worker_leased_at", "INTEGER")
+            self._add_column_if_missing(conn, "planning_model", "TEXT NOT NULL DEFAULT ''")
+            self._add_column_if_missing(conn, "planning_ms", "INTEGER NOT NULL DEFAULT 0")
+            self._add_column_if_missing(conn, "planning_calls", "INTEGER NOT NULL DEFAULT 0")
+            self._add_column_if_missing(conn, "user_name", "TEXT NOT NULL DEFAULT ''")
             conn.commit()
 
     def create_if_new(
@@ -454,6 +458,21 @@ class MessageJobStore:
                 return None
             conn.commit()
         return self._row_to_job(row)
+
+    def set_user_name(self, message_id: str, user_name: str) -> None:
+        """Store the requester's Feishu display name (review page only; never sent to AI)."""
+        with self._connect() as conn:
+            conn.execute("UPDATE message_jobs SET user_name = ? WHERE message_id = ?", (user_name[:64], message_id))
+            conn.commit()
+
+    def record_planning(self, message_id: str, model: str, elapsed_ms: int, calls: int) -> None:
+        """Remember which planning model produced this job's plan (observability only)."""
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE message_jobs SET planning_model = ?, planning_ms = ?, planning_calls = ? WHERE message_id = ?",
+                (model, elapsed_ms, calls, message_id),
+            )
+            conn.commit()
 
     def mark_awaiting_confirmation(
         self,

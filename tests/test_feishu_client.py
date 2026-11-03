@@ -106,3 +106,30 @@ async def test_reply_text_posts_text_message_reply():
     await client.reply_text("om_xxx", "hello")
 
     assert len(requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_list_chat_member_names_follows_pages():
+    member_requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/tenant_access_token/internal"):
+            return httpx.Response(200, json={"code": 0, "tenant_access_token": "t", "expire": 7200})
+        member_requests.append(dict(request.url.params))
+        assert request.headers["Authorization"] == "Bearer t"
+        if "page_token" not in request.url.params:
+            return httpx.Response(200, json={"code": 0, "data": {
+                "items": [{"member_id": "ou_1", "name": "沈涛"}, {"member_id": "ou_bot", "name": ""}],
+                "has_more": True, "page_token": "p2"}})
+        return httpx.Response(200, json={"code": 0, "data": {"items": [{"member_id": "ou_2", "name": "王一啸"}], "has_more": False}})
+
+    client = FeishuClient(
+        FeishuConfig(app_id="app", app_secret="secret", base_url="https://open.feishu.cn"),
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+
+    names = await client.list_chat_member_names("oc_1")
+
+    assert names == {"ou_1": "沈涛", "ou_2": "王一啸"}
+    assert member_requests[0]["member_id_type"] == "open_id"
+    assert member_requests[1]["page_token"] == "p2"

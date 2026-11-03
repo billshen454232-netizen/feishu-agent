@@ -59,6 +59,35 @@ class FeishuClient:
         if data.get("code") != 0:
             raise FeishuAPIError(f"Failed to update card message: {data}")
 
+    async def list_chat_member_names(self, chat_id: str) -> dict[str, str]:
+        """Return ``open_id -> display name`` of a chat's members (needs im:chat.members:read)."""
+        token = await self.get_tenant_access_token()
+        names: dict[str, str] = {}
+        page_token = ""
+        for _page in range(20):
+            params: dict[str, object] = {"member_id_type": "open_id", "page_size": 100}
+            if page_token:
+                params["page_token"] = page_token
+            response = await self._client.get(
+                f"{self._config.base_url}/open-apis/im/v1/chats/{chat_id}/members",
+                params=params,
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            response.raise_for_status()
+            data = response.json()
+            if data.get("code") != 0:
+                raise FeishuAPIError(f"Failed to list chat members: {data.get('code')} {data.get('msg')}")
+            body = data.get("data") or {}
+            for item in body.get("items") or []:
+                member_id = str(item.get("member_id") or "")
+                name = str(item.get("name") or "")
+                if member_id and name:
+                    names[member_id] = name
+            page_token = str(body.get("page_token") or "")
+            if not body.get("has_more") or not page_token:
+                break
+        return names
+
     async def _reply_message(self, message_id: str, msg_type: str, content: dict[str, object]) -> str:
         token = await self.get_tenant_access_token()
         response = await self._client.post(

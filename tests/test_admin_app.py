@@ -139,3 +139,22 @@ def test_outcome_verdict_endpoint(tmp_path):
     assert store.get_pattern(pattern.pattern_id).outcome == "warning"
     assert client.put("/api/patterns/{}/outcome".format(pattern.pattern_id), headers=HEADERS, json={"outcome": "ok"}).status_code == 400
     assert client.put("/api/patterns/999/outcome", headers=HEADERS, json={"outcome": "failure"}).status_code == 404
+
+
+def test_recent_executions_include_planning_model_and_requester(tmp_path):
+    from src.message_jobs import MessageJobStore
+
+    jobs = MessageJobStore(tmp_path / "db.sqlite3")
+    jobs.initialize()
+    jobs.create_if_new("om_p", "evt_p", "oc", "ou_abc123", "查询7020服务器信息")
+    jobs.record_planning("om_p", "gpt-6-luna", 7100, 2)
+    jobs.set_user_name("om_p", "沈涛")
+    store = _store(tmp_path)
+    store.record_artifact("om_p", "done", "template", "✅ 执行完成")
+
+    row = _client(store).get("/api/executions").json()["executions"][0]
+
+    assert row["user_id"] == "ou_abc123"
+    assert row["user_name"] == "沈涛"
+    assert (row["planning_model"], row["planning_ms"], row["planning_calls"]) == ("gpt-6-luna", 7100, 2)
+    assert "需求分析" in _client(store).get("/").text

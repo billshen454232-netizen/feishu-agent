@@ -136,6 +136,10 @@ class MessageJobProcessor:
         self._interpretation_ai_client = interpretation_ai_client or ai_client
         self._interpretation_tasks: set[asyncio.Task[None]] = set()
         self._interpretation_semaphore: asyncio.Semaphore | None = None
+        # Requester display names (open_id -> name), filled from chat member lists.
+        self._member_names: dict[str, str] = {}
+        self._member_lookup_at: dict[str, float] = {}
+        self._background_tasks: set[asyncio.Task[None]] = set()
         self._stopping = False
 
     def start(self) -> None:
@@ -154,7 +158,7 @@ class MessageJobProcessor:
                 await self._task
             except asyncio.CancelledError:
                 pass
-        operation_tasks = (*self._operation_tasks, *self._interpretation_tasks)
+        operation_tasks = (*self._operation_tasks, *self._interpretation_tasks, *self._background_tasks)
         for task in operation_tasks:
             task.cancel()
         if operation_tasks:
@@ -174,6 +178,7 @@ class MessageJobProcessor:
         feishu_reply_ms = 0
         logger.warning("job processing message_id=%s", message_id)
         self._store.mark_processing(message_id)
+        self._schedule_background(self._remember_requester_name(job))
 
         try:
             if self._operation_planner is not None:
@@ -186,6 +191,7 @@ class MessageJobProcessor:
                     generation = await self._create_operation_plan(job.text)
                     plan = generation.plan
                     ai_ms = self._elapsed_ms(ai_started)
+                    self._record_planning(message_id, generation)
                     if plan.kind is MuliuPlanKind.KNOWLEDGE:
                         (
                             knowledge_ms,
@@ -961,6 +967,50 @@ class MessageJobProcessor:
             source_paths=tuple(source_paths),
         )
         return knowledge_ms, ai_ms, self._elapsed_ms(feishu_reply_started), local_knowledge_hit
+
+    def _schedule_background(self, coroutine: Any) -> None:
+        task = asyncio.create_task(coroutine)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
+    async def _remember_requester_name(self, job: Any) -> None:
+        """Record who asked, for the review page. Never blocks or fails the request."""
+        if not job.user_id or job.chat_type != "group" or not callable(getattr(self._store, "set_user_name", None)):
+            return
+        name = self._member_names.get(job.user_id)
+        if name is None:
+            lister = getattr(self._feishu_client, "list_chat_member_names", None)
+            last_lookup = self._member_lookup_at.get(job.chat_id, 0.0)
+            # Unknown sender: refresh that chat's member list at most every 5 minutes.
+            if not callable(lister) or time.monotonic() - last_lookup < 300:
+                return
+            self._member_lookup_at[job.chat_id] = time.monotonic()
+            try:
+                self._member_names.update(await lister(job.chat_id))
+            except Exception:  # noqa: BLE001 - display data only
+                logger.warning("chat member lookup failed chat_id=%s", job.chat_id, exc_info=True)
+                return
+            name = self._member_names.get(job.user_id)
+            if not name:
+                return
+        try:
+            self._store.set_user_name(job.message_id, name)
+        except Exception:  # noqa: BLE001
+            logger.warning("requester name not stored message_id=%s", job.message_id, exc_info=True)
+
+    async def wait_for_background(self) -> None:
+        """Test helper: wait for display-only background tasks."""
+        while self._background_tasks:
+            await asyncio.gather(*tuple(self._background_tasks), return_exceptions=True)
+
+    def _record_planning(self, message_id: str, generation: MuliuPlanGeneration) -> None:
+        record = getattr(self._store, "record_planning", None)
+        if not callable(record) or not generation.ai_calls:
+            return
+        try:
+            record(message_id, generation.ai_models, generation.ai_ms, len(generation.ai_calls))
+        except Exception:  # noqa: BLE001 - observability must not break planning
+            logger.warning("planning trace not recorded message_id=%s", message_id, exc_info=True)
 
     async def _create_operation_plan(self, user_text: str) -> MuliuPlanGeneration:
         """Use trace-aware planners while keeping simple test doubles compatible."""

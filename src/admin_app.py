@@ -249,10 +249,11 @@ async function refresh() {
 function renderExecutions(rows) {
   if (!rows.length) { $("#list").innerHTML = '<div class="empty">暂无执行记录</div>'; return; }
   $("#list").innerHTML = `<table class="exec"><thead><tr>
-      <th>时间</th><th>请求</th><th>终态</th><th>说明来源</th><th>模型 / 耗时</th><th>详情</th></tr></thead><tbody>` +
+      <th>时间</th><th>请求</th><th>需求分析</th><th>终态</th><th>说明来源</th><th>结果研读</th><th>详情</th></tr></thead><tbody>` +
     rows.map((r) => `<tr>
       <td>${fmt(r.created_at)}</td>
-      <td>${esc(r.request_text) || "-"}</td>
+      <td>${esc(r.request_text) || "-"}${r.user_name || r.user_id ? "<div class=meta>" + esc(r.user_name || r.user_id) + "</div>" : ""}</td>
+      <td>${esc(r.planning_model) || "-"}${r.planning_ms ? "<div class=meta>" + (r.planning_ms / 1000).toFixed(1) + " 秒 · " + r.planning_calls + " 次调用</div>" : ""}</td>
       <td class="st-${esc(r.terminal_status)}">${STATUS[r.terminal_status] || esc(r.terminal_status)}</td>
       <td>${SOURCE[r.report_source] || esc(r.report_source)}${r.interpretation_status && r.interpretation_status !== "done" ? "<div class=meta>研读：" + esc(r.interpretation_status) + (r.error_kind ? " / " + esc(r.error_kind) : "") + "</div>" : ""}</td>
       <td>${esc(r.model_name) || "-"}${r.elapsed_ms ? "<div class=meta>" + (r.elapsed_ms / 1000).toFixed(1) + " 秒</div>" : ""}</td>

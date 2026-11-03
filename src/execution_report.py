@@ -555,12 +555,23 @@ class ExecutionReportStore:
                 "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'message_jobs'"
             ).fetchone() is not None
             request_column = "COALESCE(j.text, '')" if has_jobs else "''"
+            job_columns = {
+                row["name"] for row in conn.execute("PRAGMA table_info(message_jobs)")
+            } if has_jobs else set()
+
+            def job_column(name: str, default: str) -> str:
+                return "COALESCE(j.{0}, {1})".format(name, default) if name in job_columns else default
             join_jobs = "LEFT JOIN message_jobs j ON j.message_id = a.message_id" if has_jobs else ""
             rows = conn.execute(
                 """
                 SELECT a.message_id, a.terminal_status, a.report_source, a.error_fingerprint,
                        a.summary_text, a.created_at,
                        {request_column} AS request_text,
+                       {user_id} AS user_id,
+                       {user_name} AS user_name,
+                       {planning_model} AS planning_model,
+                       {planning_ms} AS planning_ms,
+                       {planning_calls} AS planning_calls,
                        COALESCE(i.kind, '') AS interpretation_kind,
                        COALESCE(i.status, '') AS interpretation_status,
                        COALESCE(i.model_name, '') AS model_name,
@@ -572,7 +583,15 @@ class ExecutionReportStore:
                 {join_jobs}
                 ORDER BY a.created_at DESC
                 LIMIT ?
-                """.format(request_column=request_column, join_jobs=join_jobs),
+                """.format(
+                    request_column=request_column,
+                    join_jobs=join_jobs,
+                    user_id=job_column("user_id", "''"),
+                    user_name=job_column("user_name", "''"),
+                    planning_model=job_column("planning_model", "''"),
+                    planning_ms=job_column("planning_ms", "0"),
+                    planning_calls=job_column("planning_calls", "0"),
+                ),
                 (limit,),
             ).fetchall()
         return [
