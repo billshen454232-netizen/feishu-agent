@@ -128,3 +128,14 @@ def test_recent_executions_view_joins_request_and_reading(tmp_path):
     assert by_id["om_q"]["ai_summary"] == "2007 已开服"
     assert by_id["om_w"]["report_source"] == "template" and by_id["om_w"]["model_name"] == ""
     assert "最近执行" in _client(store).get("/").text
+
+
+def test_outcome_verdict_endpoint(tmp_path):
+    store = _store(tmp_path)
+    pattern = _add(store, "ERROR a", "om_1")
+    client = _client(store)
+
+    assert client.put("/api/patterns/{}/outcome".format(pattern.pattern_id), headers=HEADERS, json={"outcome": "warning"}).json() == {"outcome": "warning"}
+    assert store.get_pattern(pattern.pattern_id).outcome == "warning"
+    assert client.put("/api/patterns/{}/outcome".format(pattern.pattern_id), headers=HEADERS, json={"outcome": "ok"}).status_code == 400
+    assert client.put("/api/patterns/999/outcome", headers=HEADERS, json={"outcome": "failure"}).status_code == 404

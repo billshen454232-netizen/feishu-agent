@@ -17,6 +17,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse
 
 from .execution_report import (
     PATTERN_CANDIDATE,
+    PATTERN_OUTCOMES,
     PATTERN_STATUSES,
     PATTERN_VERIFIED,
     READ_SUCCESS_MODES,
@@ -74,6 +75,16 @@ def create_admin_app(store: ExecutionReportStore) -> FastAPI:
         if not store.update_diagnosis(pattern_id, diagnosis.strip()):
             raise HTTPException(status_code=404, detail="not found")
         return {"status": "ok"}
+
+    @app.put("/api/patterns/{pattern_id}/outcome")
+    async def set_outcome(pattern_id: int, payload: dict[str, Any]) -> dict[str, str]:
+        outcome = payload.get("outcome")
+        if outcome not in PATTERN_OUTCOMES:
+            raise HTTPException(status_code=400, detail="unknown outcome")
+        if not store.set_pattern_outcome(pattern_id, outcome):
+            raise HTTPException(status_code=404, detail="not found")
+        logger.info("template review pattern=%s outcome=%s", pattern_id, outcome)
+        return {"outcome": outcome}
 
     @app.post("/api/patterns/batch")
     async def batch(payload: dict[str, Any]) -> dict[str, Any]:
@@ -162,6 +173,7 @@ _INDEX_HTML = """<!doctype html>
   pre { background:#f6f8fa; padding:8px; border-radius:6px; white-space:pre-wrap; word-break:break-all; margin:8px 0; font-size:12px; }
   textarea { width:100%; min-height:90px; font:inherit; padding:8px; border:1px solid var(--line); border-radius:6px; }
   .row-actions { display:flex; gap:8px; margin-top:8px; flex-wrap:wrap; }
+  .outcome-row { display:flex; align-items:center; gap:8px; margin:6px 0; flex-wrap:wrap; }
   .empty { color:var(--muted); padding:40px; text-align:center; }
   details summary { cursor:pointer; color:var(--accent); font-size:12px; }
   table.exec { width:100%; border-collapse:collapse; background:var(--card); border:1px solid var(--line); border-radius:8px; }
@@ -220,6 +232,7 @@ const STATUS = { done: "执行完成", failed: "执行失败", submitted_result_
 const SOURCE = {
   template: "程序模板", ai_pending: "AI 分析中", ai_read: "AI 解读", ai_new: "AI 新分析",
   candidate_template: "复用待审核模板", verified_template: "复用可用模板",
+  verified_warning: "复用可用模板 · 判定警告",
 };
 
 async function refresh() {
@@ -264,6 +277,14 @@ function render() {
       </div>
       <div class="meta">失败原因：${esc(p.normalized_reason) || "（无）"}</div>
       <pre>${esc(p.key_error_lines.join("\\n")) || "（无关键错误行）"}</pre>
+      <div class="outcome-row">
+        结果判定：
+        <select class="outcome">
+          <option value="failure" ${p.outcome === "failure" ? "selected" : ""}>执行失败（默认）</option>
+          <option value="warning" ${p.outcome === "warning" ? "selected" : ""}>执行成功 · 服务器状态存疑</option>
+        </select>
+        <span class="meta">仅对查询类脚本、且模板已通过后生效；机器终态仍记为失败</span>
+      </div>
       <textarea class="diagnosis">${esc(p.diagnosis)}</textarea>
       <details class="scopes"><summary>出现范围（${p.seen_scopes.length}）与最近执行</summary>
         <pre>${esc(p.seen_scopes.join("\\n")) || "-"}</pre>
@@ -305,6 +326,12 @@ $("#list").addEventListener("click", async (e) => {
   } else if (e.target.classList.contains("approve")) { await act([id], "approve"); }
   else if (e.target.classList.contains("revert")) { await act([id], "revert"); }
   else if (e.target.classList.contains("delete")) { await act([id], "delete"); }
+});
+$("#list").addEventListener("change", async (e) => {
+  if (!e.target.classList.contains("outcome")) return;
+  const id = Number(e.target.closest(".item").dataset.id);
+  await api("PUT", "/api/patterns/" + id + "/outcome", { outcome: e.target.value });
+  toast("结果判定已保存");
 });
 $("#list").addEventListener("toggle", async (e) => {
   const d = e.target; if (!d.classList || !d.classList.contains("scopes") || !d.open) return;

@@ -533,3 +533,67 @@ async def test_background_reading_uses_interpretation_client_not_chat_client(tmp
     assert chat_ai.calls == []
     assert len(strong_ai.calls) == 1
     assert report_store.list_patterns("candidate")[0].diagnosis == "强模型诊断"
+
+
+def _basic_info_failure(server_id):
+    return MuliuExecutionResult(
+        "查询 {} 服基础信息".format(server_id),
+        [
+            MuliuStepResult(
+                1,
+                "查询 {} 服基础信息".format(server_id),
+                "/home/serverGeneralScript/basic_info.sh",
+                [server_id],
+                False,
+                "NSLG_HOSTNUM = {}\n开服时间文件 [运行目录] 不存在或为空。\n未检测到开服成功信息".format(server_id),
+            )
+        ],
+        failed_step_number=1,
+        failure_reason="脚本执行失败，exit_code=1",
+    )
+
+
+@pytest.mark.asyncio
+async def test_verified_warning_template_shows_query_done_with_warning_but_keeps_state(tmp_path):
+    ai = InterpretationAIClient("开服时间文件缺失，服务可能未完成启动。")
+    feishu = FakeCardFeishuClient()
+    store, report_store, processor = _report_processor(tmp_path, ai, feishu)
+    await processor.present_execution_result(_card_job(store, "om_1", "查看7020"), _basic_info_failure("7020"), "om_1")
+    await processor.wait_for_interpretations()
+    pattern = report_store.list_patterns("candidate")[0]
+
+    report_store.set_pattern_outcome(pattern.pattern_id, "warning")
+    await processor.present_execution_result(_card_job(store, "om_2", "查看7021"), _basic_info_failure("7021"), "om_2")
+    candidate_card = feishu.card_updates[-1][1]
+    assert candidate_card["header"]["template"] == "red"  # not verified yet → still failure
+
+    report_store.set_pattern_status([pattern.pattern_id], "verified")
+    await processor.present_execution_result(_card_job(store, "om_3", "查看7022"), _basic_info_failure("7022"), "om_3")
+    card = feishu.card_updates[-1][1]
+
+    assert card["header"]["template"] == "orange"
+    assert card["header"]["title"]["content"] == "测试服查询完成 · 服务器状态存疑"
+    assert "【执行完成 · 服务器状态存疑】" in _card_detail(card)
+    assert "机器判定：脚本执行失败，exit_code=1" in _card_detail(card)
+    assert len(ai.calls) == 1
+    rows = {row["message_id"]: row for row in report_store.list_recent_executions()}
+    assert rows["om_3"]["terminal_status"] == "failed"
+    assert rows["om_3"]["report_source"] == "verified_warning"
+
+
+@pytest.mark.asyncio
+async def test_warning_verdict_never_applies_to_write_scripts(tmp_path):
+    ai = InterpretationAIClient("诊断")
+    feishu = FakeCardFeishuClient()
+    store, report_store, processor = _report_processor(tmp_path, ai, feishu)
+    await processor.present_execution_result(_card_job(store, "om_1", "合服"), _merge_failure("2213"), "om_1")
+    await processor.wait_for_interpretations()
+    pattern = report_store.list_patterns("candidate")[0]
+    report_store.set_pattern_outcome(pattern.pattern_id, "warning")
+    report_store.set_pattern_status([pattern.pattern_id], "verified")
+
+    await processor.present_execution_result(_card_job(store, "om_2", "合服"), _merge_failure("3001"), "om_2")
+
+    card = feishu.card_updates[-1][1]
+    assert card["header"]["template"] == "red"
+    assert "已审核典型故障" in _card_detail(card)

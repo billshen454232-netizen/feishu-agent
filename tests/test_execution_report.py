@@ -150,3 +150,28 @@ def test_store_masks_secrets_in_persisted_payload(tmp_path):
 
     payload = store.get_interpretation("om_1").payload_json
     assert "hunter2" not in payload and "tok123" not in payload
+
+
+def test_initialize_migrates_old_pattern_table_without_outcome(tmp_path):
+    import sqlite3
+
+    db = tmp_path / "db.sqlite3"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE execution_error_patterns (pattern_id INTEGER PRIMARY KEY AUTOINCREMENT, script_path TEXT NOT NULL, "
+        "error_fingerprint TEXT NOT NULL UNIQUE, failure_category TEXT NOT NULL, normalized_reason TEXT NOT NULL, "
+        "key_error_lines TEXT NOT NULL, diagnosis TEXT NOT NULL, status TEXT NOT NULL, seen_scopes_json TEXT NOT NULL DEFAULT '[]', "
+        "sample_message_ids TEXT NOT NULL DEFAULT '[]', first_seen_at INTEGER NOT NULL, last_seen_at INTEGER NOT NULL, "
+        "hit_count INTEGER NOT NULL DEFAULT 0, approved_at INTEGER)"
+    )
+    conn.execute(
+        "INSERT INTO execution_error_patterns (script_path, error_fingerprint, failure_category, normalized_reason, "
+        "key_error_lines, diagnosis, status, first_seen_at, last_seen_at) VALUES ('/a.sh','fp','x','r','[]','d','candidate',1,1)"
+    )
+    conn.commit()
+    conn.close()
+
+    store = ExecutionReportStore(db)
+    store.initialize()
+
+    assert store.find_pattern("fp").outcome == "failure"

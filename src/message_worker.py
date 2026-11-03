@@ -21,6 +21,7 @@ from .muliu_planner import MuliuPlanGeneration, MuliuPlanGenerationError
 from .muliu_routing import MuliuPlanRouteResolver, MuliuRouteSnapshot, MuliuRoutingError
 from .operation_message import (
     build_execution_status_card,
+    build_execution_warning_card,
     build_job_failure_card,
     build_operation_status_card,
     build_plan_confirmation_card,
@@ -32,6 +33,7 @@ from .operation_message import (
 from .execution_report import (
     INTERPRETATION_FAILURE,
     INTERPRETATION_READ_SUCCESS,
+    OUTCOME_WARNING,
     PATTERN_VERIFIED,
     READ_SUCCESS_MODE_AI,
     ExecutionReportStore,
@@ -574,11 +576,16 @@ class MessageJobProcessor:
         except Exception:  # noqa: BLE001 - template lookup must never hide a trusted result
             logger.exception("execution report lookup failed message_id=%s", pending_job.message_id)
             presentation = _Presentation(detail=result_card_detail(fallback_reply, result), source="template")
+        if presentation.warning:
+            fallback_reply = "⚠️ 按已审核模板判定：查询完成，服务器状态存疑（机器终态仍为失败）\n\n{}".format(fallback_reply)
+            status_card = build_execution_warning_card(result, detail=presentation.detail)
+        else:
+            status_card = build_execution_status_card(result, detail=presentation.detail)
         await self.deliver_execution_result(
             pending_job,
             reply_message_id,
             fallback_reply,
-            status_card=build_execution_status_card(result, detail=presentation.detail),
+            status_card=status_card,
         )
         if self._report_store is None:
             return
@@ -638,6 +645,22 @@ class MessageJobProcessor:
                 hit.pattern_id,
                 hit.status,
             )
+            if (
+                hit.status == PATTERN_VERIFIED
+                and hit.outcome == OUTCOME_WARNING
+                and is_read_only_result(result, self._call_contracts())
+            ):
+                return _Presentation(
+                    detail="【执行完成 · 服务器状态存疑】{}\n机器判定：{}\n\n说明来源：已审核典型状况（命中 {} 次）\n{}".format(
+                        mask_sensitive_operation_data(result.summary),
+                        mask_sensitive_operation_data(result.failure_reason),
+                        hit.hit_count,
+                        hit.diagnosis,
+                    ),
+                    source="verified_warning",
+                    fingerprint=signature.fingerprint,
+                    warning=True,
+                )
             return _Presentation(
                 detail="{}\n\n{}\n{}".format(base, _pattern_label(hit), hit.diagnosis),
                 source="verified_template" if hit.status == PATTERN_VERIFIED else "candidate_template",
@@ -1080,6 +1103,7 @@ class _Presentation:
     source: str
     background_kind: str = ""
     fingerprint: str = ""
+    warning: bool = False
 
 
 def _terminal_status(result: MuliuExecutionResult) -> str:

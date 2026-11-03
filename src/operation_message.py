@@ -222,6 +222,20 @@ def _lark_md_safe(text: str) -> str:
     return text.replace("<", "&lt;").replace(">", "&gt;")
 
 
+def build_execution_warning_card(result: MuliuExecutionResult, *, detail: str) -> dict[str, object]:
+    """Reviewed-template verdict: the query ran, but the server state is questionable.
+
+    Used only for verified templates on read-only results; the persisted job
+    state stays ``failed`` for audit.
+    """
+    return build_operation_status_card(
+        "测试服查询完成 · 服务器状态存疑",
+        result.summary,
+        detail,
+        template="orange",
+    )
+
+
 def build_execution_status_card(
     result: MuliuExecutionResult,
     *,

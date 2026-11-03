@@ -27,6 +27,13 @@ PATTERN_CANDIDATE = "candidate"
 PATTERN_VERIFIED = "verified"
 PATTERN_STATUSES = (PATTERN_CANDIDATE, PATTERN_VERIFIED)
 
+# Human-set presentation verdict of a template. ``warning`` = "the query ran but
+# the server state is questionable"; it only applies to verified templates on
+# read-only results and never changes the persisted terminal state.
+OUTCOME_FAILURE = "failure"
+OUTCOME_WARNING = "warning"
+PATTERN_OUTCOMES = (OUTCOME_FAILURE, OUTCOME_WARNING)
+
 INTERPRETATION_FAILURE = "failure"
 INTERPRETATION_READ_SUCCESS = "read_success"
 
@@ -100,6 +107,7 @@ class ErrorPattern:
     last_seen_at: int
     hit_count: int
     approved_at: int | None
+    outcome: str = OUTCOME_FAILURE
 
     def as_jsonable(self) -> dict[str, Any]:
         return {
@@ -116,6 +124,7 @@ class ErrorPattern:
             "last_seen_at": self.last_seen_at,
             "hit_count": self.hit_count,
             "approved_at": self.approved_at,
+            "outcome": self.outcome,
         }
 
 
@@ -278,7 +287,8 @@ class ExecutionReportStore:
                     first_seen_at INTEGER NOT NULL,
                     last_seen_at INTEGER NOT NULL,
                     hit_count INTEGER NOT NULL DEFAULT 0,
-                    approved_at INTEGER
+                    approved_at INTEGER,
+                    outcome TEXT NOT NULL DEFAULT 'failure'
                 );
                 CREATE TABLE IF NOT EXISTS execution_interpretations (
                     message_id TEXT PRIMARY KEY,
@@ -310,6 +320,9 @@ class ExecutionReportStore:
                 );
                 """
             )
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(execution_error_patterns)")}
+            if "outcome" not in columns:
+                conn.execute("ALTER TABLE execution_error_patterns ADD COLUMN outcome TEXT NOT NULL DEFAULT 'failure'")
             conn.commit()
 
     # settings -------------------------------------------------------------
@@ -449,6 +462,17 @@ class ExecutionReportStore:
             )
             conn.commit()
         return cursor.rowcount
+
+    def set_pattern_outcome(self, pattern_id: int, outcome: str) -> bool:
+        if outcome not in PATTERN_OUTCOMES:
+            raise ValueError("unknown pattern outcome: {}".format(outcome))
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "UPDATE execution_error_patterns SET outcome = ? WHERE pattern_id = ?",
+                (outcome, pattern_id),
+            )
+            conn.commit()
+        return cursor.rowcount > 0
 
     def update_diagnosis(self, pattern_id: int, diagnosis: str) -> bool:
         with self._connect() as conn:
@@ -704,6 +728,7 @@ class ExecutionReportStore:
             last_seen_at=int(row["last_seen_at"]),
             hit_count=int(row["hit_count"]),
             approved_at=None if row["approved_at"] is None else int(row["approved_at"]),
+            outcome=str(row["outcome"]) if "outcome" in row.keys() else OUTCOME_FAILURE,
         )
 
 
