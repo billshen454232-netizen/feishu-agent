@@ -111,6 +111,7 @@ class MessageJobProcessor:
         conversation_log: Any | None = None,
         report_store: ExecutionReportStore | None = None,
         interpretation_ai_client: Any | None = None,
+        clear_notifier: Any | None = None,
     ) -> None:
         self._config = config
         self._store = store
@@ -140,6 +141,7 @@ class MessageJobProcessor:
         self._member_names: dict[str, str] = {}
         self._member_lookup_at: dict[str, float] = {}
         self._background_tasks: set[asyncio.Task[None]] = set()
+        self._clear_notifier = clear_notifier
         self._stopping = False
 
     def start(self) -> None:
@@ -261,6 +263,7 @@ class MessageJobProcessor:
                             confirmation_method="card",
                             route_region=route_snapshot.region,
                         )
+                        self._notify_clear("clear_prepared", job, plan, route_snapshot.region, operator_id=job.user_id)
                         self._append_conversation_log(
                             job,
                             "operation_plan",
@@ -382,6 +385,7 @@ class MessageJobProcessor:
         accepted = await self._start_claimed_confirmation(
             pending_job,
             pending_job.confirmation_message_id,
+            confirmer_id=user_id,
         )
         if not accepted:
             return build_operation_status_card(
@@ -401,7 +405,13 @@ class MessageJobProcessor:
             template="blue",
         )
 
-    async def _start_claimed_confirmation(self, pending_job: Any, reply_message_id: str) -> bool:
+    async def _start_claimed_confirmation(
+        self,
+        pending_job: Any,
+        reply_message_id: str,
+        *,
+        confirmer_id: str = "",
+    ) -> bool:
         """Parse the stored plan and launch it after an atomic confirmation claim."""
         try:
             plan = parse_plan(pending_job.plan_json, max_steps=self._config.muliu.max_steps)
@@ -458,6 +468,13 @@ class MessageJobProcessor:
                     status_card=build_execution_status_card(result, detail=result_card_detail(reply, result)),
                 )
                 return False
+            self._notify_clear(
+                "clear_executing",
+                pending_job,
+                plan,
+                pending_job.route_region,
+                operator_id=confirmer_id or pending_job.user_id,
+            )
             return True
 
         if self._muliu_executor is None:
@@ -479,6 +496,13 @@ class MessageJobProcessor:
             return False
 
         self._store.mark_submission_in_progress(pending_job.message_id)
+        self._notify_clear(
+            "clear_executing",
+            pending_job,
+            plan,
+            pending_job.route_region,
+            operator_id=confirmer_id or pending_job.user_id,
+        )
         task = asyncio.create_task(self._execute_confirmed_plan(pending_job, plan, reply_message_id))
         self._operation_tasks.add(task)
         task.add_done_callback(self._operation_tasks.discard)
@@ -973,30 +997,86 @@ class MessageJobProcessor:
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
 
+    async def _member_name(self, chat_id: str, open_id: str) -> str:
+        """Display name of a chat member from a cached member list ("" if unknown)."""
+        if not open_id:
+            return ""
+        name = self._member_names.get(open_id)
+        if name is not None:
+            return name
+        lister = getattr(self._feishu_client, "list_chat_member_names", None)
+        last_lookup = self._member_lookup_at.get(chat_id, 0.0)
+        # Unknown member: refresh that chat's member list at most every 5 minutes.
+        if not chat_id or not callable(lister) or time.monotonic() - last_lookup < 300:
+            return ""
+        self._member_lookup_at[chat_id] = time.monotonic()
+        try:
+            self._member_names.update(await lister(chat_id))
+        except Exception:  # noqa: BLE001 - display data only
+            logger.warning("chat member lookup failed chat_id=%s", chat_id, exc_info=True)
+            return ""
+        return self._member_names.get(open_id, "")
+
     async def _remember_requester_name(self, job: Any) -> None:
         """Record who asked, for the review page. Never blocks or fails the request."""
         if not job.user_id or job.chat_type != "group" or not callable(getattr(self._store, "set_user_name", None)):
             return
-        name = self._member_names.get(job.user_id)
-        if name is None:
-            lister = getattr(self._feishu_client, "list_chat_member_names", None)
-            last_lookup = self._member_lookup_at.get(job.chat_id, 0.0)
-            # Unknown sender: refresh that chat's member list at most every 5 minutes.
-            if not callable(lister) or time.monotonic() - last_lookup < 300:
-                return
-            self._member_lookup_at[job.chat_id] = time.monotonic()
-            try:
-                self._member_names.update(await lister(job.chat_id))
-            except Exception:  # noqa: BLE001 - display data only
-                logger.warning("chat member lookup failed chat_id=%s", job.chat_id, exc_info=True)
-                return
-            name = self._member_names.get(job.user_id)
-            if not name:
-                return
+        name = await self._member_name(job.chat_id, job.user_id)
+        if not name:
+            return
         try:
             self._store.set_user_name(job.message_id, name)
         except Exception:  # noqa: BLE001
             logger.warning("requester name not stored message_id=%s", job.message_id, exc_info=True)
+
+    def _notify_clear(self, event: str, job: Any, plan: MuliuPlan, route_region: str, *, operator_id: str) -> None:
+        """Fire-and-forget clear-data event when the plan contains clear steps."""
+        notifier = self._clear_notifier
+        if notifier is None or not notifier.enabled:
+            return
+        clear_steps = notifier.clear_steps(plan)
+        if not clear_steps:
+            return
+        self._schedule_background(self._send_clear_event(event, job, plan, clear_steps, route_region, operator_id))
+
+    async def _send_clear_event(
+        self,
+        event: str,
+        job: Any,
+        plan: MuliuPlan,
+        clear_steps: list[Any],
+        route_region: str,
+        operator_id: str,
+    ) -> None:
+        try:
+            server_ids: list[str] = []
+            contracts = self._call_contracts()
+            if contracts is not None:
+                try:
+                    clear_plan = MuliuPlan(summary=plan.summary, steps=list(clear_steps), kind=plan.kind)
+                    server_ids = list(dict.fromkeys(contracts.extract_server_ids(clear_plan)))
+                except Exception:  # noqa: BLE001 - server ids are best-effort context
+                    server_ids = []
+            requester = {"open_id": job.user_id, "name": await self._member_name(job.chat_id, job.user_id)}
+            operator = (
+                requester
+                if operator_id == job.user_id
+                else {"open_id": operator_id, "name": await self._member_name(job.chat_id, operator_id)}
+            )
+            payload = self._clear_notifier.build_payload(
+                event,
+                message_id=job.message_id,
+                plan=plan,
+                clear_steps=list(clear_steps),
+                server_ids=server_ids,
+                route_region=route_region,
+                request_text=job.text,
+                operator=operator,
+                requester=requester,
+            )
+            self._clear_notifier.publish(payload)
+        except Exception:  # noqa: BLE001 - notification must never affect the operation
+            logger.exception("clear notification crashed message_id=%s event=%s", job.message_id, event)
 
     async def wait_for_background(self) -> None:
         """Test helper: wait for display-only background tasks."""

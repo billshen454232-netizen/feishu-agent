@@ -15,6 +15,8 @@ from .config import ConfigError, load_config
 from .conversation import ConversationStore
 from .conversation_log import ConversationLog
 from .admin_app import AdminServer, create_admin_app
+from .clear_notifier import ClearEventPublisher, ClearEventRelay, LocalEventSource, WebhookSender
+from .outbound_events import OutboundEventStore
 from .event_handler import FeishuEventHandler
 from .execution_report import ExecutionReportStore
 from .feishu_client import FeishuClient
@@ -48,6 +50,11 @@ def create_app(config_path: str | Path = "config/config.json") -> FastAPI:
     job_store.initialize()
     report_store = ExecutionReportStore(config.job_queue.database_path)
     report_store.initialize()
+    event_store = OutboundEventStore(config.job_queue.database_path)
+    event_store.initialize()
+    clear_publisher = (
+        ClearEventPublisher(config.clear_notification, event_store) if config.clear_notification.enabled else None
+    )
     conversations = ConversationStore(config.conversation.max_history_messages)
     ai_client, planning_ai_client, interpretation_ai_client = _create_role_ai_clients(config)
     feishu_client = FeishuClient(config.feishu)
@@ -99,6 +106,7 @@ def create_app(config_path: str | Path = "config/config.json") -> FastAPI:
         conversation_log=conversation_log,
         report_store=report_store,
         interpretation_ai_client=interpretation_ai_client,
+        clear_notifier=clear_publisher,
     )
     event_handler = FeishuEventHandler(config, job_store, job_queue, job_processor=job_processor)
 
@@ -125,9 +133,22 @@ def create_app(config_path: str | Path = "config/config.json") -> FastAPI:
         if config.admin.enabled:
             admin_server = AdminServer(create_admin_app(report_store), port=config.admin.port)
             admin_server.start()
+        local_relay_task: asyncio.Task[None] | None = None
+        if config.runtime.role == "local" and clear_publisher is not None:
+            # No Worker in local mode: deliver from the in-process outbox.
+            local_relay_task = asyncio.create_task(
+                ClearEventRelay(
+                    LocalEventSource(event_store, max_age_seconds=config.clear_notification.max_event_age_seconds),
+                    WebhookSender(config.clear_notification),
+                    poll_interval_seconds=config.clear_notification.poll_interval_seconds,
+                ).run_forever()
+            )
         try:
             yield
         finally:
+            if local_relay_task is not None:
+                local_relay_task.cancel()
+                await asyncio.gather(local_relay_task, return_exceptions=True)
             if admin_server is not None:
                 admin_server.stop()
             if lease_task is not None:
@@ -146,7 +167,7 @@ def create_app(config_path: str | Path = "config/config.json") -> FastAPI:
         return await event_handler.handle(payload)
 
     if config.runtime.role == "gateway":
-        _add_gateway_worker_routes(app, config, job_store, job_processor)
+        _add_gateway_worker_routes(app, config, job_store, job_processor, event_store)
 
     return app
 
@@ -169,25 +190,40 @@ def _create_worker_app(config: Any) -> FastAPI:
     script_catalog = MuliuScriptCatalog(config.muliu.script_catalog_path)
     call_contracts = script_catalog.read_call_contracts()
     firewall = MuliuFirewall(config.muliu, call_contracts=call_contracts)
+    gateway_client = GatewayWorkerClient(config)
     worker = MuliuWorker(
         config=config,
         firewall=firewall,
-        gateway_client=GatewayWorkerClient(config),
+        gateway_client=gateway_client,
         route_resolver=MuliuPlanRouteResolver(
             config.execution_interpretation.server_environments_path,
             call_contracts,
         ),
     )
 
+    relay = None
+    if config.clear_notification.enabled:
+        # The Gateway cannot reach the intranet; the Worker relays its outbox.
+        relay = ClearEventRelay(
+            gateway_client,
+            WebhookSender(config.clear_notification),
+            poll_interval_seconds=config.clear_notification.poll_interval_seconds,
+        )
+
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-        task = asyncio.create_task(worker.run_forever())
+        tasks = [asyncio.create_task(worker.run_forever())]
+        if relay is not None:
+            tasks.append(asyncio.create_task(relay.run_forever()))
         try:
             yield
         finally:
             worker.stop()
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+            if relay is not None:
+                relay.stop()
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     app = FastAPI(title="Feishu Muliu Intranet Worker", lifespan=lifespan)
 
@@ -203,6 +239,7 @@ def _add_gateway_worker_routes(
     config: Any,
     job_store: MessageJobStore,
     job_processor: MessageJobProcessor,
+    event_store: OutboundEventStore,
 ) -> None:
     """Expose a minimal authenticated pull protocol for the intranet worker."""
 
@@ -236,6 +273,34 @@ def _add_gateway_worker_routes(
             "plan_json": job.plan_json,
             "route_region": job.route_region,
         }
+
+    @app.post("/internal/worker/events/claim", include_in_schema=False)
+    async def claim_worker_events(
+        authorization: Optional[str] = Header(default=None),
+        x_feishu_worker_id: Optional[str] = Header(default=None),
+    ) -> dict[str, Any]:
+        worker_id = require_worker(authorization, x_feishu_worker_id)
+        events = event_store.claim(
+            worker_id,
+            max_age_seconds=config.clear_notification.max_event_age_seconds,
+        )
+        return {"events": events}
+
+    @app.post("/internal/worker/events/result", include_in_schema=False)
+    async def report_worker_event(
+        payload: dict[str, Any],
+        authorization: Optional[str] = Header(default=None),
+        x_feishu_worker_id: Optional[str] = Header(default=None),
+    ) -> dict[str, str]:
+        worker_id = require_worker(authorization, x_feishu_worker_id)
+        event_id = payload.get("event_id")
+        delivered = payload.get("delivered")
+        error = payload.get("error", "")
+        if not isinstance(event_id, str) or not isinstance(delivered, bool) or not isinstance(error, str):
+            raise HTTPException(status_code=422, detail="invalid event result")
+        if not event_store.report(event_id, worker_id, delivered=delivered, error=error):
+            raise HTTPException(status_code=404, detail="event lease not found")
+        return {"status": "ok"}
 
     @app.post("/internal/worker/jobs/{message_id}/heartbeat", include_in_schema=False)
     async def heartbeat_worker_job(

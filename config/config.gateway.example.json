@@ -73,6 +73,10 @@
     "enabled": true,
     "port": 8901
   },
+  "clear_notification": {
+    "enabled": false,
+    "max_event_age_seconds": 3600
+  },
   "muliu": {
     "enabled": true,
     "script_root": "/home/serverGeneralScript",

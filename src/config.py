@@ -226,6 +226,32 @@ class ExecutionInterpretationConfig:
     artifact_retention_days: int = 90
 
 
+DEFAULT_CLEAR_TRIGGER_PATHS = (
+    "/home/serverGeneralScript/clear",
+    "/home/serverGeneralScript/clear_logic_game.py",
+    "/home/serverGeneralScript/clear_zone.py",
+    "/home/serverGeneralScript/cleardb.py",
+)
+
+
+@dataclass(frozen=True)
+class ClearNotificationConfig:
+    """Clear-data events (prepared / executing), relayed to an intranet endpoint.
+
+    Gateway uses ``enabled`` / ``trigger_paths`` / ``max_event_age_seconds`` to
+    record events; the Worker (or ``local`` role) uses ``webhook_url`` /
+    ``secret`` / ``timeout_seconds`` / ``poll_interval_seconds`` to deliver them.
+    """
+
+    enabled: bool = False
+    webhook_url: str = ""
+    secret: str = ""
+    timeout_seconds: float = 5.0
+    trigger_paths: tuple[str, ...] = DEFAULT_CLEAR_TRIGGER_PATHS
+    poll_interval_seconds: float = 5.0
+    max_event_age_seconds: int = 3600
+
+
 @dataclass(frozen=True)
 class AdminConfig:
     """Template review page. Always bound to 127.0.0.1; reach it via SSH tunnel."""
@@ -249,6 +275,7 @@ class AppConfig:
     conversation_log: ConversationLogConfig = field(default_factory=ConversationLogConfig)
     execution_interpretation: ExecutionInterpretationConfig = field(default_factory=ExecutionInterpretationConfig)
     admin: AdminConfig = field(default_factory=AdminConfig)
+    clear_notification: ClearNotificationConfig = field(default_factory=ClearNotificationConfig)
     # 按用途选择的模型池；未配置 ai.pools 时为空，所有用途共用 ``ai``。
     ai_routes: dict[str, AIPoolConfig] = field(default_factory=dict)
 
@@ -370,6 +397,36 @@ def _load_ai_model(raw: Any, *, section: str, defaults: AIConfig | None = None) 
         temperature=float(pick("temperature", defaults.temperature if defaults else 0.2)),
         max_tokens=int(pick("max_tokens", defaults.max_tokens if defaults else 2048)),
         timeout_seconds=_require_positive_number(float(timeout_value), "{}.timeout_seconds".format(section)),
+    )
+
+
+def _load_clear_notification(raw: Any, *, runtime_role: str) -> ClearNotificationConfig:
+    if not isinstance(raw, dict):
+        raise ConfigError("clear_notification section must be a JSON object")
+    enabled = bool(raw.get("enabled", False))
+    webhook_url = str(raw.get("webhook_url", "")).strip()
+    # Gateway only records events; whoever delivers them (worker / local) needs the URL.
+    if enabled and runtime_role in ("worker", "local") and not webhook_url:
+        raise ConfigError("clear_notification.enabled 为 true 时，{} 角色必须填写 webhook_url".format(runtime_role))
+    if enabled and webhook_url and not webhook_url.startswith(("http://", "https://")):
+        raise ConfigError("clear_notification.webhook_url 必须以 http:// 或 https:// 开头")
+    trigger_paths = raw.get("trigger_paths", list(DEFAULT_CLEAR_TRIGGER_PATHS))
+    if not isinstance(trigger_paths, list) or not trigger_paths or not all(isinstance(item, str) and item for item in trigger_paths):
+        raise ConfigError("clear_notification.trigger_paths 必须是非空字符串数组")
+    return ClearNotificationConfig(
+        enabled=enabled,
+        webhook_url=webhook_url,
+        secret=str(raw.get("secret", "")),
+        timeout_seconds=_require_positive_number(
+            float(raw.get("timeout_seconds", 5)), "clear_notification.timeout_seconds"
+        ),
+        trigger_paths=tuple(trigger_paths),
+        poll_interval_seconds=_require_positive_number(
+            float(raw.get("poll_interval_seconds", 5)), "clear_notification.poll_interval_seconds"
+        ),
+        max_event_age_seconds=_require_positive_integer(
+            int(raw.get("max_event_age_seconds", 3600)), "clear_notification.max_event_age_seconds"
+        ),
     )
 
 
@@ -497,6 +554,7 @@ def load_config(path: str | Path = "config/config.json") -> AppConfig:
     conversation_log_raw = raw.get("conversation_log", {})
     execution_interpretation_raw = raw.get("execution_interpretation", {})
     admin_raw = raw.get("admin", {})
+    clear_notification_raw = raw.get("clear_notification", {})
 
     if not isinstance(server_raw, dict) or not isinstance(feishu_raw, dict) or not isinstance(ai_raw, dict):
         raise ConfigError("server, feishu, and ai sections must be JSON objects")
@@ -514,6 +572,7 @@ def load_config(path: str | Path = "config/config.json") -> AppConfig:
         raise ConfigError("execution_interpretation section must be a JSON object")
     if not isinstance(admin_raw, dict):
         raise ConfigError("admin section must be a JSON object")
+    clear_notification = _load_clear_notification(clear_notification_raw, runtime_role=runtime.role)
 
     ai_routes: dict[str, AIPoolConfig] = {}
     if not ai_raw and runtime.role == "worker":
@@ -651,5 +710,6 @@ def load_config(path: str | Path = "config/config.json") -> AppConfig:
             port=_require_positive_integer(int(admin_raw.get("port", 8901)), "admin.port"),
         ),
         ai_routes=ai_routes,
+        clear_notification=clear_notification,
     )
     return config

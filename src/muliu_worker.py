@@ -87,6 +87,27 @@ class GatewayWorkerClient:
         self._response_json(response)
         return True
 
+    async def claim_events(self) -> list[dict[str, Any]]:
+        """Lease pending outbound events (e.g. clear-data notices) for intranet delivery."""
+        data = self._response_json(await self._request("POST", "/internal/worker/events/claim", {}))
+        events = data.get("events")
+        if not isinstance(events, list):
+            raise GatewayWorkerClientError("gateway 返回的事件格式无效")
+        valid = []
+        for event in events:
+            if isinstance(event, dict) and isinstance(event.get("event_id"), str) and isinstance(event.get("payload"), dict):
+                valid.append(event)
+        return valid
+
+    async def report_event(self, event_id: str, delivered: bool, error: str) -> None:
+        response = await self._request(
+            "POST",
+            "/internal/worker/events/result",
+            {"event_id": event_id, "delivered": delivered, "error": error[:300]},
+        )
+        if response.status_code != 404:
+            self._response_json(response)
+
     async def _request(self, method: str, path: str, payload: dict[str, object]) -> httpx.Response:
         try:
             response = await self._client.request(

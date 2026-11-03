@@ -77,6 +77,10 @@
     "enabled": true,
     "port": 8901
   },
+  "clear_notification": {
+    "enabled": false,
+    "max_event_age_seconds": 3600
+  },
   "runtime": {
     "role": "local",
     "worker_token": "若部署为 gateway 或 worker，请填写两端一致的随机强密码令牌",

@@ -442,3 +442,35 @@ def test_role_ai_clients_share_clients_for_shared_pools(monkeypatch, tmp_path):
 
     assert (chat, planning, interpretation) == ("luna", "luna", "terra")
     assert built == ["luna", "terra"]
+
+
+def test_gateway_event_relay_endpoints(monkeypatch, tmp_path):
+    from src.outbound_events import OutboundEventStore
+
+    config_path = tmp_path / "gateway-config.json"
+    config_path.write_text(json.dumps({
+        "runtime": {"role": "gateway", "worker_token": "secret-token", "lease_timeout_seconds": 60},
+        "feishu": {"app_id": "app", "app_secret": "secret", "verification_token": "verify"},
+        "ai": {"provider": "openai_compatible", "base_url": "https://api.example.com/v1", "api_key": "key", "model": "m"},
+        "job_queue": {"database_path": str(tmp_path / "jobs.sqlite3")},
+        "clear_notification": {"enabled": True},
+    }), encoding="utf-8")
+    monkeypatch.setattr("src.app.create_ai_client", lambda _cfg: object())
+    app = create_app(config_path)
+    events = OutboundEventStore(tmp_path / "jobs.sqlite3")
+    events.add("om_1:clear_prepared", "clear_prepared", {"event_id": "om_1:clear_prepared", "text": "内网：沈涛 准备清档 2213 服"})
+    worker = {"Authorization": "Bearer secret-token", "X-Feishu-Worker-Id": "jenkins-worker-1"}
+
+    with TestClient(app) as client:
+        assert client.post("/internal/worker/events/claim", headers={"Authorization": "Bearer wrong", "X-Feishu-Worker-Id": "w"}).status_code == 401
+        claimed = client.post("/internal/worker/events/claim", headers=worker).json()["events"]
+        other = {"Authorization": "Bearer secret-token", "X-Feishu-Worker-Id": "other-worker"}
+        rejected = client.post("/internal/worker/events/result", headers=other, json={"event_id": "om_1:clear_prepared", "delivered": True})
+        accepted = client.post("/internal/worker/events/result", headers=worker, json={"event_id": "om_1:clear_prepared", "delivered": True, "error": ""})
+        invalid = client.post("/internal/worker/events/result", headers=worker, json={"event_id": 1, "delivered": "yes"})
+
+    assert [e["payload"]["text"] for e in claimed] == ["内网：沈涛 准备清档 2213 服"]
+    assert rejected.status_code == 404
+    assert accepted.json() == {"status": "ok"}
+    assert invalid.status_code == 422
+    assert events.get("om_1:clear_prepared")["status"] == "delivered"

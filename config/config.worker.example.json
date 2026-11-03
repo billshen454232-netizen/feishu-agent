@@ -12,6 +12,13 @@
     "heartbeat_interval_seconds": 30,
     "lease_timeout_seconds": 180
   },
+  "clear_notification": {
+    "enabled": false,
+    "webhook_url": "填写内网接收服务地址，例如 http://内网IP:端口/clear-events",
+    "secret": "",
+    "timeout_seconds": 5,
+    "poll_interval_seconds": 5
+  },
   "muliu": {
     "enabled": true,
     "routes": {

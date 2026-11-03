@@ -643,3 +643,115 @@ async def test_requester_name_lookup_failure_never_breaks_processing(tmp_path):
     await processor.wait_for_background()
 
     assert store.get("om_1").status == "done"
+
+
+@pytest.mark.asyncio
+async def test_clear_plan_records_prepared_then_executing_events(tmp_path):
+    from src.clear_notifier import ClearEventPublisher
+    from src.config import ClearNotificationConfig, RuntimeConfig
+    from src.muliu_plan import MuliuPlan, MuliuPlanKind, MuliuStep
+    from src.muliu_planner import MuliuPlanGeneration
+    from src.muliu_routing import MuliuRouteSnapshot
+    from src.muliu_script_catalog import MuliuScriptCatalog
+    from src.outbound_events import OutboundEventStore
+
+    clear_plan = MuliuPlan(
+        summary="国服2213清档并启服",
+        kind=MuliuPlanKind.OPERATION,
+        steps=[
+            MuliuStep("/home/serverGeneralScript/clear", ["2213"], "清档 2213"),
+            MuliuStep("/home/serverGeneralScript/start", ["2213"], "启服 2213"),
+        ],
+    )
+
+    class Planner:
+        async def create_plan_with_trace(self, text):
+            return MuliuPlanGeneration(plan=clear_plan, raw_responses=())
+
+    class Firewall:
+        def validate(self, plan):
+            return None
+
+    class Resolver:
+        def resolve(self, plan):
+            return MuliuRouteSnapshot.from_region("cn")
+
+    class CardFeishu(FakeCardFeishuClient):
+        async def reply_card(self, message_id, card):
+            return "card_" + message_id
+
+        async def list_chat_member_names(self, chat_id):
+            return {"ou_user": "沈涛"}
+
+    events = OutboundEventStore(tmp_path / "jobs.sqlite3")
+    events.initialize()
+    store = MessageJobStore(tmp_path / "jobs.sqlite3")
+    store.initialize()
+    store.create_if_new("om_c", "evt_c", "oc_group", "ou_user", "国服2213清档 然后启服", chat_type="group")
+    processor = MessageJobProcessor(
+        make_config(runtime=RuntimeConfig(role="gateway", worker_token="t")),
+        store,
+        ConversationStore(4),
+        FakeAIClient(),
+        CardFeishu(),
+        operation_planner=Planner(),
+        muliu_firewall=Firewall(),
+        route_resolver=Resolver(),
+        script_catalog=MuliuScriptCatalog("config/muliu_script_catalog.md"),
+        clear_notifier=ClearEventPublisher(ClearNotificationConfig(enabled=True), events),
+    )
+
+    await processor.process_one("om_c")
+    await processor.wait_for_background()
+    job = store.get("om_c")
+    assert job.status == "awaiting_confirmation"
+    prepared = events.get("om_c:clear_prepared")
+    payload = _json_loads(prepared["payload_json"])
+    assert payload["text"] == "内网：沈涛 准备清档 2213 服"
+    assert payload["server_ids"] == ["2213"] and payload["route_region"] == "cn"
+    assert events.get("om_c:clear_executing") is None
+
+    card = await processor.process_card_action(
+        action="confirm_operation",
+        request_message_id="om_c",
+        confirmation_message_id=job.confirmation_message_id,
+        chat_id="oc_group",
+        user_id="ou_user",
+        confirmation_token=job.confirmation_token,
+    )
+    await processor.wait_for_background()
+
+    assert card["header"]["title"]["content"] == "测试服操作已提交"
+    assert store.get("om_c").status == "queued_for_worker"
+    executing = _json_loads(events.get("om_c:clear_executing")["payload_json"])
+    assert executing["text"] == "内网：沈涛 正在操作清档 2213 服"
+    assert [e["event_id"] for e in events.claim("w")] == ["om_c:clear_prepared", "om_c:clear_executing"]
+
+
+@pytest.mark.asyncio
+async def test_non_clear_plan_records_no_event(tmp_path):
+    from src.clear_notifier import ClearEventPublisher
+    from src.config import ClearNotificationConfig
+    from src.muliu_plan import MuliuPlan, MuliuStep
+    from src.outbound_events import OutboundEventStore
+
+    events = OutboundEventStore(tmp_path / "jobs.sqlite3")
+    events.initialize()
+    store = MessageJobStore(tmp_path / "jobs.sqlite3")
+    store.initialize()
+    job = store.create_if_new("om_s", "evt_s", "oc_group", "ou_user", "启服", chat_type="group")[0]
+    processor = MessageJobProcessor(
+        make_config(), store, ConversationStore(4), FakeAIClient(), FakeFeishuClient(),
+        clear_notifier=ClearEventPublisher(ClearNotificationConfig(enabled=True), events),
+    )
+
+    processor._notify_clear("clear_prepared", job, MuliuPlan(summary="s", steps=[MuliuStep("/home/serverGeneralScript/start", ["1"], "d")]), "cn", operator_id="ou_user")
+    await processor.wait_for_background()
+
+    assert events.claim("w") == []
+
+
+def _json_loads(text):
+    import json as _json
+
+    return _json.loads(text)
