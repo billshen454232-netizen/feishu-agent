@@ -427,13 +427,14 @@ class ExecutionReportStore:
             raise RuntimeError("failed to store candidate template")
         return pattern
 
-    def list_patterns(self, status: str) -> list[ErrorPattern]:
+    def list_patterns(self, status: str, *, limit: int | None = None, offset: int = 0) -> list[ErrorPattern]:
         if status not in PATTERN_STATUSES:
             raise ValueError("unknown pattern status: {}".format(status))
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT * FROM execution_error_patterns WHERE status = ? ORDER BY hit_count DESC, last_seen_at DESC",
-                (status,),
+                "SELECT * FROM execution_error_patterns WHERE status = ? "
+                "ORDER BY hit_count DESC, last_seen_at DESC LIMIT ? OFFSET ?",
+                (status, -1 if limit is None else limit, offset),
             ).fetchall()
         return [self._row_to_pattern(row) for row in rows]
 
@@ -548,7 +549,11 @@ class ExecutionReportStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def list_recent_executions(self, limit: int = 50) -> list[dict[str, Any]]:
+    def count_executions(self) -> int:
+        with self._connect() as conn:
+            return int(conn.execute("SELECT COUNT(*) FROM execution_artifacts").fetchone()[0])
+
+    def list_recent_executions(self, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
         """Recent results with how they were explained (read-only review view)."""
         with self._connect() as conn:
             has_jobs = conn.execute(
@@ -582,7 +587,7 @@ class ExecutionReportStore:
                 LEFT JOIN execution_interpretations i ON i.message_id = a.message_id
                 {join_jobs}
                 ORDER BY a.created_at DESC
-                LIMIT ?
+                LIMIT ? OFFSET ?
                 """.format(
                     request_column=request_column,
                     join_jobs=join_jobs,
@@ -592,7 +597,7 @@ class ExecutionReportStore:
                     planning_ms=job_column("planning_ms", "0"),
                     planning_calls=job_column("planning_calls", "0"),
                 ),
-                (limit,),
+                (limit, offset),
             ).fetchall()
         return [
             {**dict(row), "request_text": mask_sensitive_operation_data(str(row["request_text"]))[:300]}

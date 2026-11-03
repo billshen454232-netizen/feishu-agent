@@ -43,7 +43,7 @@ def test_review_flow_approve_revert_edit_delete(tmp_path):
     b = _add(store, "ERROR b", "om_2")
     client = _client(store)
 
-    assert "执行结果模板审批" in client.get("/").text
+    assert "执行结果审批台" in client.get("/").text
     assert client.get("/api/summary").json() == {"counts": {"candidate": 2, "verified": 0}, "read_success_mode": "ai"}
 
     assert client.post("/api/patterns/batch", headers=HEADERS, json={"ids": [a.pattern_id, b.pattern_id], "action": "approve"}).json() == {"changed": 2}
@@ -158,3 +158,20 @@ def test_recent_executions_include_planning_model_and_requester(tmp_path):
     assert row["user_name"] == "沈涛"
     assert (row["planning_model"], row["planning_ms"], row["planning_calls"]) == ("gpt-6-luna", 7100, 2)
     assert "需求分析" in _client(store).get("/").text
+
+
+def test_patterns_and_executions_are_paginated(tmp_path):
+    store = _store(tmp_path)
+    for index in range(5):
+        _add(store, "ERROR {}".format(index), "om_{}".format(index))
+        store.record_artifact("om_{}".format(index), "failed", "template", "x", now=1000 + index)
+    client = _client(store)
+
+    first = client.get("/api/patterns?status=candidate&page=1&page_size=2").json()
+    last = client.get("/api/patterns?status=candidate&page=3&page_size=2").json()
+    runs = client.get("/api/executions?page=2&page_size=2").json()
+
+    assert (first["total"], len(first["patterns"]), len(last["patterns"])) == (5, 2, 1)
+    assert {p["pattern_id"] for p in first["patterns"]}.isdisjoint({p["pattern_id"] for p in last["patterns"]})
+    assert runs["total"] == 5 and [r["message_id"] for r in runs["executions"]] == ["om_2", "om_1"]
+    assert client.get("/api/executions?page=0&page_size=999").json()["page_size"] == 100
