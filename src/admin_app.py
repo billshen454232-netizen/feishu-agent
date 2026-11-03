@@ -15,6 +15,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse
 
+from .access_auth import AccessDenied, CloudflareAccessVerifier
 from .execution_report import (
     PATTERN_CANDIDATE,
     PATTERN_OUTCOMES,
@@ -31,13 +32,31 @@ _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "[::1]"}
 _MAX_DIAGNOSIS_CHARS = 4000
 
 
-def create_admin_app(store: ExecutionReportStore) -> FastAPI:
+# nginx sets this header on every request it forwards (clients cannot strip it).
+# Requests carrying it came from the public site and must hold a valid Access JWT;
+# requests without it reached 127.0.0.1 directly (SSH tunnel).
+PROXY_HEADER = "x-admin-proxy"
+PROXY_HEADER_VALUE = "cloudflare-access"
+
+
+def create_admin_app(store: ExecutionReportStore, *, access_verifier: CloudflareAccessVerifier | None = None) -> FastAPI:
     app = FastAPI(title="执行结果模板审批", docs_url=None, redoc_url=None, openapi_url=None)
 
     @app.middleware("http")
     async def guard(request: Request, call_next: Any) -> Any:
         if _request_host(request) not in _LOOPBACK_HOSTS:
             return PlainTextResponse("forbidden host", status_code=403)
+        request.state.operator = "ssh-tunnel"
+        if request.headers.get(PROXY_HEADER) is not None:
+            if request.headers.get(PROXY_HEADER) != PROXY_HEADER_VALUE or access_verifier is None:
+                return PlainTextResponse("public access is not configured", status_code=403)
+            token = request.headers.get("cf-access-jwt-assertion") or request.cookies.get("CF_Authorization", "")
+            try:
+                claims = await access_verifier.verify(token)
+            except AccessDenied as exc:
+                logger.warning("review page access denied reason=%s", exc)
+                return PlainTextResponse("access denied", status_code=403)
+            request.state.operator = str(claims.get("email") or claims.get("sub") or "cloudflare-access")
         if request.method not in {"GET", "HEAD"} and request.headers.get("x-admin-request") != "1":
             return PlainTextResponse("missing admin header", status_code=403)
         return await call_next(request)
@@ -82,26 +101,27 @@ def create_admin_app(store: ExecutionReportStore) -> FastAPI:
         return {"samples": store.list_artifacts(pattern.sample_message_ids)}
 
     @app.put("/api/patterns/{pattern_id}")
-    async def edit(pattern_id: int, payload: dict[str, Any]) -> dict[str, str]:
+    async def edit(pattern_id: int, payload: dict[str, Any], request: Request) -> dict[str, str]:
         diagnosis = payload.get("diagnosis")
         if not isinstance(diagnosis, str) or not diagnosis.strip() or len(diagnosis) > _MAX_DIAGNOSIS_CHARS:
             raise HTTPException(status_code=400, detail="diagnosis must be 1-{} chars".format(_MAX_DIAGNOSIS_CHARS))
         if not store.update_diagnosis(pattern_id, diagnosis.strip()):
             raise HTTPException(status_code=404, detail="not found")
+        logger.info("template review edit pattern=%s operator=%s", pattern_id, request.state.operator)
         return {"status": "ok"}
 
     @app.put("/api/patterns/{pattern_id}/outcome")
-    async def set_outcome(pattern_id: int, payload: dict[str, Any]) -> dict[str, str]:
+    async def set_outcome(pattern_id: int, payload: dict[str, Any], request: Request) -> dict[str, str]:
         outcome = payload.get("outcome")
         if outcome not in PATTERN_OUTCOMES:
             raise HTTPException(status_code=400, detail="unknown outcome")
         if not store.set_pattern_outcome(pattern_id, outcome):
             raise HTTPException(status_code=404, detail="not found")
-        logger.info("template review pattern=%s outcome=%s", pattern_id, outcome)
+        logger.info("template review pattern=%s outcome=%s operator=%s", pattern_id, outcome, request.state.operator)
         return {"outcome": outcome}
 
     @app.post("/api/patterns/batch")
-    async def batch(payload: dict[str, Any]) -> dict[str, Any]:
+    async def batch(payload: dict[str, Any], request: Request) -> dict[str, Any]:
         ids = payload.get("ids")
         action = payload.get("action")
         if not isinstance(ids, list) or not all(isinstance(item, int) for item in ids) or not ids:
@@ -114,16 +134,16 @@ def create_admin_app(store: ExecutionReportStore) -> FastAPI:
             changed = store.delete_patterns(ids)
         else:
             raise HTTPException(status_code=400, detail="unknown action")
-        logger.info("template review action=%s ids=%s changed=%s", action, ids, changed)
+        logger.info("template review action=%s ids=%s changed=%s operator=%s", action, ids, changed, request.state.operator)
         return {"changed": changed}
 
     @app.put("/api/settings/read-success-mode")
-    async def set_mode(payload: dict[str, Any]) -> dict[str, str]:
+    async def set_mode(payload: dict[str, Any], request: Request) -> dict[str, str]:
         mode = payload.get("mode")
         if mode not in READ_SUCCESS_MODES:
             raise HTTPException(status_code=400, detail="unknown mode")
         store.set_read_success_mode(mode)
-        logger.info("template review read_success_mode=%s", mode)
+        logger.info("template review read_success_mode=%s operator=%s", mode, request.state.operator)
         return {"read_success_mode": mode}
 
     return app

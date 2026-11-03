@@ -145,6 +145,11 @@ worker  = 主动连 Gateway 领任务 + 本地 Muliu 执行（无飞书/AI 凭�
 
 - `background_timeout_seconds`：后台研读总预算，**不阻塞** Worker `/result` 与首张结果卡。旧字段 `timeout_seconds` 已废弃并被忽略。
 - `admin.port`：审批页端口，固定绑定 `127.0.0.1`，不可配置 host；安全组不要放行。访问：`ssh -L 8901:127.0.0.1:8901 <gateway>` 后浏览器开 `http://127.0.0.1:8901`。
+- 公网访问（可选）：`https://ops.ttlink.asia` 经 Cloudflare Access（`owner-only` 策略、Google 登录）→ nginx → `127.0.0.1:8901`。审批页会**自己校验 Access JWT**（`admin.access_team_domain` + `admin.access_aud`，RS256、AUD、签发方、过期时间），所以直接请求源站 IP 也绕不过去：
+  - nginx 对每个转发请求强制设置 `X-Admin-Proxy: cloudflare-access` 与 `Host: 127.0.0.1`；带该标记的请求必须携带有效的 `Cf-Access-Jwt-Assertion`（或 `CF_Authorization` cookie），否则 403；未配置 `access_*` 时公网请求一律 403；
+  - SSH 隧道直连 `127.0.0.1:8901` 不带该标记，照常可用；
+  - 审批页的改动日志记录操作人邮箱（`operator=`）；
+  - 依赖 `PyJWT[crypto]`（见 `requirements.txt`）。
 - 发起人昵称：收到群消息时后台调飞书群成员接口（应用需开通 `im:chat.members:read`），按 open_id 缓存，存入 `message_jobs.user_name`；只在审批页显示，不进 AI 提示词与飞书卡片。查询失败不影响请求处理。
 - 需求分析模型与耗时：规划器记录每次 AI 调用的模型和耗时，存入 `message_jobs.planning_model / planning_ms / planning_calls`。
 - 模板库、研读任务、执行记录与 `message_jobs` 同一个 SQLite 文件；执行记录按 `artifact_retention_days` 清理，模板不清理。

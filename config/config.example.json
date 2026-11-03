@@ -75,7 +75,9 @@
   },
   "admin": {
     "enabled": true,
-    "port": 8901
+    "port": 8901,
+    "access_team_domain": "",
+    "access_aud": ""
   },
   "clear_notification": {
     "enabled": false,

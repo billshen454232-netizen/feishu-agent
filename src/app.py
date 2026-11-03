@@ -14,6 +14,7 @@ from .ai_client import create_ai_client
 from .config import ConfigError, load_config
 from .conversation import ConversationStore
 from .conversation_log import ConversationLog
+from .access_auth import CloudflareAccessVerifier
 from .admin_app import AdminServer, create_admin_app
 from .clear_notifier import ClearNotifier
 from .event_handler import FeishuEventHandler
@@ -127,7 +128,12 @@ def create_app(config_path: str | Path = "config/config.json") -> FastAPI:
         job_processor.start()
         admin_server: AdminServer | None = None
         if config.admin.enabled:
-            admin_server = AdminServer(create_admin_app(report_store), port=config.admin.port)
+            verifier = (
+                CloudflareAccessVerifier(config.admin.access_team_domain, config.admin.access_aud)
+                if config.admin.access_team_domain
+                else None
+            )
+            admin_server = AdminServer(create_admin_app(report_store, access_verifier=verifier), port=config.admin.port)
             admin_server.start()
         try:
             yield

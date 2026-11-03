@@ -252,10 +252,17 @@ class ClearNotificationConfig:
 
 @dataclass(frozen=True)
 class AdminConfig:
-    """Template review page. Always bound to 127.0.0.1; reach it via SSH tunnel."""
+    """Template review page. Always bound to 127.0.0.1.
+
+    Reach it via SSH tunnel, or publicly through nginx + Cloudflare Access; in the
+    latter case the page verifies the Access JWT itself (``access_*`` below).
+    """
 
     enabled: bool = False
     port: int = 8901
+    # Cloudflare Access: team domain (xxx.cloudflareaccess.com) and the application's AUD tag.
+    access_team_domain: str = ""
+    access_aud: str = ""
 
 
 @dataclass(frozen=True)
@@ -395,6 +402,21 @@ def _load_ai_model(raw: Any, *, section: str, defaults: AIConfig | None = None) 
         temperature=float(pick("temperature", defaults.temperature if defaults else 0.2)),
         max_tokens=int(pick("max_tokens", defaults.max_tokens if defaults else 2048)),
         timeout_seconds=_require_positive_number(float(timeout_value), "{}.timeout_seconds".format(section)),
+    )
+
+
+def _load_admin(raw: dict[str, Any]) -> AdminConfig:
+    team_domain = str(raw.get("access_team_domain", "")).strip()
+    aud = str(raw.get("access_aud", "")).strip()
+    if bool(team_domain) != bool(aud):
+        raise ConfigError("admin.access_team_domain 与 admin.access_aud 必须同时填写或同时留空")
+    if team_domain and not team_domain.removeprefix("https://").endswith(".cloudflareaccess.com"):
+        raise ConfigError("admin.access_team_domain 应形如 xxx.cloudflareaccess.com")
+    return AdminConfig(
+        enabled=bool(raw.get("enabled", False)),
+        port=_require_positive_integer(int(raw.get("port", 8901)), "admin.port"),
+        access_team_domain=team_domain,
+        access_aud=aud,
     )
 
 
@@ -714,10 +736,7 @@ def load_config(path: str | Path = "config/config.json") -> AppConfig:
                 "execution_interpretation.artifact_retention_days",
             ),
         ),
-        admin=AdminConfig(
-            enabled=bool(admin_raw.get("enabled", False)),
-            port=_require_positive_integer(int(admin_raw.get("port", 8901)), "admin.port"),
-        ),
+        admin=_load_admin(admin_raw),
         ai_routes=ai_routes,
         clear_notification=clear_notification,
     )
