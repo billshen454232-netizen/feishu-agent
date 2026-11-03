@@ -161,6 +161,7 @@ worker  = 主动连 Gateway 领任务 + 本地 Muliu 执行（无飞书/AI 凭�
     "cn": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=…国服群",
     "hmt": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=…港澳台群"
   },
+  "cc_webhooks": ["https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=…QA 内部群"],
   "mention_all": true,
   "timeout_seconds": 5
 }
@@ -175,7 +176,9 @@ worker  = 主动连 Gateway 领任务 + 本地 Muliu 执行（无飞书/AI 凭�
 
 - `region_webhooks` 的 key 是 `server_environments.json` 中 `regions` 的区服名（`cn`、`hmt`、`global`、`kr`、`vn`）；
 - 一次清档涉及多个区服时按群拆开发送，每个群只收到自己负责的服号；
-- 区服没有单独配置时发到 `webhook_url`（默认群）；默认群也没填时不发，只记日志；`enabled` 为 true 时两者至少填一个；
+- 区服没有单独配置时发到 `webhook_url`（默认群）；默认群也没填时不发，只记日志；
+- `cc_webhooks` 抄送群：每次清档都发，不分区服，一次只发一条，列出全部服号（如 `国服 2213，港澳台繁体 5001、5002`）；抄送群地址与某区服群相同时，该群只收合并的那一条；
+- `enabled` 为 true 时 `webhook_url`、`region_webhooks`、`cc_webhooks` 至少填一个；
 - 只配置在 **Gateway**；Worker 不参与，不用改；
 - 企微地址含 key，属于密钥：只写在服务器的 `config.json`（已 `.gitignore`），不要写进示例配置或提交；
 - `trigger_paths` 默认包含 `clear`、`clear_logic_game.py`、`clear_zone.py`、`cleardb.py`；

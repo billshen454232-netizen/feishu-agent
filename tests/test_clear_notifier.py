@@ -102,7 +102,9 @@ def _write(tmp_path, section):
 
 
 @pytest.mark.parametrize("section, match", [
-    ({"enabled": True}, "必须填写 webhook_url 或 region_webhooks"),
+    ({"enabled": True}, "必须填写 webhook_url、region_webhooks 或 cc_webhooks"),
+    ({"enabled": True, "cc_webhooks": "x"}, "cc_webhooks 必须是"),
+    ({"enabled": True, "cc_webhooks": ["ftp://x"]}, r"cc_webhooks\[0\] 必须以"),
     ({"enabled": True, "region_webhooks": {"cn": "ftp://x"}}, "region_webhooks.cn 必须以"),
     ({"enabled": True, "region_webhooks": ["x"]}, "region_webhooks 必须是"),
     ({"enabled": True, "webhook_url": "ftp://x"}, "http:// 或 https://"),

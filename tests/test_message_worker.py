@@ -961,3 +961,70 @@ async def test_region_without_webhook_and_no_default_is_skipped(tmp_path):
     assert notifier.webhook_for_region("hmt") == ""
     assert await notifier.send("t", "") is False
     assert pushed == []
+
+
+@pytest.mark.asyncio
+async def test_cc_group_gets_one_combined_notice_for_all_regions(tmp_path):
+    import json as _json
+
+    import httpx
+
+    from src.clear_notifier import ClearNotifier
+    from src.config import ClearNotificationConfig
+    from src.muliu_plan import MuliuPlan, MuliuStep
+
+    environment_path = tmp_path / "server_environments.json"
+    environment_path.write_text(_json.dumps({
+        "regions": {
+            "cn": {"name": "国服", "environments": {"weekly": ["2213"]}},
+            "hmt": {"name": "港澳台繁体", "environments": {"qa": ["5001", "5002"]}},
+        },
+        "groups": {},
+    }), encoding="utf-8")
+    pushed = []
+    notifier = ClearNotifier(
+        ClearNotificationConfig(
+            enabled=True,
+            webhook_url="https://hook.example/overseas",
+            region_webhooks={"cn": "https://hook.example/cn"},
+            cc_webhooks=("https://hook.example/qa",),
+        ),
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(
+            lambda request: pushed.append((str(request.url), _json.loads(request.content)["text"]["content"]))
+            or httpx.Response(200, json={"errcode": 0})
+        )),
+    )
+    store = MessageJobStore(tmp_path / "jobs.sqlite3")
+    store.initialize()
+    job = store.create_if_new("om_cc", "evt_cc", "oc_group", "ou_user", "多服清档", chat_type="group")[0]
+    processor = MessageJobProcessor(
+        make_config(execution_interpretation=ExecutionInterpretationConfig(server_environments_path=str(environment_path))),
+        store, ConversationStore(4), FakeAIClient(), FakeFeishuClient(),
+        script_catalog=_production_catalog(), clear_notifier=notifier,
+    )
+    plan = MuliuPlan(summary="多服清档", steps=[
+        MuliuStep("/home/serverGeneralScript/clear", ["2213"], "清档 2213"),
+        MuliuStep("/home/serverGeneralScript/clear", ["5001"], "清档 5001"),
+        MuliuStep("/home/serverGeneralScript/clear", ["5002"], "清档 5002"),
+    ])
+
+    processor._notify_clear("clear_prepared", job, plan, "cn", operator_id="ou_user")
+    await processor.wait_for_background()
+
+    first_lines = [(url, text.splitlines()[0]) for url, text in pushed]
+    assert first_lines == [
+        ("https://hook.example/cn", "内网：ou_user 准备清档 国服 2213 服（已生成计划，等待确认）"),
+        ("https://hook.example/overseas", "内网：ou_user 准备清档 港澳台繁体 5001、5002 服（已生成计划，等待确认）"),
+        ("https://hook.example/qa", "内网：ou_user 准备清档 国服 2213，港澳台繁体 5001、5002 服（已生成计划，等待确认）"),
+    ]
+
+
+def test_cc_webhooks_are_deduplicated_and_blank_entries_dropped(tmp_path):
+    from src.config import _load_clear_notification
+
+    config = _load_clear_notification({
+        "enabled": True,
+        "cc_webhooks": ["https://hook.example/qa", "https://hook.example/qa", " "],
+    })
+
+    assert config.cc_webhooks == ("https://hook.example/qa",)

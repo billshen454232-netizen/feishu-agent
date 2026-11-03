@@ -1196,8 +1196,12 @@ class MessageJobProcessor:
                 except Exception:  # noqa: BLE001 - server ids are best-effort context
                     server_ids = []
             operator_name = await self._member_name(job.chat_id, operator_id) or operator_id
-            for region_key, region_name, region_servers in self._group_servers_by_region(server_ids):
+            groups = self._group_servers_by_region(server_ids)
+            cc_webhooks = set(self._clear_notifier.cc_webhooks)
+            for region_key, region_name, region_servers in groups:
                 webhook_url = self._clear_notifier.webhook_for_region(region_key)
+                if webhook_url in cc_webhooks:
+                    continue  # that group gets the combined all-region notice below
                 if not webhook_url:
                     logger.warning(
                         "clear notification skipped: no webhook for region=%s message_id=%s", region_key, job.message_id
@@ -1211,6 +1215,21 @@ class MessageJobProcessor:
                     region_name=region_name,
                 )
                 await self._clear_notifier.send(text, webhook_url)
+            if cc_webhooks:
+                combined = "，".join(
+                    "{} {}".format(name, "、".join(servers)) if name else "、".join(servers)
+                    for _key, name, servers in groups
+                    if servers
+                ) or "（未识别服号）"
+                text = self._clear_notifier.build_text(
+                    event,
+                    operator_name=operator_name,
+                    server_ids=server_ids,
+                    plan_summary=plan.summary,
+                    target=combined,
+                )
+                for webhook_url in self._clear_notifier.cc_webhooks:
+                    await self._clear_notifier.send(text, webhook_url)
         except Exception:  # noqa: BLE001 - notification must never affect the operation
             logger.exception("clear notification crashed message_id=%s event=%s", job.message_id, event)
 

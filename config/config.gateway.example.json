@@ -80,6 +80,9 @@
       "cn": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=国服群key",
       "hmt": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=港澳台群key"
     },
+    "cc_webhooks": [
+      "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=抄送群key（每次清档都发，含全部区服）"
+    ],
     "mention_all": true,
     "timeout_seconds": 5
   },

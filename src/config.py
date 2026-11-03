@@ -243,6 +243,8 @@ class ClearNotificationConfig:
     webhook_url: str = ""
     # Region key (``server_environments.json`` regions) -> WeCom group robot URL.
     region_webhooks: dict[str, str] = field(default_factory=dict)
+    # Groups copied on every clear notice (all regions, one combined message).
+    cc_webhooks: tuple[str, ...] = ()
     mention_all: bool = True
     timeout_seconds: float = 5.0
     trigger_paths: tuple[str, ...] = DEFAULT_CLEAR_TRIGGER_PATHS
@@ -407,12 +409,18 @@ def _load_clear_notification(raw: Any) -> ClearNotificationConfig:
     ):
         raise ConfigError("clear_notification.region_webhooks 必须是 {区服: 企微地址} 对象")
     region_webhooks = {key: value.strip() for key, value in region_raw.items() if value.strip()}
-    if enabled and not webhook_url and not region_webhooks:
-        raise ConfigError("clear_notification.enabled 为 true 时必须填写 webhook_url 或 region_webhooks")
+    cc_raw = raw.get("cc_webhooks", [])
+    if not isinstance(cc_raw, list) or not all(isinstance(item, str) for item in cc_raw):
+        raise ConfigError("clear_notification.cc_webhooks 必须是企微地址数组")
+    cc_webhooks = tuple(dict.fromkeys(item.strip() for item in cc_raw if item.strip()))
+    if enabled and not webhook_url and not region_webhooks and not cc_webhooks:
+        raise ConfigError("clear_notification.enabled 为 true 时必须填写 webhook_url、region_webhooks 或 cc_webhooks")
     if enabled:
-        for label, url in [("webhook_url", webhook_url)] + [
-            ("region_webhooks.{}".format(key), value) for key, value in region_webhooks.items()
-        ]:
+        for label, url in (
+            [("webhook_url", webhook_url)]
+            + [("region_webhooks.{}".format(key), value) for key, value in region_webhooks.items()]
+            + [("cc_webhooks[{}]".format(index), value) for index, value in enumerate(cc_webhooks)]
+        ):
             if url and not url.startswith(("http://", "https://")):
                 raise ConfigError("clear_notification.{} 必须以 http:// 或 https:// 开头".format(label))
     trigger_paths = raw.get("trigger_paths", list(DEFAULT_CLEAR_TRIGGER_PATHS))
@@ -422,6 +430,7 @@ def _load_clear_notification(raw: Any) -> ClearNotificationConfig:
         enabled=enabled,
         webhook_url=webhook_url,
         region_webhooks=region_webhooks,
+        cc_webhooks=cc_webhooks,
         mention_all=bool(raw.get("mention_all", True)),
         timeout_seconds=_require_positive_number(
             float(raw.get("timeout_seconds", 5)), "clear_notification.timeout_seconds"

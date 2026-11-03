@@ -37,7 +37,13 @@ class ClearNotifier:
 
     @property
     def enabled(self) -> bool:
-        return self._config.enabled and bool(self._config.webhook_url or self._config.region_webhooks)
+        return self._config.enabled and bool(
+            self._config.webhook_url or self._config.region_webhooks or self._config.cc_webhooks
+        )
+
+    @property
+    def cc_webhooks(self) -> tuple[str, ...]:
+        return self._config.cc_webhooks
 
     def webhook_for_region(self, region_key: str | None) -> str:
         """Region group if configured, else the fallback group ("" means: do not send)."""
@@ -57,11 +63,14 @@ class ClearNotifier:
         server_ids: list[str],
         plan_summary: str,
         region_name: str = "",
+        target: str | None = None,
         now: float | None = None,
     ) -> str:
+        """``target`` overrides the "<region> <servers>" part (used for combined cc notices)."""
         occurred_at = datetime.fromtimestamp(time.time() if now is None else now, BEIJING)
-        servers = "、".join(server_ids) if server_ids else "（未识别服号）"
-        target = "{} {}".format(region_name, servers) if region_name else servers
+        if target is None:
+            servers = "、".join(server_ids) if server_ids else "（未识别服号）"
+            target = "{} {}".format(region_name, servers) if region_name else servers
         return "\n".join([
             "内网：{} {} {} 服{}".format(
                 operator_name or "未知成员", _EVENT_VERBS.get(event, event), target, _EVENT_NOTES.get(event, "")
