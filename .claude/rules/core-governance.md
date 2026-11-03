@@ -31,6 +31,20 @@
 - 发现此前判断错误时，直接承认并按证据修正，不通过叠加假设掩盖；
 - 小任务采用最轻流程：范围简述 → 最小改动 → 验证 → 停止。复杂、多服务或长期任务必须维护项目内可更新的计划文档，不以聊天记录代替。
 
+## 2.5 配置与代码分离
+
+业务配置不得硬编码进 Python 源码。判断标准：**改一条业务数据是否要改代码、跑测试、走 git**——若要，就说明它该在配置侧。
+
+配置应放在 `config/` 下的可读写数据文件（JSON / MD），代码只负责读取与校验。已知违规与迁移：
+
+- `tools/auto_hotfix_registry.py` 的 `KNOWN_THRESHOLDS`（24 个阈值）— 待迁至 `config/hotfix_thresholds.json`，见 [阈值注册表网页管理](../../docs/superpowers/specs/2026-10-30-threshold-registry-web.md)；
+- `tools/auto_hotfix_tool.py` 的 `SUPPORTED_PATCH_TYPES`、`DEFAULT_PATCH_TYPE`；
+- `src/operation_message.py` / `src/muliu_executor.py` 的 `SCRIPT_ROOT` 与各脚本路径（两处重复定义）。
+
+例外：HTTP 状态码、枚举值、日志格式等**程序语义常量**可留在代码里。
+
+新增配置时先问：它会被运维/用户改动吗？会，就放 `config/`。
+
 ## 3. 环境、权限和失败处理
 
 运行命令、安装依赖、访问网络、连接服务器、部署、拉取镜像或操作服务时，若出现权限、环境、网络、服务异常或命令失败：

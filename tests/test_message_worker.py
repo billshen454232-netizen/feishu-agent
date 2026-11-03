@@ -16,7 +16,8 @@ from src.config import (
 from src.conversation import ConversationStore
 from src.knowledge_base import KnowledgeSearchResult, KnowledgeSource
 from src.message_jobs import MessageJobStore
-from src.message_worker import MessageJobProcessor, MessageJobQueue, should_interpret_with_ai
+from src.execution_report import ExecutionReportStore
+from src.message_worker import MessageJobProcessor, MessageJobQueue
 from src.muliu_executor import MuliuExecutionResult, MuliuStepResult
 from src.operation_message import format_execution_result
 
@@ -205,35 +206,113 @@ def _successful_patch_result(log):
     )
 
 
-@pytest.mark.asyncio
-async def test_interpret_execution_result_sends_only_cleaned_redacted_context(tmp_path):
-    environment_path = tmp_path / "server_environments.json"
-    environment_path.write_text(
-        '{"regions":{"hmt":{"name":"港澳台繁体","environments":{"weekly":["5010"]}}},"groups":{}}',
-        encoding="utf-8",
-    )
+class FakeCardFeishuClient(FakeFeishuClient):
+    def __init__(self):
+        super().__init__()
+        self.card_updates = []
+
+    async def update_card(self, message_id, card):
+        self.card_updates.append((message_id, card))
+
+
+class _FakeContract:
+    def __init__(self, path, risk):
+        self.path = path
+        self.risk = risk
+
+    def matches(self, step):
+        return step.path == self.path
+
+
+class _FakeContracts:
+    def __init__(self, contracts):
+        self.contracts = contracts
+
+
+class FakeCatalog:
+    def __init__(self, *contracts):
+        self._contracts = _FakeContracts(list(contracts))
+
+    def read_call_contracts(self):
+        return self._contracts
+
+
+READ_CATALOG = FakeCatalog(
+    _FakeContract("/home/serverGeneralScript/cc_patch.py", "read"),
+    _FakeContract("/home/serverGeneralScript/basic_info.sh", "read"),
+    _FakeContract("/home/serverGeneralScript/exc_server_merge.sh", "write"),
+)
+
+
+def _report_processor(tmp_path, ai, feishu, *, timeout=1.0, environment_path=None):
     store = MessageJobStore(tmp_path / "jobs.sqlite3")
     store.initialize()
-    job, _ = store.create_if_new(
-        "om_patch",
-        "evt_patch",
-        "oc_group",
-        "ou_user",
-        "5010 服务器是否存在 avatar_patch_79941 patch？",
-    )
-    ai = InterpretationAIClient("【存在】已在 5010 服 Patch 列表中找到 avatar_patch_79941.lua。")
+    report_store = ExecutionReportStore(tmp_path / "jobs.sqlite3")
+    report_store.initialize()
     processor = MessageJobProcessor(
         make_config(
             execution_interpretation=ExecutionInterpretationConfig(
-                timeout_seconds=1,
-                server_environments_path=str(environment_path),
+                background_timeout_seconds=timeout,
+                server_environments_path=str(environment_path or tmp_path / "missing.json"),
             )
         ),
         store,
         ConversationStore(4),
         ai,
-        FakeFeishuClient(),
+        feishu,
+        script_catalog=READ_CATALOG,
+        report_store=report_store,
     )
+    return store, report_store, processor
+
+
+def _card_job(store, message_id, text, *, route_region="cn"):
+    store.create_if_new(message_id, "evt_" + message_id, "oc_group", "ou_user", text)
+    store.mark_awaiting_confirmation(
+        message_id,
+        plan_json="",
+        confirmation_message_id="card_" + message_id,
+        confirmation_token="token_" + message_id,
+        confirmation_method="card",
+        route_region=route_region,
+    )
+    return store.get(message_id)
+
+
+def _card_detail(card):
+    return card["elements"][2]["text"]["content"]
+
+
+def _merge_failure(server_id):
+    return MuliuExecutionResult(
+        "合服 {} → 2018".format(server_id),
+        [
+            MuliuStepResult(
+                1,
+                "合服 {} 到 2018".format(server_id),
+                "/home/serverGeneralScript/exc_server_merge.sh",
+                [server_id, "2018", "17"],
+                False,
+                "start merge {}\n2026-11-02 11:40:01 ssh: connect to host 10.1.2.3 port 22: Connection refused\n"
+                "exit code 255".format(server_id),
+            )
+        ],
+        failed_step_number=1,
+        failure_reason="脚本退出码非 0（exit code 255）",
+    )
+
+
+@pytest.mark.asyncio
+async def test_read_success_delivers_first_then_ai_reads_in_background(tmp_path):
+    environment_path = tmp_path / "server_environments.json"
+    environment_path.write_text(
+        '{"regions":{"hmt":{"name":"港澳台繁体","environments":{"weekly":["5010"]}}},"groups":{}}',
+        encoding="utf-8",
+    )
+    ai = InterpretationAIClient("【存在】已在 5010 服 Patch 列表中找到 avatar_patch_79941.lua。")
+    feishu = FakeFeishuClient()
+    store, report_store, processor = _report_processor(tmp_path, ai, feishu, environment_path=environment_path)
+    job, _ = store.create_if_new("om_patch", "evt_patch", "oc_group", "ou_user", "5010 服务器是否存在 avatar_patch_79941 patch？")
     result = _successful_patch_result(
         """MULIU_RUN_VERSION: opaque
 WORKSPACE_PATH: /data/app/muliu_ws/workspace
@@ -247,117 +326,157 @@ mysql://root:db-secret@10.202.28.45:3306/game
 AI_OP_END status=success
 END"""
     )
-    fallback = format_execution_result(result)
 
-    reply = await processor.interpret_execution_result(job, result, fallback)
+    await processor.present_execution_result(job, result, "om_patch")
+    assert len(feishu.replies) == 1
+    assert feishu.replies[0][1].startswith("✅ 执行完成")
+    await processor.wait_for_interpretations()
 
-    assert reply.startswith("【存在】")
-    assert "执行明细：" in reply
     assert len(ai.calls) == 1
     prompt = ai.calls[0][1]
     assert "avatar_patch_79941.lua" in prompt
     assert "港澳台繁体（hmt）：weekly：5010" in prompt
     for secret in ("super-secret", "bearer-secret", "secret-cookie", "db-secret", "10.202.28.45", "/data/app"):
         assert secret not in prompt
-        assert secret not in reply
-    assert "MULIU_RUN_VERSION" not in prompt
     assert "AI_OP_START" not in prompt
-    assert "AI_OP_END" not in prompt
+    assert feishu.replies[1] == ("om_patch", "【存在】已在 5010 服 Patch 列表中找到 avatar_patch_79941.lua。")
+    task = report_store.get_interpretation("om_patch")
+    assert task.status == "done"
+    assert "super-secret" not in task.payload_json
 
 
 @pytest.mark.asyncio
-async def test_interpret_execution_result_falls_back_when_ai_times_out(tmp_path):
-    store = MessageJobStore(tmp_path / "jobs.sqlite3")
-    store.initialize()
-    job, _ = store.create_if_new("om_patch", "evt_patch", "oc_group", "ou_user", "查询 Patch 列表")
+async def test_read_success_template_mode_never_calls_ai(tmp_path):
+    ai = InterpretationAIClient()
+    feishu = FakeFeishuClient()
+    store, report_store, processor = _report_processor(tmp_path, ai, feishu)
+    report_store.set_read_success_mode("template")
+    job, _ = store.create_if_new("om_patch", "evt_patch", "oc_group", "ou_user", "查询 Patch")
+
+    await processor.present_execution_result(job, _successful_patch_result('{"file": "a.lua"}'), "om_patch")
+    await processor.wait_for_interpretations()
+
+    assert ai.calls == []
+    assert len(feishu.replies) == 1
+
+
+@pytest.mark.asyncio
+async def test_write_success_and_unknown_never_call_ai(tmp_path):
+    ai = InterpretationAIClient()
+    feishu = FakeCardFeishuClient()
+    store, _report_store, processor = _report_processor(tmp_path, ai, feishu)
+    write_job = _card_job(store, "om_merge", "合服")
+    unknown_job = _card_job(store, "om_unknown", "合服")
+    write_ok = MuliuExecutionResult(
+        "合服 2213 → 2018",
+        [MuliuStepResult(1, "合服", "/home/serverGeneralScript/exc_server_merge.sh", ["2213", "2018", "17"], True, "ok")],
+    )
+    unknown = MuliuExecutionResult("合服 2213 → 2018", [], result_unknown_reason="Worker 租约过期")
+
+    await processor.present_execution_result(write_job, write_ok, "om_merge")
+    await processor.present_execution_result(unknown_job, unknown, "om_unknown")
+    await processor.wait_for_interpretations()
+
+    assert ai.calls == []
+    assert _card_detail(feishu.card_updates[0][1]).startswith("【执行完成】")
+    assert feishu.card_updates[1][1]["header"]["template"] == "yellow"
+    assert "请勿重复确认或重试" in _card_detail(feishu.card_updates[1][1])
+
+
+@pytest.mark.asyncio
+async def test_failure_miss_collects_candidate_and_same_error_on_other_server_reuses_it(tmp_path):
+    ai = InterpretationAIClient("SSH 连接被拒绝：目标服 SSH 不可达，请核对目标服状态与网络。")
+    feishu = FakeCardFeishuClient()
+    store, report_store, processor = _report_processor(tmp_path, ai, feishu)
+    first = _card_job(store, "om_first", "合服 2213 到 2018")
+    second = _card_job(store, "om_second", "合服 3001 到 2018", route_region="overseas")
+
+    await processor.present_execution_result(first, _merge_failure("2213"), "om_first")
+    first_card = feishu.card_updates[0][1]
+    assert first_card["header"]["template"] == "red"
+    assert "AI 正在后台分析" in _card_detail(first_card)
+    await processor.wait_for_interpretations()
+
+    assert len(ai.calls) == 1
+    assert "可信终态】failed" in ai.calls[0][1]
+    assert "exit code 255" in ai.calls[0][1]
+    updated = feishu.card_updates[1][1]
+    assert updated["header"]["template"] == "red"
+    assert "AI 新分析（待人工确认）" in _card_detail(updated)
+    candidates = report_store.list_patterns("candidate")
+    assert len(candidates) == 1
+
+    await processor.present_execution_result(second, _merge_failure("3001"), "om_second")
+    await processor.wait_for_interpretations()
+
+    assert len(ai.calls) == 1
+    reused = _card_detail(feishu.card_updates[2][1])
+    assert "AI 分析 · 未人工确认（已复用 1 次）" in reused
+    assert "SSH 连接被拒绝" in reused
+
+    report_store.set_pattern_status([candidates[0].pattern_id], "verified")
+    third = _card_job(store, "om_third", "合服 4001 到 2018")
+    await processor.present_execution_result(third, _merge_failure("4001"), "om_third")
+    assert "已审核典型故障（命中 2 次）" in _card_detail(feishu.card_updates[3][1])
+    assert len(ai.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_failure_with_different_error_does_not_reuse_template(tmp_path):
+    ai = InterpretationAIClient("诊断")
+    feishu = FakeCardFeishuClient()
+    store, report_store, processor = _report_processor(tmp_path, ai, feishu)
+    await processor.present_execution_result(_card_job(store, "om_a", "合服"), _merge_failure("2213"), "om_a")
+    await processor.wait_for_interpretations()
+    other = MuliuExecutionResult(
+        "合服 2213 → 2018",
+        [MuliuStepResult(1, "合服", "/home/serverGeneralScript/exc_server_merge.sh", ["2213", "2018", "17"], False, "配置生成失败：缺少 combine_demo_new.lua")],
+        failed_step_number=1,
+        failure_reason="未检测到合服完成文本",
+    )
+
+    await processor.present_execution_result(_card_job(store, "om_b", "合服"), other, "om_b")
+    await processor.wait_for_interpretations()
+
+    assert len(ai.calls) == 2
+    assert len(report_store.list_patterns("candidate")) == 2
+
+
+@pytest.mark.asyncio
+async def test_failure_ai_timeout_keeps_trusted_card_and_marks_task(tmp_path):
     ai = InterpretationAIClient()
     ai.block = asyncio.Event()
-    processor = MessageJobProcessor(
-        make_config(
-            execution_interpretation=ExecutionInterpretationConfig(
-                timeout_seconds=0.01,
-                server_environments_path=str(tmp_path / "missing.json"),
-            )
-        ),
-        store,
-        ConversationStore(4),
-        ai,
-        FakeFeishuClient(),
-    )
-    result = _successful_patch_result('{"file": "avatar_patch_79941.lua"}')
-    fallback = format_execution_result(result)
+    feishu = FakeCardFeishuClient()
+    store, report_store, processor = _report_processor(tmp_path, ai, feishu, timeout=0.01)
 
-    reply = await processor.interpret_execution_result(job, result, fallback)
+    await processor.present_execution_result(_card_job(store, "om_t", "合服"), _merge_failure("2213"), "om_t")
+    await processor.wait_for_interpretations()
 
-    assert reply == fallback
-    assert len(ai.calls) == 1
+    assert report_store.get_interpretation("om_t").status == "timed_out"
+    assert report_store.list_patterns("candidate") == []
+    final = feishu.card_updates[-1][1]
+    assert final["header"]["template"] == "red"
+    assert "AI 分析未完成" in _card_detail(final)
+    assert store.get("om_t").status == "awaiting_confirmation"
 
 
 @pytest.mark.asyncio
-async def test_interpret_execution_result_summarizes_every_terminal_outcome(tmp_path):
-    store = MessageJobStore(tmp_path / "jobs.sqlite3")
-    store.initialize()
-    job, _ = store.create_if_new("om_result", "evt_result", "oc_group", "ou_user", "查询 5010 服状态")
-    ai = InterpretationAIClient("【执行失败】Muliu 未返回可用的脚本终态。")
-    processor = MessageJobProcessor(make_config(), store, ConversationStore(4), ai, FakeFeishuClient())
-    failed = MuliuExecutionResult("查询 5010 服状态", [], failed_step_number=1, failure_reason="失败")
-    unknown = MuliuExecutionResult("查询 5010 服状态", [], result_unknown_reason="未知")
-    basic = MuliuExecutionResult(
-        "查询 5010 服状态",
-        [MuliuStepResult(1, "查询 5010 服状态", "/home/serverGeneralScript/basic_info.sh", ["5010"], True, "正常")],
-    )
+async def test_interrupted_interpretation_is_recovered_on_start(tmp_path):
+    ai = InterpretationAIClient("诊断")
+    feishu = FakeCardFeishuClient()
+    store, report_store, processor = _report_processor(tmp_path, ai, feishu)
+    _card_job(store, "om_r", "合服")
+    from src.worker_protocol import serialize_execution_result
 
-    assert should_interpret_with_ai(job.text, failed) is True
-    assert should_interpret_with_ai(job.text, unknown) is True
-    assert should_interpret_with_ai(job.text, basic) is True
-    assert (await processor.interpret_execution_result(job, failed, "failed")).startswith("【执行失败】")
-    assert (await processor.interpret_execution_result(job, unknown, "unknown")).startswith("【执行失败】")
-    assert (await processor.interpret_execution_result(job, basic, "basic")).startswith("【执行失败】")
-    assert len(ai.calls) == 3
-    assert all("没有可用脚本输出" in prompt for _history, prompt in ai.calls[:2])
+    report_store.enqueue_interpretation("om_r", "failure", serialize_execution_result(_merge_failure("2213")))
+    report_store.claim_interpretation("om_r")  # simulate a crash while running
 
+    processor.recover_interpretations()
+    await processor.wait_for_interpretations()
 
-@pytest.mark.asyncio
-async def test_interpret_execution_result_summarizes_multi_server_basic_info(tmp_path):
-    store = MessageJobStore(tmp_path / "jobs.sqlite3")
-    store.initialize()
-    job, _ = store.create_if_new(
-        "om_weekly",
-        "evt_weekly",
-        "oc_group",
-        "ou_user",
-        "检查海外所有 weekly 环境服务器是否已起服",
-    )
-    ai = InterpretationAIClient("【开服状态汇总】\n- 已开服：5000\n- 已关闭：5010\n- 查询报错/无法确认：无")
-    processor = MessageJobProcessor(make_config(), store, ConversationStore(4), ai, FakeFeishuClient())
-    result = MuliuExecutionResult(
-        "检查海外所有 weekly 环境服务器是否已起服",
-        [
-            MuliuStepResult(
-                1,
-                "检查 5000 服版本、开服信息和进程状态",
-                "/home/serverGeneralScript/basic_info.sh",
-                ["5000"],
-                True,
-                "服务器正在运行\n开服成功",
-            ),
-            MuliuStepResult(
-                2,
-                "检查 5010 服版本、开服信息和进程状态",
-                "/home/serverGeneralScript/basic_info.sh",
-                ["5010"],
-                True,
-                "服务器已正常关闭",
-            ),
-        ],
-    )
-
-    reply = await processor.interpret_execution_result(job, result, "执行明细")
-
-    assert reply.startswith("【开服状态汇总】")
-    assert "执行明细：" in reply
+    assert report_store.get_interpretation("om_r").status == "done"
     assert len(ai.calls) == 1
-    assert "已开服、已关闭、查询报错/无法确认三组" in ai.calls[0][1]
+    assert len(report_store.list_patterns("candidate")) == 1
 
 
 @pytest.mark.asyncio
@@ -384,3 +503,33 @@ async def test_queue_puts_and_gets_confirmation_items():
     assert item.message_id == "om_confirm"
     assert item.chat_id == "oc_group"
     assert item.confirmation_token == "ABC123"
+
+
+@pytest.mark.asyncio
+async def test_background_reading_uses_interpretation_client_not_chat_client(tmp_path):
+    chat_ai = InterpretationAIClient("chat")
+    strong_ai = InterpretationAIClient("强模型诊断")
+    feishu = FakeCardFeishuClient()
+    store = MessageJobStore(tmp_path / "jobs.sqlite3")
+    store.initialize()
+    report_store = ExecutionReportStore(tmp_path / "jobs.sqlite3")
+    report_store.initialize()
+    processor = MessageJobProcessor(
+        make_config(
+            execution_interpretation=ExecutionInterpretationConfig(server_environments_path=str(tmp_path / "missing.json"))
+        ),
+        store,
+        ConversationStore(4),
+        chat_ai,
+        feishu,
+        script_catalog=READ_CATALOG,
+        report_store=report_store,
+        interpretation_ai_client=strong_ai,
+    )
+
+    await processor.present_execution_result(_card_job(store, "om_s", "合服"), _merge_failure("2213"), "om_s")
+    await processor.wait_for_interpretations()
+
+    assert chat_ai.calls == []
+    assert len(strong_ai.calls) == 1
+    assert report_store.list_patterns("candidate")[0].diagnosis == "强模型诊断"

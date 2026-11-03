@@ -73,6 +73,11 @@ class AIPoolConfig:
         return bool(self.models)
 
 
+# AI 用途：planning = 自然语言 → 受限计划参数；chat = 聊天与知识问答；
+# interpretation = 执行结果研读（失败诊断、模板生成、查询解读）。
+AI_ROLES = ("planning", "chat", "interpretation")
+
+
 @dataclass(frozen=True)
 class ConversationConfig:
     max_history_messages: int = 12
@@ -207,12 +212,26 @@ class ConversationLogConfig:
 
 @dataclass(frozen=True)
 class ExecutionInterpretationConfig:
-    """Gateway-side AI interpretation settings for successful operation results."""
+    """Gateway-side background AI interpretation of trusted execution results.
+
+    Interpretation never blocks result delivery: the trusted card is sent first
+    and the AI reading only updates its explanation afterwards.
+    """
 
     enabled: bool = True
-    timeout_seconds: float = 8.0
+    background_timeout_seconds: float = 45.0
     server_environments_path: str = "config/server_environments.json"
     max_execution_data_chars: int = 12000
+    max_concurrent: int = 2
+    artifact_retention_days: int = 90
+
+
+@dataclass(frozen=True)
+class AdminConfig:
+    """Template review page. Always bound to 127.0.0.1; reach it via SSH tunnel."""
+
+    enabled: bool = False
+    port: int = 8901
 
 
 @dataclass(frozen=True)
@@ -229,6 +248,13 @@ class AppConfig:
     script_knowledge: ScriptKnowledgeConfig = field(default_factory=ScriptKnowledgeConfig)
     conversation_log: ConversationLogConfig = field(default_factory=ConversationLogConfig)
     execution_interpretation: ExecutionInterpretationConfig = field(default_factory=ExecutionInterpretationConfig)
+    admin: AdminConfig = field(default_factory=AdminConfig)
+    # 按用途选择的模型池；未配置 ai.pools 时为空，所有用途共用 ``ai``。
+    ai_routes: dict[str, AIPoolConfig] = field(default_factory=dict)
+
+    def ai_for(self, role: str) -> AIPoolConfig:
+        """Return the model pool serving ``role`` (falls back to ``ai``)."""
+        return self.ai_routes.get(role, self.ai)
 
 
 def _require_str(data: dict[str, Any], key: str, section: str) -> str:
@@ -348,9 +374,9 @@ def _load_ai_model(raw: Any, *, section: str, defaults: AIConfig | None = None) 
 
 
 def _load_ai_pool(raw: Any) -> AIPoolConfig:
-    """Load the model pool from the ``ai`` section.
+    """Load the default model pool from the ``ai`` section.
 
-    Two shapes are accepted:
+    Single-pool shapes:
 
     * pool form — ``ai.models`` is a non-empty array of connection entries.
       Shared generation parameters live in ``ai.defaults`` and apply to every
@@ -360,35 +386,90 @@ def _load_ai_pool(raw: Any) -> AIPoolConfig:
       failure.
     * legacy single-model form — ``ai`` carries ``provider`` / ``base_url``
       directly, treated as a one-entry pool so existing configs keep working.
+
+    Per-role pools (``ai.pools`` + ``ai.routing``): see :func:`_load_ai_routing`;
+    this function then returns the default pool.
     """
     if not isinstance(raw, dict):
         raise ConfigError("ai section must be a JSON object")
+    if "pools" in raw:
+        return _load_ai_routing(raw)["default"]
     if "models" not in raw:
         return AIPoolConfig(strategy="fallback", models=(_load_ai_model(raw, section="ai"),))
+    return _load_pool_entry(raw, section="ai", shared_defaults=raw.get("defaults", {}), own_defaults={})
 
+
+def _load_pool_entry(
+    raw: dict[str, Any],
+    *,
+    section: str,
+    shared_defaults: Any,
+    own_defaults: Any,
+) -> AIPoolConfig:
     models_raw = raw.get("models")
     if not isinstance(models_raw, list) or not models_raw:
-        raise ConfigError("ai.models 必须是非空数组")
+        raise ConfigError("{}.models 必须是非空数组".format(section))
     strategy = str(raw.get("strategy", "random"))
     if strategy not in AI_POOL_STRATEGIES:
         raise ConfigError(
-            "ai.strategy 必须是 {} 之一，当前为 {!r}".format(" / ".join(AI_POOL_STRATEGIES), strategy)
+            "{}.strategy 必须是 {} 之一，当前为 {!r}".format(section, " / ".join(AI_POOL_STRATEGIES), strategy)
         )
-
-    defaults_raw = raw.get("defaults", {})
-    if not isinstance(defaults_raw, dict):
+    if not isinstance(shared_defaults, dict):
         raise ConfigError("ai.defaults 必须是 JSON 对象")
+    if not isinstance(own_defaults, dict):
+        raise ConfigError("{}.defaults 必须是 JSON 对象".format(section))
     # defaults 本身不是可调用模型：只承载共享的生成参数，连接信息必须由每个
     # model 自己给出。用一个占位连接把共享字段解析成 AIConfig 再被继承。
-    shared = _load_ai_model(
-        dict(defaults_raw, provider="openai_compatible", base_url="x", api_key="x", model="x"),
-        section="ai.defaults",
-    )
+    merged = dict(shared_defaults)
+    merged.update(own_defaults)
+    merged.update(provider="openai_compatible", base_url="x", api_key="x", model="x")
+    shared = _load_ai_model(merged, section="{}.defaults".format(section))
     models = tuple(
-        _load_ai_model(item, section="ai.models[{}]".format(index), defaults=shared)
+        _load_ai_model(item, section="{}.models[{}]".format(section, index), defaults=shared)
         for index, item in enumerate(models_raw)
     )
     return AIPoolConfig(strategy=strategy, models=models)
+
+
+def _load_ai_routing(raw: dict[str, Any]) -> dict[str, AIPoolConfig]:
+    """Load named pools and resolve every role (plus ``default``) to one pool.
+
+    ``ai.pools`` maps a pool name to ``{strategy, models, defaults?}``; a pool's
+    own ``defaults`` override ``ai.defaults`` (e.g. a shorter timeout for a
+    fast pool). ``ai.routing`` maps roles in :data:`AI_ROLES` (or ``default``)
+    to pool names. Unrouted roles use ``default`` when given, else the first pool.
+    """
+    if "models" in raw:
+        raise ConfigError("ai.pools 与 ai.models 不能同时配置")
+    pools_raw = raw.get("pools")
+    if not isinstance(pools_raw, dict) or not pools_raw:
+        raise ConfigError("ai.pools 必须是非空 JSON 对象")
+    pools: dict[str, AIPoolConfig] = {}
+    for name, entry in pools_raw.items():
+        section = "ai.pools.{}".format(name)
+        if not isinstance(entry, dict):
+            raise ConfigError("{} 必须是 JSON 对象".format(section))
+        pools[str(name)] = _load_pool_entry(
+            entry,
+            section=section,
+            shared_defaults=raw.get("defaults", {}),
+            own_defaults=entry.get("defaults", {}),
+        )
+    routing_raw = raw.get("routing", {})
+    if not isinstance(routing_raw, dict):
+        raise ConfigError("ai.routing 必须是 JSON 对象")
+    routed: dict[str, AIPoolConfig] = {}
+    allowed = (*AI_ROLES, "default")
+    for role, pool_name in routing_raw.items():
+        if role not in allowed:
+            raise ConfigError("ai.routing 不支持的用途 {!r}，可选：{}".format(role, " / ".join(allowed)))
+        if pool_name not in pools:
+            raise ConfigError("ai.routing.{} 指向不存在的池 {!r}".format(role, pool_name))
+        routed[role] = pools[pool_name]
+    default_pool = routed.get("default", next(iter(pools.values())))
+    resolved = {role: routed.get(role, default_pool) for role in AI_ROLES}
+    resolved["default"] = default_pool
+    return resolved
 
 
 def load_config(path: str | Path = "config/config.json") -> AppConfig:
@@ -415,6 +496,7 @@ def load_config(path: str | Path = "config/config.json") -> AppConfig:
     script_knowledge_raw = raw.get("script_knowledge", {})
     conversation_log_raw = raw.get("conversation_log", {})
     execution_interpretation_raw = raw.get("execution_interpretation", {})
+    admin_raw = raw.get("admin", {})
 
     if not isinstance(server_raw, dict) or not isinstance(feishu_raw, dict) or not isinstance(ai_raw, dict):
         raise ConfigError("server, feishu, and ai sections must be JSON objects")
@@ -430,10 +512,17 @@ def load_config(path: str | Path = "config/config.json") -> AppConfig:
         raise ConfigError("conversation_log section must be a JSON object")
     if not isinstance(execution_interpretation_raw, dict):
         raise ConfigError("execution_interpretation section must be a JSON object")
+    if not isinstance(admin_raw, dict):
+        raise ConfigError("admin section must be a JSON object")
 
+    ai_routes: dict[str, AIPoolConfig] = {}
     if not ai_raw and runtime.role == "worker":
         # Worker 不调用 AI，允许完全不配 ai 段。
         ai_pool = AIPoolConfig()
+    elif isinstance(ai_raw, dict) and "pools" in ai_raw:
+        resolved = _load_ai_routing(ai_raw)
+        ai_pool = resolved["default"]
+        ai_routes = {role: resolved[role] for role in AI_ROLES}
     else:
         ai_pool = _load_ai_pool(ai_raw)
 
@@ -537,9 +626,9 @@ def load_config(path: str | Path = "config/config.json") -> AppConfig:
         ),
         execution_interpretation=ExecutionInterpretationConfig(
             enabled=bool(execution_interpretation_raw.get("enabled", True)),
-            timeout_seconds=_require_positive_number(
-                float(execution_interpretation_raw.get("timeout_seconds", 8)),
-                "execution_interpretation.timeout_seconds",
+            background_timeout_seconds=_require_positive_number(
+                float(execution_interpretation_raw.get("background_timeout_seconds", 45)),
+                "execution_interpretation.background_timeout_seconds",
             ),
             server_environments_path=str(
                 execution_interpretation_raw.get("server_environments_path", "config/server_environments.json")
@@ -548,6 +637,19 @@ def load_config(path: str | Path = "config/config.json") -> AppConfig:
                 int(execution_interpretation_raw.get("max_execution_data_chars", 12000)),
                 "execution_interpretation.max_execution_data_chars",
             ),
+            max_concurrent=_require_positive_integer(
+                int(execution_interpretation_raw.get("max_concurrent", 2)),
+                "execution_interpretation.max_concurrent",
+            ),
+            artifact_retention_days=_require_positive_integer(
+                int(execution_interpretation_raw.get("artifact_retention_days", 90)),
+                "execution_interpretation.artifact_retention_days",
+            ),
         ),
+        admin=AdminConfig(
+            enabled=bool(admin_raw.get("enabled", False)),
+            port=_require_positive_integer(int(admin_raw.get("port", 8901)), "admin.port"),
+        ),
+        ai_routes=ai_routes,
     )
     return config

@@ -67,9 +67,15 @@
   },
   "execution_interpretation": {
     "enabled": true,
-    "timeout_seconds": 8,
+    "background_timeout_seconds": 45,
     "server_environments_path": "config/server_environments.json",
-    "max_execution_data_chars": 12000
+    "max_execution_data_chars": 12000,
+    "max_concurrent": 2,
+    "artifact_retention_days": 90
+  },
+  "admin": {
+    "enabled": true,
+    "port": 8901
   },
   "runtime": {
     "role": "local",

@@ -51,7 +51,11 @@ def test_loads_openai_compatible_config(tmp_path):
     assert config.conversation_log.enabled is True
     assert config.conversation_log.directory == "logs/conversations"
     assert config.execution_interpretation.enabled is True
-    assert config.execution_interpretation.timeout_seconds == 8
+    assert config.execution_interpretation.background_timeout_seconds == 45
+    assert config.execution_interpretation.max_concurrent == 2
+    assert config.execution_interpretation.artifact_retention_days == 90
+    assert config.admin.enabled is False
+    assert config.admin.port == 8901
     assert config.execution_interpretation.server_environments_path == "config/server_environments.json"
 
 
@@ -65,7 +69,9 @@ def test_loads_openai_compatible_config(tmp_path):
         ("muliu", "start_verification_wait_seconds", 0),
         ("muliu", "request_timeout_seconds", 0),
         ("muliu", "confirmation_timeout_seconds", 0),
-        ("execution_interpretation", "timeout_seconds", 0),
+        ("execution_interpretation", "background_timeout_seconds", 0),
+        ("execution_interpretation", "max_concurrent", 0),
+        ("admin", "port", 0),
         ("execution_interpretation", "max_execution_data_chars", 0),
     ],
 )
@@ -142,7 +148,7 @@ def test_loads_execution_interpretation_config(tmp_path):
         "ai": {"provider": "openai_compatible", "base_url": "https://api.example.com/v1", "api_key": "key", "model": "m"},
         "execution_interpretation": {
             "enabled": False,
-            "timeout_seconds": 3,
+            "background_timeout_seconds": 3,
             "server_environments_path": "custom-environments.json",
             "max_execution_data_chars": 4567,
         },
@@ -151,7 +157,7 @@ def test_loads_execution_interpretation_config(tmp_path):
     config = load_config(config_path)
 
     assert config.execution_interpretation.enabled is False
-    assert config.execution_interpretation.timeout_seconds == 3
+    assert config.execution_interpretation.background_timeout_seconds == 3
     assert config.execution_interpretation.server_environments_path == "custom-environments.json"
     assert config.execution_interpretation.max_execution_data_chars == 4567
 
@@ -455,3 +461,72 @@ def test_ai_pool_rejects_incomplete_or_unknown_shapes(tmp_path, ai_section, matc
 
     with pytest.raises(ConfigError, match=match):
         load_config(config_path)
+
+
+def _write_ai(tmp_path, ai_section):
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({
+        "feishu": {"app_id": "app", "app_secret": "secret"},
+        "ai": ai_section,
+    }), encoding="utf-8")
+    return config_path
+
+
+def test_ai_role_pools_route_each_role_and_merge_pool_defaults(tmp_path):
+    config = load_config(_write_ai(tmp_path, {
+        "defaults": {"temperature": 0.3, "timeout_seconds": 60},
+        "pools": {
+            "fast": {
+                "strategy": "random",
+                "defaults": {"timeout_seconds": 20},
+                "models": [_ai_model(model="flash"), _ai_model(model="luna")],
+            },
+            "strong": {"strategy": "fallback", "models": [_ai_model(model="terra")]},
+        },
+        "routing": {"planning": "fast", "chat": "fast", "interpretation": "strong"},
+    }))
+
+    assert [m.model for m in config.ai_for("planning").models] == ["flash", "luna"]
+    assert config.ai_for("chat") is config.ai_for("planning")
+    assert [m.model for m in config.ai_for("interpretation").models] == ["terra"]
+    assert config.ai_for("planning").strategy == "random"
+    assert all(m.timeout_seconds == 20 and m.temperature == 0.3 for m in config.ai_for("planning").models)
+    assert config.ai_for("interpretation").models[0].timeout_seconds == 60
+    # 未在 routing 中写 default 时，默认池为第一个池
+    assert config.ai is config.ai_for("planning")
+
+
+def test_ai_role_pools_unrouted_roles_use_default(tmp_path):
+    config = load_config(_write_ai(tmp_path, {
+        "pools": {
+            "fast": {"models": [_ai_model(model="luna")]},
+            "strong": {"models": [_ai_model(model="terra")]},
+        },
+        "routing": {"default": "strong", "planning": "fast"},
+    }))
+
+    assert config.ai_for("planning").models[0].model == "luna"
+    assert config.ai_for("chat").models[0].model == "terra"
+    assert config.ai_for("interpretation").models[0].model == "terra"
+    assert config.ai.models[0].model == "terra"
+
+
+def test_legacy_ai_config_serves_every_role(tmp_path):
+    config = load_config(_write_ai(tmp_path, _ai_model(model="terra")))
+
+    assert config.ai_routes == {}
+    for role in ("planning", "chat", "interpretation"):
+        assert config.ai_for(role) is config.ai
+
+
+@pytest.mark.parametrize("ai_section, match", [
+    ({"pools": {}}, "ai.pools"),
+    ({"pools": {"a": {"models": [_ai_model()]}}, "models": [_ai_model()]}, "不能同时配置"),
+    ({"pools": {"a": {"models": [_ai_model()]}}, "routing": {"planning": "missing"}}, "不存在的池"),
+    ({"pools": {"a": {"models": [_ai_model()]}}, "routing": {"report": "a"}}, "不支持的用途"),
+    ({"pools": {"a": {"models": []}}}, r"ai\.pools\.a\.models"),
+    ({"pools": {"a": {"strategy": "nope", "models": [_ai_model()]}}}, r"ai\.pools\.a\.strategy"),
+])
+def test_ai_role_pools_reject_invalid_shapes(tmp_path, ai_section, match):
+    with pytest.raises(ConfigError, match=match):
+        load_config(_write_ai(tmp_path, ai_section))

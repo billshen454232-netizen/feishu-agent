@@ -23,6 +23,13 @@ class MuliuScriptCatalogError(RuntimeError):
     """Raised when the human-readable execution catalog is unavailable."""
 
 
+
+def template_variable_name(template_argument: str) -> str | None:
+    """Return ``name`` for a ``{name}`` argument template, else None."""
+    match = _VARIABLE_TEMPLATE_PATTERN.fullmatch(template_argument)
+    return match.group(1) if match else None
+
+
 class MuliuCallContractError(MuliuPlanError):
     """Raised when a plan is outside the catalog's explicitly registered calls."""
 

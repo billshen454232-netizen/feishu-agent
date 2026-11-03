@@ -628,6 +628,90 @@
           ]
         },
         {
+          id: "22",
+          status: "active",
+          title: "热更阈值注册表网页管理",
+          desc: "网页增删改阈值，加完即用，全程不碰 GS-1",
+          done: [
+            "已确认现状违规：KNOWN_THRESHOLDS 约 270 行业务数据硬编码在 Python，违反「配置与代码分离」",
+            "已确认 GS-1 部署约束：只能跳板机登录、不能 scp，手工复制易出错（曾混入 ESC 致 SyntaxError）",
+            "已确认目标架构：网页单一入口，白名单/中文路由/manifest 全部自动派生，GS-1 不持任何配置",
+            "已确认安全边界不变：生效路径白名单仍是精确正则，AI 只能从已登记项选",
+            "已建设计文档 docs/superpowers/specs/2026-10-30-threshold-registry-web.md",
+            "已把「配置与代码分离」写入核心规则 .claude/rules/core-governance.md",
+            "已完成架构决策：网页写 JSON 真源；catalog 白名单/中文路由/候选 manifest 自动派生；Gateway 与 Worker git pull；GS-1 脚本只做固定执行，不持阈值配置"
+          ],
+          current: [
+            "设计已定，待实施；当前优先处理 STEP 23 合服成功被 exit_code=255 误判的问题"
+          ],
+          remaining: [
+            "迁移 24 条阈值到 config/hotfix_thresholds.json 新 schema",
+            "auto_hotfix_registry.py 改为读 JSON，API 不变",
+            "auto_hotfix_tool.py 改为接受 -t <table.field>，不再查本地注册表（一次性 GS-1 部署）",
+            "catalog 合同 -k → -t，白名单正则同步",
+            "网页：列表/新增/编辑/停用/删除 + 确定性校验 + AI 审核",
+            "保存后自动跑 sync 链生成白名单、路由表、候选 manifest",
+            "SUPPORTED_PATCH_TYPES 与脚本路径提入配置",
+            "测试：数据校验、同步、合同、工具行为；既有 420 测试不回归"
+          ]
+        },
+        {
+          id: "23",
+          status: "active",
+          title: "合服成功被 SSH 255 误判失败",
+          desc: "合服流程已完成，但远端 SSH 连接关闭返回 exit_code=255，飞书错误提示失败",
+          done: [
+            "已取得真实执行证据：合服流程输出「此次合服操作流程结束，感谢使用」后才出现「Connection to 10.202.88.174 closed by remote host」",
+            "已确认飞书结果：将国服 2213 服合并至 2018 服、赛季 17、剧本 17，因 exit_code=255 被标记「测试服操作执行失败」",
+            "已确认 Gateway AI 研读并非未调用：11:41:59 记录 execution result interpretation timed out，默认 8 秒后回退原始失败结果；AI 不能覆盖已持久化的 failed 状态",
+            "已拿到实际 Muliu 执行脚本 /data/app/muliu_ws/workspace/code/ok_/combine.sh：它逐行读取 exc_server_merge.sh 输出，只在精确文字「此次合服操作流程结束，感谢使用」命中时置 merge_success=1",
+            "已纠正错误判断：截图中的实际完成标记与 combine.sh 匹配串一致，不能再归因于文本不匹配",
+            "已识别当前待定位边界：实际运行版本/隐藏控制字符、process substitution + break 的输出源中断、combine.sh 预期 exit 1 与 dispatcher 实际记录 255 的差异",
+            "已撤销未授权的外层 exc_server_merge.sh 退出码转换与新增测试；不再由外层脚本猜测业务成功"
+          ],
+          current: [
+            "只设计/修改统一 Muliu 入口 /data/app/muliu_ws/workspace/code/ok_/combine.sh：建立本次运行边界、持有自己启动的 SSH/监控子进程 PID、完成标记后有序结束监控并返回成功；不改每台目标游戏服脚本，也不改外层 exc_server_merge.sh"
+          ],
+          remaining: [
+            "以本次启动边界过滤旧 nohup.log：不能靠前 10 秒/10 行猜测；优先利用现有带时间戳的「开始合服流程」→「此次合服操作流程结束」顺序",
+            "用显式子进程 PID/进程组替代 process substitution + ps grep tail；只结束本次 SSH 监控，不触碰 nohup 合服业务进程",
+            "完成标记后进入 3 秒排空窗口：继续读取输出并记录明确失败信号；静默或行数不是成功证据，成功仍以本次精确完成标记为准",
+            "取得实际运行完成行原始字节，确认无 ANSI / CR 等不可见字符",
+            "补 Muliu 入口回归测试：当前运行边界、完成标记成功、显式失败、连接关闭/普通非零码不误判",
+            "按实际 Muliu 脚本部署方式只覆盖 combine.sh 并真实验证，不重放已完成的合服"
+          ]
+        },
+        {
+          id: "24",
+          status: "active",
+          title: "执行结果确定性展示与典型故障库",
+          desc: "成功不分析、已知错误不问 AI、未知失败才后台分析并沉淀",
+          done: [
+            "已确认 2213→2018 合服结果中 AI 研读实际被调用，但 8 秒超时后回退保底失败结果",
+            "已确认当前问题不是 AI 能否改终态：可信 failed 已先持久化，AI 本来就不能覆盖它",
+            "已定位结构问题：Worker /result 在持久化后同步等待 AI 研读、飞书投递、再返回 accepted",
+            "已定位预算冲突：外层研读硬 8 秒包住随机模型池、模型重试、最长 60 秒 HTTP 与完整输出",
+            "已确认优化原则：成功走程序模板、结果未知走程序模板、已审核典型错误直接复用报告、仅未知失败进入后台 AI 分析",
+            "已建立设计文档 docs/superpowers/specs/2026-11-02-execution-report-library.md（特征库、候选审核、卡片分层、验收标准）",
+            "已保留 AI 研读可靠性设计 docs/superpowers/specs/2026-11-02-execution-interpretation-reliability.md，作为后台任务/预算/可观测性子设计",
+            "已确认：待审核模板也直接复用（标注未人工确认）；审批页挂阿里云 Gateway，只监听 127.0.0.1",
+            "已确认：查询成功是否走 AI 由审批页开关切换（默认后台 AI 解读）",
+            "已实现：错误特征匹配键（脚本+退出码+规范化原因+关键错误行，不含参数/路由/catalog 版本）",
+            "已实现：结果先投递、AI 后台研读只更新卡片；研读任务持久化，重启恢复，3 次后放弃",
+            "已实现：审批页待审核/可用模板两页签，通过/退回/编辑/删除/批量，Host 与请求头防护"
+          ],
+          current: [
+            "首期代码已实现并本地测试通过（2026-11-03）：execution_report.py / admin_app.py / present_execution_result",
+            "待部署到阿里云 Gateway：配置 admin 段与 background_timeout_seconds，安全组不放行审批端口"
+          ],
+          remaining: [
+            "部署 Gateway 并真实验证：写成功零 AI、查询成功后台更新卡片、失败未命中收集待审核、同错误换服复用",
+            "验收：公网连审批端口失败；对外端口访问审批路径 404；ssh -L 后可打开审批页",
+            "运行一段时间后在审批页统一审核待审核模板",
+            "后续：单模型 deadline 感知池调用、研读专用较小 max_tokens"
+          ]
+        },
+        {
           id: "07",
           status: "todo",
           title: "授权环境部署与链路核验",

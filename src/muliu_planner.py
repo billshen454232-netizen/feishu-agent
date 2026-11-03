@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from .muliu_plan import MuliuPlan, MuliuPlanError, MuliuPlanKind, parse_plan
-from .muliu_script_catalog import MuliuCallContracts, MuliuScriptCatalog
+from .muliu_script_catalog import MuliuCallContracts, MuliuScriptCatalog, template_variable_name
+from .utils.time_text import TimeTextError, parse_time_text
 
 logger = logging.getLogger(__name__)
 
@@ -275,6 +276,7 @@ class MuliuPlanner:
         call_contracts: MuliuCallContracts,
     ) -> tuple[MuliuPlan, bool]:
         plan, normalized_single_step = self._parse_with_safe_shape_normalization(raw_plan)
+        plan = convert_time_arguments(plan, call_contracts)
         call_contracts.validate(plan)
         return plan, normalized_single_step
 
@@ -349,6 +351,7 @@ class MuliuPlanner:
 - 仅 `kind:"operation"` 可含步骤，且必须至少一个；其他 kind 必须为 `"steps":[]`；
 - 每个步骤只允许 `path`、`args`、`description` 三个字段；
 - `args` 必须是 JSON 数组，每个参数各占一个元素，不能拼成一整段命令；
+- 模板中的 `{timestamp}`（如开服时间）**不要自己换算时间戳**：用户给的是日期时间时，原样写成北京时间 `YYYY-MM-DDTHH:MM`（例如“2026.11.7 10点”写 `2026-11-07T10:00`，“下午3点”写 `15:00`；未写年份用当前年份），系统会确定性换算；用户直接给出数字时间戳时原样填写；用户没说具体几点时用 `kind:"clarify"` 询问，不要假设；
 - 输出必须以 `{` 开始、以 `}` 结束；返回前自行检查 JSON 语法和上述字段类型。
 
 不要输出 bash -c、sh -c、python -c、管道、重定向、命令替换或变量替换。
@@ -498,3 +501,66 @@ class MuliuPlanner:
 - `args` 必须是数组，参数必须拆成独立元素；
 - 不能输出 shell、command 或自由命令文本。
 """ % (title, validation_error, clipped_response, script_catalog, user_text)
+
+
+TIMESTAMP_VARIABLE = "timestamp"
+
+
+def convert_time_arguments(plan: MuliuPlan, call_contracts: MuliuCallContracts) -> MuliuPlan:
+    """Replace time text in ``{timestamp}`` argument slots with Beijing-time Unix timestamps.
+
+    Only slots of contracts that declare a ``timestamp`` variable and otherwise
+    match the step are touched; everything else is left for contract
+    validation. The readable time is appended to the step description so the
+    confirmation card shows what the number means.
+    """
+    converted_steps = []
+    changed = False
+    for step_number, step in enumerate(plan.steps, start=1):
+        positions = _timestamp_positions(step, call_contracts)
+        if not positions:
+            converted_steps.append(step)
+            continue
+        args = list(step.args)
+        displays = []
+        for position in positions:
+            try:
+                converted = parse_time_text(args[position])
+            except TimeTextError as exc:
+                raise MuliuPlanError("步骤 {} 的时间无法确定性换算：{}".format(step_number, exc)) from exc
+            args[position] = str(converted.timestamp)
+            displays.append(converted.display)
+        description = step.description
+        note = "（时间：{}）".format("、".join(displays))
+        if note not in description:
+            description = "{}{}".format(description, note)
+        if args != list(step.args) or description != step.description:
+            changed = True
+        converted_steps.append(replace(step, args=args, description=description))
+    return replace(plan, steps=converted_steps) if changed else plan
+
+
+def _timestamp_positions(step: Any, call_contracts: MuliuCallContracts) -> list[int]:
+    # A step that already matches a contract as-is (numeric timestamp, ``ctime``)
+    # needs no conversion.
+    if any(contract.matches(step) for contract in call_contracts.contracts):
+        return []
+    for contract in call_contracts.contracts:
+        if contract.path != step.path or len(contract.args) != len(step.args):
+            continue
+        positions = []
+        matches = True
+        for index, (actual, template) in enumerate(zip(step.args, contract.args)):
+            name = template_variable_name(template)
+            if name is None:
+                if actual != template:
+                    matches = False
+                    break
+            elif name == TIMESTAMP_VARIABLE:
+                positions.append(index)
+            elif contract.variable_patterns[name].fullmatch(actual) is None:
+                matches = False
+                break
+        if matches and positions:
+            return positions
+    return []

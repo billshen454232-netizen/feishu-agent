@@ -1,3 +1,4 @@
+import time
 import json
 
 from fastapi.testclient import TestClient
@@ -189,7 +190,7 @@ def test_gateway_worker_result_route_persists_and_interprets_patch_query(monkeyp
         "muliu": {"script_catalog_path": str(catalog_path)},
         "execution_interpretation": {
             "enabled": True,
-            "timeout_seconds": 2,
+            "background_timeout_seconds": 2,
             "server_environments_path": str(env_path),
         },
     }), encoding="utf-8")
@@ -297,6 +298,15 @@ def test_gateway_worker_result_route_persists_and_interprets_patch_query(monkeyp
             },
             json=payload,
         )
+        # The trusted card is delivered before AI runs; the reading lands later.
+        feishu = captured_feishu[0]
+        first_target, first_card = feishu.card_updates[0]
+        assert first_target == "card_1"
+        assert first_card["header"]["template"] == "green"
+        assert "AI 正在后台读取查询结果" in first_card["elements"][2]["text"]["content"]
+        deadline = time.monotonic() + 5
+        while len(feishu.card_updates) < 2 and time.monotonic() < deadline:
+            time.sleep(0.02)
 
     assert response.status_code == 200
     assert response.json() == {"status": "accepted"}
@@ -308,11 +318,10 @@ def test_gateway_worker_result_route_persists_and_interprets_patch_query(monkeyp
     assert "avatar_patch_79941.lua" in fake_ai.calls[0][1]
 
     assert len(captured_feishu) == 1
-    feishu = captured_feishu[0]
     assert feishu.replies == []
 
-    assert len(feishu.card_updates) == 1
-    card_target, card = feishu.card_updates[0]
+    assert len(feishu.card_updates) == 2
+    card_target, card = feishu.card_updates[1]
     assert card_target == "card_1"
     assert card["header"]["template"] == "green"
     assert "【存在】已在 5010 服找到该补丁" in card["elements"][2]["text"]["content"]
@@ -408,3 +417,28 @@ def test_gateway_worker_result_with_logs_replies_with_execution_detail(monkeypat
     assert feishu.replies[0][0] == "card_logs"
     assert "开服成功" in feishu.replies[0][1]
     assert "开服成功" not in feishu.card_updates[0][1]["elements"][2]["text"]["content"]
+
+
+def test_role_ai_clients_share_clients_for_shared_pools(monkeypatch, tmp_path):
+    from src.app import _create_role_ai_clients
+    from src.config import load_config
+
+    model = {"provider": "openai_compatible", "base_url": "https://x/v1", "api_key": "k"}
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({
+        "feishu": {"app_id": "app", "app_secret": "secret"},
+        "ai": {
+            "pools": {
+                "fast": {"models": [dict(model, model="luna")]},
+                "strong": {"models": [dict(model, model="terra")]},
+            },
+            "routing": {"planning": "fast", "chat": "fast", "interpretation": "strong"},
+        },
+    }), encoding="utf-8")
+    built = []
+    monkeypatch.setattr("src.app.create_ai_client", lambda pool: built.append(pool.models[0].model) or pool.models[0].model)
+
+    chat, planning, interpretation = _create_role_ai_clients(load_config(config_path))
+
+    assert (chat, planning, interpretation) == ("luna", "luna", "terra")
+    assert built == ["luna", "terra"]

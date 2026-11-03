@@ -29,7 +29,18 @@ from .operation_message import (
     format_rejection,
     mask_sensitive_operation_data,
 )
+from .execution_report import (
+    INTERPRETATION_FAILURE,
+    INTERPRETATION_READ_SUCCESS,
+    PATTERN_VERIFIED,
+    READ_SUCCESS_MODE_AI,
+    ExecutionReportStore,
+    compute_error_signature,
+    is_read_only_result,
+    result_scope,
+)
 from .server_environments import ServerEnvironments, ServerEnvironmentsError
+from .worker_protocol import parse_execution_result, serialize_execution_result
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +107,8 @@ class MessageJobProcessor:
         script_catalog: Any | None = None,
         intent_router: Any | None = None,
         conversation_log: Any | None = None,
+        report_store: ExecutionReportStore | None = None,
+        interpretation_ai_client: Any | None = None,
     ) -> None:
         self._config = config
         self._store = store
@@ -116,6 +129,11 @@ class MessageJobProcessor:
         self._conversation_log = conversation_log
         self._task: asyncio.Task[None] | None = None
         self._operation_tasks: set[asyncio.Task[None]] = set()
+        self._report_store = report_store
+        # Result readings may use a stronger pool than chat (ai.routing.interpretation).
+        self._interpretation_ai_client = interpretation_ai_client or ai_client
+        self._interpretation_tasks: set[asyncio.Task[None]] = set()
+        self._interpretation_semaphore: asyncio.Semaphore | None = None
         self._stopping = False
 
     def start(self) -> None:
@@ -124,6 +142,7 @@ class MessageJobProcessor:
         if self._task is None or self._task.done():
             self._stopping = False
             self._task = asyncio.create_task(self._run())
+            self.recover_interpretations()
 
     async def stop(self) -> None:
         self._stopping = True
@@ -133,7 +152,7 @@ class MessageJobProcessor:
                 await self._task
             except asyncio.CancelledError:
                 pass
-        operation_tasks = tuple(self._operation_tasks)
+        operation_tasks = (*self._operation_tasks, *self._interpretation_tasks)
         for task in operation_tasks:
             task.cancel()
         if operation_tasks:
@@ -463,7 +482,6 @@ class MessageJobProcessor:
             if self._muliu_executor is None:
                 raise MuliuExecutionError("Muliu 执行器尚未初始化")
             execution_result = await self._muliu_executor.execute_plan(plan)
-            fallback_reply = format_execution_result(execution_result)
             if execution_result.succeeded:
                 self._store.mark_done(pending_job.message_id)
             elif execution_result.result_unknown:
@@ -473,20 +491,7 @@ class MessageJobProcessor:
                 )
             else:
                 self._store.mark_failed(pending_job.message_id, execution_result.failure_reason)
-            reply = await self.interpret_execution_result(
-                pending_job,
-                execution_result,
-                fallback_reply,
-            )
-            await self.deliver_execution_result(
-                pending_job,
-                reply_message_id,
-                reply,
-                status_card=build_execution_status_card(
-                    execution_result,
-                    detail=result_card_detail(reply, execution_result),
-                ),
-            )
+            await self.present_execution_result(pending_job, execution_result, reply_message_id)
         except asyncio.CancelledError:
             self._store.mark_submitted_result_unknown(
                 pending_job.message_id,
@@ -550,65 +555,282 @@ class MessageJobProcessor:
                 status_card=build_execution_status_card(result, detail=result_card_detail(reply, result)),
             )
 
-    async def interpret_execution_result(
+    async def present_execution_result(
         self,
         pending_job: Any,
         result: MuliuExecutionResult,
-        fallback_reply: str,
-    ) -> str:
-        """Add a bounded AI reading of a trustworthy successful worker result.
+        reply_message_id: str,
+    ) -> None:
+        """Deliver a persisted terminal result first; explanation never blocks it.
 
-        The worker result has already been bound to the persisted plan before this
-        method is called. Interpretation is presentation-only: it never changes
-        terminal job state and every unavailable/unsafe AI outcome falls back to
-        the normal, auditable result text.
+        done / submitted_result_unknown use deterministic templates. failed first
+        looks up the template library; only a miss (or a read-only success when
+        the review page enables it) is read by AI, in the background, after the
+        trusted card has already been delivered. Nothing here changes job state.
         """
-        fallback_reply = mask_sensitive_operation_data(fallback_reply)
-        if (
-            not self._config.execution_interpretation.enabled
-            or not should_interpret_with_ai(pending_job.text, result)
-            or self._ai_client is None
-        ):
-            return fallback_reply
+        fallback_reply = mask_sensitive_operation_data(format_execution_result(result))
+        try:
+            presentation = self._plan_presentation(pending_job, result)
+        except Exception:  # noqa: BLE001 - template lookup must never hide a trusted result
+            logger.exception("execution report lookup failed message_id=%s", pending_job.message_id)
+            presentation = _Presentation(detail=result_card_detail(fallback_reply, result), source="template")
+        await self.deliver_execution_result(
+            pending_job,
+            reply_message_id,
+            fallback_reply,
+            status_card=build_execution_status_card(result, detail=presentation.detail),
+        )
+        if self._report_store is None:
+            return
+        try:
+            self._report_store.record_artifact(
+                pending_job.message_id,
+                _terminal_status(result),
+                presentation.source,
+                fallback_reply,
+                error_fingerprint=presentation.fingerprint,
+            )
+            if presentation.background_kind and self._report_store.enqueue_interpretation(
+                pending_job.message_id,
+                presentation.background_kind,
+                serialize_execution_result(result),
+                error_fingerprint=presentation.fingerprint,
+            ):
+                self._schedule_interpretation(pending_job.message_id)
+        except Exception:  # noqa: BLE001 - bookkeeping must never hide a delivered result
+            logger.exception("execution report bookkeeping failed message_id=%s", pending_job.message_id)
 
+    def _plan_presentation(self, pending_job: Any, result: MuliuExecutionResult) -> "_Presentation":
+        store = self._report_store
+        ai_available = (
+            store is not None
+            and self._interpretation_ai_client is not None
+            and self._config.execution_interpretation.enabled
+        )
+        if result.succeeded:
+            detail = _success_detail(result)
+            if (
+                ai_available
+                and store.read_success_mode() == READ_SUCCESS_MODE_AI
+                and is_read_only_result(result, self._call_contracts())
+            ):
+                return _Presentation(
+                    detail="{}\n\nAI 正在后台读取查询结果，完成后更新此卡片。".format(detail),
+                    source="ai_pending",
+                    background_kind=INTERPRETATION_READ_SUCCESS,
+                )
+            return _Presentation(detail=detail, source="template")
+        if result.result_unknown:
+            return _Presentation(detail=_unknown_detail(result), source="template")
+
+        signature = compute_error_signature(result)
+        base = _failure_detail(result)
+        pattern = store.find_pattern(signature.fingerprint) if store is not None else None
+        if pattern is not None:
+            hit = store.record_pattern_hit(
+                pattern.pattern_id,
+                pending_job.message_id,
+                result_scope(result, pending_job.route_region),
+            ) or pattern
+            logger.info(
+                "execution failure matched template message_id=%s pattern_id=%s status=%s",
+                pending_job.message_id,
+                hit.pattern_id,
+                hit.status,
+            )
+            return _Presentation(
+                detail="{}\n\n{}\n{}".format(base, _pattern_label(hit), hit.diagnosis),
+                source="verified_template" if hit.status == PATTERN_VERIFIED else "candidate_template",
+                fingerprint=signature.fingerprint,
+            )
+        if ai_available:
+            return _Presentation(
+                detail="{}\n\n典型故障库未命中，AI 正在后台分析，完成后更新此卡片。".format(base),
+                source="ai_pending",
+                background_kind=INTERPRETATION_FAILURE,
+                fingerprint=signature.fingerprint,
+            )
+        return _Presentation(detail=base, source="template", fingerprint=signature.fingerprint)
+
+    def _call_contracts(self) -> Any | None:
+        read_call_contracts = getattr(self._script_catalog, "read_call_contracts", None)
+        if not callable(read_call_contracts):
+            return None
+        try:
+            return read_call_contracts()
+        except Exception:  # noqa: BLE001 - unknown risk is treated as a write
+            logger.warning("call contracts unavailable for result classification", exc_info=True)
+            return None
+
+    def recover_interpretations(self) -> None:
+        """Resume background readings interrupted by a restart (never re-executes)."""
+        if self._report_store is None:
+            return
+        try:
+            self._report_store.prune_artifacts(self._config.execution_interpretation.artifact_retention_days)
+            pending = self._report_store.recover_interpretations()
+        except Exception:  # noqa: BLE001
+            logger.exception("execution interpretation recovery failed")
+            return
+        for message_id in pending:
+            self._schedule_interpretation(message_id)
+
+    async def wait_for_interpretations(self) -> None:
+        """Test/shutdown helper: wait for scheduled background readings."""
+        while self._interpretation_tasks:
+            await asyncio.gather(*tuple(self._interpretation_tasks), return_exceptions=True)
+
+    def _schedule_interpretation(self, message_id: str) -> None:
+        task = asyncio.create_task(self._run_interpretation(message_id))
+        self._interpretation_tasks.add(task)
+        task.add_done_callback(self._interpretation_tasks.discard)
+
+    async def _run_interpretation(self, message_id: str) -> None:
+        if self._interpretation_semaphore is None:
+            self._interpretation_semaphore = asyncio.Semaphore(self._config.execution_interpretation.max_concurrent)
+        async with self._interpretation_semaphore:
+            try:
+                await self._interpret_in_background(message_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001
+                logger.exception("execution interpretation crashed message_id=%s", message_id)
+
+    async def _interpret_in_background(self, message_id: str) -> None:
+        store = self._report_store
+        if store is None:
+            return
+        task = store.claim_interpretation(message_id)
+        if task is None:
+            return
+        job = self._store.get(message_id)
+        if job is None:
+            store.finish_interpretation(message_id, "failed", error_kind="job_missing")
+            return
+        try:
+            result = parse_execution_result(json.loads(task.payload_json), max_steps=self._config.muliu.max_steps)
+        except Exception:  # noqa: BLE001
+            logger.warning("execution interpretation payload invalid message_id=%s", message_id, exc_info=True)
+            store.finish_interpretation(message_id, "failed", error_kind="bad_payload")
+            return
+
+        is_failure = task.kind == INTERPRETATION_FAILURE
         execution_data = _build_clean_execution_data(
             result,
             max_chars=self._config.execution_interpretation.max_execution_data_chars,
         )
-
         environment_context = _load_environment_context(
             self._config.execution_interpretation.server_environments_path
         )
-        prompt = _build_execution_interpretation_prompt(
-            user_text=pending_job.text,
-            environment_context=environment_context,
-            execution_data=execution_data,
-        )
-        try:
-            generation = await asyncio.wait_for(
-                generate_with_provenance(self._ai_client, [], prompt),
-                timeout=self._config.execution_interpretation.timeout_seconds,
+        if is_failure:
+            prompt = _build_failure_diagnosis_prompt(
+                user_text=job.text,
+                result=result,
+                environment_context=environment_context,
+                execution_data=execution_data,
             )
-        except asyncio.TimeoutError:
-            logger.warning("execution result interpretation timed out message_id=%s", pending_job.message_id)
-            return fallback_reply
-        except Exception:  # noqa: BLE001 - presentation must never hide a trusted result
-            logger.warning(
-                "execution result interpretation unavailable message_id=%s",
-                pending_job.message_id,
-                exc_info=True,
+            base_detail = _failure_detail(result)
+        else:
+            prompt = _build_execution_interpretation_prompt(
+                user_text=job.text,
+                environment_context=environment_context,
+                execution_data=execution_data,
             )
-            return fallback_reply
+            base_detail = _success_detail(result)
 
-        interpretation = mask_sensitive_operation_data(str(generation.text).strip())
-        if not interpretation:
-            return fallback_reply
-        return mask_sensitive_operation_data(
-            "{}\n\n---\n\n执行明细：\n{}".format(
-                interpretation,
-                fallback_reply,
+        budget = self._config.execution_interpretation.background_timeout_seconds
+        started = time.perf_counter()
+        try:
+            generation = await asyncio.wait_for(generate_with_provenance(self._interpretation_ai_client, [], prompt), timeout=budget)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - presentation must never hide a trusted result
+            elapsed_ms = self._elapsed_ms(started)
+            timed_out = isinstance(exc, asyncio.TimeoutError)
+            logger.warning(
+                "execution interpretation %s message_id=%s kind=%s elapsed_ms=%s input_chars=%s",
+                "timed out" if timed_out else "unavailable",
+                message_id,
+                task.kind,
+                elapsed_ms,
+                len(prompt),
+                exc_info=not timed_out,
             )
+            store.finish_interpretation(
+                message_id,
+                "timed_out" if timed_out else "failed",
+                error_kind="timeout" if timed_out else type(exc).__name__,
+                input_chars=len(prompt),
+                elapsed_ms=elapsed_ms,
+            )
+            store.set_artifact_source(message_id, "template")
+            await self._update_result_card(
+                job,
+                result,
+                "{}\n\nAI 分析未完成，请按上方{}继续核验。".format(base_detail, "失败原因" if is_failure else "执行结果"),
+            )
+            return
+
+        elapsed_ms = self._elapsed_ms(started)
+        text = mask_sensitive_operation_data(str(generation.text).strip())
+        logger.info(
+            "execution interpretation done message_id=%s kind=%s model=%s elapsed_ms=%s input_chars=%s output_chars=%s",
+            message_id,
+            task.kind,
+            generation.model,
+            elapsed_ms,
+            len(prompt),
+            len(text),
         )
+        if not text:
+            store.finish_interpretation(message_id, "failed", error_kind="empty_output", elapsed_ms=elapsed_ms)
+            store.set_artifact_source(message_id, "template")
+            await self._update_result_card(job, result, base_detail)
+            return
+
+        candidate_id = None
+        if is_failure:
+            pattern = store.add_candidate(
+                compute_error_signature(result),
+                text,
+                message_id,
+                result_scope(result, job.route_region),
+            )
+            candidate_id = pattern.pattern_id
+            detail = "{}\n\n说明来源：AI 新分析（待人工确认）\n可信终态仍为：执行失败\n{}".format(base_detail, text)
+            source = "ai_new"
+        else:
+            detail = text
+            source = "ai_read"
+        store.finish_interpretation(
+            message_id,
+            "done",
+            summary=text,
+            model_name=str(generation.model or ""),
+            input_chars=len(prompt),
+            elapsed_ms=elapsed_ms,
+            candidate_pattern_id=candidate_id,
+        )
+        store.set_artifact_source(message_id, source)
+        await self._update_result_card(job, result, detail, reply_text=text)
+
+    async def _update_result_card(
+        self,
+        job: Any,
+        result: MuliuExecutionResult,
+        detail: str,
+        *,
+        reply_text: str = "",
+    ) -> None:
+        """Refresh only the explanation of an already-delivered result."""
+        try:
+            update_card = getattr(self._feishu_client, "update_card", None)
+            if job.confirmation_method == "card" and job.confirmation_message_id and callable(update_card):
+                await update_card(job.confirmation_message_id, build_execution_status_card(result, detail=detail))
+            elif reply_text:
+                await self._feishu_client.reply_text(job.message_id, reply_text)
+        except Exception:  # noqa: BLE001
+            logger.exception("execution interpretation card update failed message_id=%s", job.message_id)
 
     async def deliver_execution_result(
         self,
@@ -852,9 +1074,44 @@ class MessageJobProcessor:
         return int((time.perf_counter() - started) * 1000)
 
 
-def should_interpret_with_ai(_job_text: str, _result: MuliuExecutionResult) -> bool:
-    """Every trusted terminal outcome receives a concise, presentation-only AI summary."""
-    return True
+@dataclass(frozen=True)
+class _Presentation:
+    detail: str
+    source: str
+    background_kind: str = ""
+    fingerprint: str = ""
+
+
+def _terminal_status(result: MuliuExecutionResult) -> str:
+    if result.succeeded:
+        return "done"
+    if result.result_unknown:
+        return "submitted_result_unknown"
+    return "failed"
+
+
+def _success_detail(result: MuliuExecutionResult) -> str:
+    lines = ["【执行完成】{}".format(result.summary)]
+    total = len(result.step_results)
+    for index, step in enumerate(result.step_results, start=1):
+        lines.append("{}/{} {} {}".format(index, total, "✅" if step.succeeded else "❌", step.description))
+    return mask_sensitive_operation_data("\n".join(lines))
+
+
+def _unknown_detail(result: MuliuExecutionResult) -> str:
+    return mask_sensitive_operation_data(
+        "【结果尚未核验】{}\n请勿重复确认或重试同一操作。".format(result.result_unknown_reason)
+    )
+
+
+def _failure_detail(result: MuliuExecutionResult) -> str:
+    return mask_sensitive_operation_data("【执行失败】{}".format(result.failure_reason))
+
+
+def _pattern_label(pattern: Any) -> str:
+    if pattern.status == PATTERN_VERIFIED:
+        return "说明来源：已审核典型故障（命中 {} 次）".format(pattern.hit_count)
+    return "说明来源：AI 分析 · 未人工确认（已复用 {} 次）".format(pattern.hit_count)
 
 
 def _group_result_summary(reply: str, *, max_chars: int = 1200) -> str:
@@ -936,6 +1193,36 @@ def _build_execution_interpretation_prompt(
         "7. 不要建议、触发或描述新的执行操作。\n"
         "8. 严禁添加任何多余前缀、说明性标题或客套话（如‘AI 研读结论：’、‘分析结果：’等），直接输出结论。"
     ).format(mask_sensitive_operation_data(user_text), environment_context, execution_data)
+
+
+def _build_failure_diagnosis_prompt(
+    *,
+    user_text: str,
+    result: MuliuExecutionResult,
+    environment_context: str,
+    execution_data: str,
+) -> str:
+    return (
+        "你是飞书测试服运维 AI 助手。一次操作已由机器人判定为失败；你只能依据下列脱敏后的真实结果做故障诊断。"
+        "你的诊断会被收集为【典型故障模板】，以后同类错误（可能是其他服号、其他参数）会直接复用。"
+        "\n\n【可信终态】failed（执行失败，不可更改）"
+        "\n\n【可信失败原因】\n{}"
+        "\n\n【用户原始提问】\n{}"
+        "\n\n【环境资产参考】\n{}"
+        "\n\n【实际执行结果】\n{}"
+        "\n\n【输出约束】\n"
+        "1. 不得把失败说成成功；日志中出现“完成”“成功”等文本与失败终态冲突时，明确指出冲突，不裁决成功。\n"
+        "2. 输出：可能原因（只写日志与失败原因能支持的）、排查/核验建议、证据缺口。\n"
+        "3. 写成适用于同类错误的通用说明：不要写具体服号、赛季、剧本号等本次参数。\n"
+        "4. 只给核验与排查建议，不建议自动重试、重放或重复执行写操作。\n"
+        "5. 严禁输出私网 IP、主机地址、账号、凭据、Cookie、Token、数据库连接、工作目录或执行命令。\n"
+        "6. 简洁中文，不超过 300 字，不要客套话和多余标题。"
+    ).format(
+        mask_sensitive_operation_data(result.failure_reason or "（无）"),
+        mask_sensitive_operation_data(user_text),
+        environment_context,
+        execution_data or "（无可用脚本输出）",
+    )
 
 
 def _plan_to_json(plan: MuliuPlan) -> str:

@@ -93,8 +93,63 @@ worker  = 主动连 Gateway 领任务 + 本地 Muliu 执行（无飞书/AI 凭�
 - **不标注所用模型**：MiniMax 3.1 Flash 用于语言格式转化足够可靠，无需在回复里区分（用户 2026-10-29 决定）。如后续引入明显更弱的模型，再考虑按模型加标注；
 - worker 角色可完全不配 `ai` 段（它不调用 AI）。
 
+### 按用途分池（可选）
+
+不同用途可以交给不同的池：便宜模型处理量大、不可复用的内容，强模型处理会沉淀为模板的研读。
+
+```json
+"ai": {
+  "defaults": { "temperature": 0.2, "max_tokens": 2048, "timeout_seconds": 60 },
+  "pools": {
+    "fast":   { "strategy": "random",   "defaults": { "timeout_seconds": 20 }, "models": [ {…Luna…}, {…Flash…} ] },
+    "strong": { "strategy": "fallback", "models": [ {…Terra…} ] }
+  },
+  "routing": { "planning": "fast", "chat": "fast", "interpretation": "strong" }
+}
+```
+
+| 用途 | 内容 | 调用位置 |
+| --- | --- | --- |
+| `planning` | 自然语言 → 受限计划参数 | `MuliuPlanner` |
+| `chat` | 聊天与知识问答 | 消息主循环 |
+| `interpretation` | 执行结果研读：失败诊断、模板生成、查询解读 | 后台研读 |
+
+- 池自己的 `defaults` 覆盖 `ai.defaults`（例如 fast 池更短的超时）；
+- `routing` 未写的用途走 `routing.default`，没写 `default` 时走第一个池；
+- `pools` 与 `models` 不能同时出现；旧的 `models` / 单模型写法仍是「所有用途共用一个池」；
+- 共用同一个池的用途共用同一个客户端；
+- 计划生成用弱模型不会产生不安全命令（catalog 合同 + firewall 拦截），风险是合法但读错语义的参数（合服方向、赛季/剧本号对调），由确认卡把关；错误偏多时把 `routing.planning` 改回强池即可。
+
+### 执行结果展示与模板审批页
+
+设计：[2026-11-02-execution-report-library.md](superpowers/specs/2026-11-02-execution-report-library.md)
+
+```json
+"execution_interpretation": {
+  "enabled": true,
+  "background_timeout_seconds": 45,
+  "server_environments_path": "config/server_environments.json",
+  "max_execution_data_chars": 12000,
+  "max_concurrent": 2,
+  "artifact_retention_days": 90
+},
+"admin": { "enabled": true, "port": 8901 }
+```
+
+| 终态 | 展示 | AI |
+| --- | --- | --- |
+| 写操作成功 / 结果未知 | 程序模板 | 不调用 |
+| 查询（全部步骤 `risk=read`）成功 | 先发程序模板；审批页开关为「AI 后台解读」时后台读日志后更新卡片 | 按开关 |
+| 失败且命中模板（待审核或可用） | 失败原因 + 模板诊断 + 来源标签 | 不调用 |
+| 失败且未命中 | 先发失败卡，后台 AI 诊断 → 自动收集为待审核模板 | 后台一次 |
+
+- `background_timeout_seconds`：后台研读总预算，**不阻塞** Worker `/result` 与首张结果卡。旧字段 `timeout_seconds` 已废弃并被忽略。
+- `admin.port`：审批页端口，固定绑定 `127.0.0.1`，不可配置 host；安全组不要放行。访问：`ssh -L 8901:127.0.0.1:8901 <gateway>` 后浏览器开 `http://127.0.0.1:8901`。
+- 模板库、研读任务、执行记录与 `message_jobs` 同一个 SQLite 文件；执行记录按 `artifact_retention_days` 清理，模板不清理。
 
 ## 2. `src/` — 运行期 Python 模块
+
+`src/utils/` 放与飞书、Muliu、配置都无关的通用工具（如时间换算）；它们不依赖 `src/` 里的业务模块，可单独测试与复用。新增此类工具一律放这里。
 
 ### 2.1 入口与基础设施
 
@@ -111,7 +166,9 @@ worker  = 主动连 Gateway 领任务 + 本地 Muliu 执行（无飞书/AI 凭�
 | --- | --- | --- |
 | [event_handler.py](../src/event_handler.py) | 飞书事件与卡片回调入口：去重、解析请求、分发到消息队列、处理确认/取消按钮。 | `FeishuEventHandler` |
 | [message_jobs.py](../src/message_jobs.py) | 任务状态机与持久化：`awaiting_confirmation → confirmed → submission_in_progress → queued_for_worker/leased → done/failed/submitted_result_unknown`。 | `MessageJob`, `MessageJobStore` |
-| [message_worker.py](../src/message_worker.py) | 消息处理主循环：AI 计划生成、确认卡投递、任务领取、结果回写、AI 结果研读层。 | `MessageJobProcessor`, `MessageJobQueue`, `interpret_execution_result` |
+| [message_worker.py](../src/message_worker.py) | 消息处理主循环：AI 计划生成、确认卡投递、任务领取、结果回写；结果展示先投递可信卡，再按需后台 AI 研读并只更新卡片说明。 | `MessageJobProcessor`, `MessageJobQueue`, `present_execution_result` |
+| [execution_report.py](../src/execution_report.py) | 执行结果展示分流与典型故障模板库：错误特征（匹配键）计算、模板 / 后台研读任务 / 执行记录 / 运行时设置的 SQLite 存储。不改变任何终态。 | `compute_error_signature`, `ExecutionReportStore`, `is_read_only_result` |
+| [admin_app.py](../src/admin_app.py) | 模板审批页：待审核 / 可用模板两个页签、通过 / 退回 / 删除 / 编辑 / 批量、查询成功模式开关。独立服务，**只监听 127.0.0.1**，经 SSH 端口转发访问。 | `create_admin_app`, `AdminServer` |
 | [operation_message.py](../src/operation_message.py) | 计划与结果的飞书文本/卡片格式化，含敏感信息遮罩。 | `format_plan_for_confirmation`, `build_plan_confirmation_card`, `format_execution_result`, `mask_sensitive_operation_data` |
 | [conversation.py](../src/conversation.py) | 会话历史存取。 | `ConversationStore` |
 | [conversation_log.py](../src/conversation_log.py) | 对话归档为按日期的可读 Markdown。 | `ConversationLog` |
@@ -130,13 +187,15 @@ worker  = 主动连 Gateway 领任务 + 本地 Muliu 执行（无飞书/AI 凭�
 → [确认后]
 → muliu_executor.py      （调用 Muliu Task 89）
 → worker_protocol.py     （结果序列化与计划比对）
-→ message_worker.py      （回写状态 + AI 研读）
+→ message_worker.py      （回写状态 + 结果展示分流）
+→ execution_report.py    （故障模板库 / 后台研读任务）
 ```
 
 | 模块 | 职责 | 关键符号 | 不负责什么 |
 | --- | --- | --- | --- |
 | [muliu_intent.py](../src/muliu_intent.py) | 非权威请求提示，供观测与 UI 文案使用。 | `MuliuIntentRouter` | **不**决定是否执行。 |
 | [muliu_planner.py](../src/muliu_planner.py) | 把飞书请求转成注册表校验过的 Muliu 决策（operation / knowledge / clarify / reject）。 | `MuliuPlanner`, `MuliuPlanGeneration` | **不**执行脚本。 |
+| [utils/time_text.py](../src/utils/time_text.py) | 时间文本 → 北京时间 Unix 时间戳的确定性换算。规划器把合同 `{timestamp}` 位置上 AI 写出的时间文本（如 `2026-11-07T10:00`）换算成数字，并在步骤说明追加可读时间；没有具体时刻、相对日期、不存在的日期一律拒绝，交给 AI 澄清。AI 不再自行换算时间戳。 | `parse_time_text`, `muliu_planner.convert_time_arguments` | **不**猜测缺失的时刻或时区。 |
 | [muliu_plan.py](../src/muliu_plan.py) | AI 生成计划的严格 JSON 解析：`kind`、`route_scope`、`steps[]`。 | `parse_plan`, `MuliuPlan`, `MuliuStep` | **不**判断合同是否合法。 |
 | [muliu_script_catalog.py](../src/muliu_script_catalog.py) | 解析并校验 catalog 中的精确调用合同（`path + args` 模板 + 变量正则 + risk）。 | `MuliuScriptCatalog`, `MuliuCallContracts`, `parse_call_contracts` | **不**推断未登记的脚本或参数。 |
 | [muliu_firewall.py](../src/muliu_firewall.py) | 合同校验后的安全属性检查：根目录约束、长度限制、Shell 注入原语拒绝。 | `MuliuFirewall` | **不**是第二份业务白名单。 |
@@ -233,12 +292,14 @@ tools/auto_hotfix_registry.py
 
 | 测试文件 | 覆盖对象 |
 | --- | --- |
-| `test_config.py` | 配置加载、校验、默认值、`execution_interpretation` 段。 |
+| `test_config.py` | 配置加载、校验、默认值、`execution_interpretation` 与 `admin` 段。 |
 | `test_app.py` | FastAPI 三种角色入口、健康检查、Worker 结果路由、AI 研读接线。 |
 | `test_ai_client.py` | OpenAI 兼容与 Claude Messages 两种客户端的请求构造。 |
 | `test_event_handler.py` | 飞书事件、卡片回调、去重与分发。 |
 | `test_message_jobs.py` | 任务状态机、租约、`route_region` 持久化、未知终态。 |
-| `test_message_worker.py` | 消息处理主循环、AI 结果研读、超时回退、敏感信息遮罩。 |
+| `test_message_worker.py` | 消息处理主循环；结果展示分流（写成功/未知零 AI、查询成功后台研读与模式开关、失败模板复用、未命中收集、超时保留可信卡、重启恢复）。 |
+| `test_execution_report.py` | 错误特征稳定性（跨服号同键、不同错误不同键）、归一化、只读判定、模板生命周期、恢复与清理、落库脱敏。 |
+| `test_admin_app.py` | 审批页 Host / 请求头防护、通过 / 退回 / 编辑 / 删除、模式切换、只绑定 127.0.0.1。 |
 | `test_operation_message.py` | 计划卡、确认卡、结果卡的格式化与遮罩。 |
 | `test_operation_flow.py` | 端到端：飞书请求 → 计划 → 确认 → 执行 → 回写。 |
 | `test_muliu_planner.py` | AI 计划生成与受限 JSON 决策。 |

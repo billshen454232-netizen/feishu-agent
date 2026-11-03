@@ -14,7 +14,9 @@ from .ai_client import create_ai_client
 from .config import ConfigError, load_config
 from .conversation import ConversationStore
 from .conversation_log import ConversationLog
+from .admin_app import AdminServer, create_admin_app
 from .event_handler import FeishuEventHandler
+from .execution_report import ExecutionReportStore
 from .feishu_client import FeishuClient
 from .message_jobs import MessageJobStore
 from .message_worker import MessageJobProcessor, MessageJobQueue, result_card_detail
@@ -44,14 +46,16 @@ def create_app(config_path: str | Path = "config/config.json") -> FastAPI:
 
     job_store = MessageJobStore(config.job_queue.database_path)
     job_store.initialize()
+    report_store = ExecutionReportStore(config.job_queue.database_path)
+    report_store.initialize()
     conversations = ConversationStore(config.conversation.max_history_messages)
-    ai_client = create_ai_client(config.ai)
+    ai_client, planning_ai_client, interpretation_ai_client = _create_role_ai_clients(config)
     feishu_client = FeishuClient(config.feishu)
     job_queue = MessageJobQueue()
 
     script_catalog = MuliuScriptCatalog(config.muliu.script_catalog_path)
     operation_planner = MuliuPlanner(
-        ai_client=ai_client,
+        ai_client=planning_ai_client,
         script_catalog=script_catalog,
         max_steps=config.muliu.max_steps,
     )
@@ -93,6 +97,8 @@ def create_app(config_path: str | Path = "config/config.json") -> FastAPI:
         script_catalog=script_catalog,
         intent_router=MuliuIntentRouter(),
         conversation_log=conversation_log,
+        report_store=report_store,
+        interpretation_ai_client=interpretation_ai_client,
     )
     event_handler = FeishuEventHandler(config, job_store, job_queue, job_processor=job_processor)
 
@@ -115,9 +121,15 @@ def create_app(config_path: str | Path = "config/config.json") -> FastAPI:
         for job in recoverable:
             await job_queue.enqueue(job.message_id)
         job_processor.start()
+        admin_server: AdminServer | None = None
+        if config.admin.enabled:
+            admin_server = AdminServer(create_admin_app(report_store), port=config.admin.port)
+            admin_server.start()
         try:
             yield
         finally:
+            if admin_server is not None:
+                admin_server.stop()
             if lease_task is not None:
                 lease_task.cancel()
                 await asyncio.gather(lease_task, return_exceptions=True)
@@ -137,6 +149,19 @@ def create_app(config_path: str | Path = "config/config.json") -> FastAPI:
         _add_gateway_worker_routes(app, config, job_store, job_processor)
 
     return app
+
+
+def _create_role_ai_clients(config: Any) -> tuple[Any, Any, Any]:
+    """Build (chat, planning, interpretation) clients; roles sharing a pool share a client."""
+    clients: dict[int, Any] = {}
+
+    def client_for(role: str) -> Any:
+        pool = config.ai_for(role)
+        if id(pool) not in clients:
+            clients[id(pool)] = create_ai_client(pool)
+        return clients[id(pool)]
+
+    return client_for("chat"), client_for("planning"), client_for("interpretation")
 
 
 def _create_worker_app(config: Any) -> FastAPI:
@@ -261,17 +286,10 @@ def _add_gateway_worker_routes(
         )
         if pending_job is None:
             raise HTTPException(status_code=404, detail="worker lease not found")
-        fallback_reply = format_execution_result(result)
-        reply = await job_processor.interpret_execution_result(
+        await job_processor.present_execution_result(
             pending_job,
             result,
-            fallback_reply,
-        )
-        await job_processor.deliver_execution_result(
-            pending_job,
             pending_job.confirmation_message_id,
-            reply,
-            status_card=build_execution_status_card(result, detail=result_card_detail(reply, result)),
         )
         return {"status": "accepted"}
 
