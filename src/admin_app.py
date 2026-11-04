@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
@@ -42,6 +43,9 @@ from .execution_report import (
 logger = logging.getLogger(__name__)
 
 ADMIN_HOST = "127.0.0.1"
+# The project plan board (docs/hotfix-requirements-progress.html), read on every request so a
+# `git pull` is enough to publish an update. Served behind the same host / Access checks.
+PLAN_BOARD_PATH = Path(__file__).resolve().parents[1] / "docs" / "hotfix-requirements-progress.html"
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "[::1]"}
 _MAX_DIAGNOSIS_CHARS = 4000
 
@@ -83,6 +87,14 @@ def create_admin_app(
     @app.get("/", response_class=HTMLResponse)
     async def index() -> str:
         return _INDEX_HTML
+
+    @app.get("/plan", response_class=HTMLResponse)
+    async def plan_board() -> HTMLResponse:
+        try:
+            html = PLAN_BOARD_PATH.read_text(encoding="utf-8")
+        except OSError:
+            return HTMLResponse("项目计划页面不存在：docs/hotfix-requirements-progress.html", status_code=404)
+        return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
 
     @app.get("/api/summary")
     async def summary() -> dict[str, Any]:
@@ -411,6 +423,9 @@ _INDEX_HTML = r"""<!doctype html>
     display: grid; grid-template-columns: 1fr auto; gap: 8px 32px; align-items: start;
   }
   .masthead h1 { font-size: 20px; font-weight: 650; margin: 0; letter-spacing: .02em; }
+  .plan-link { margin-left: 12px; font-size: 13px; font-weight: 500; color: var(--accent); text-decoration: none;
+    border: 1px solid var(--line); border-radius: var(--radius); padding: 3px 10px; vertical-align: 3px; }
+  .plan-link:hover { border-color: var(--accent); }
   .masthead .lede { margin: 2px 0 0; color: var(--ink-2); font-size: 13px; max-width: 62ch; }
   nav.tabs { grid-column: 1 / -1; display: flex; gap: 4px; margin-top: 10px; }
   nav.tabs a {
@@ -589,7 +604,7 @@ _INDEX_HTML = r"""<!doctype html>
 <header class="masthead">
   <div class="masthead-inner">
     <div>
-      <h1>执行结果审批台</h1>
+      <h1>执行结果审批台 <a class="plan-link" href="/plan" target="_blank" rel="noopener">项目计划</a></h1>
       <p class="lede">失败经 AI 分析后会收进「待审核」。通过的模板会被同类错误直接复用，不再调用 AI；改错了可以退回或删除。</p>
     </div>
     <fieldset class="mode" id="mode">

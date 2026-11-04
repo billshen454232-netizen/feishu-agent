@@ -525,7 +525,7 @@
     const PLAN_DATA = {
       projectTag: "FEISHU BOT · PROJECT PLAN",
       title: "飞书机器人 · 项目计划",
-      updated: "2026-10-28",
+      updated: "2026-11-04",
       principle: "计划即备忘：已知待办必须上板，不依赖对话上下文。证据优先，需求范围、调用许可、远端部署事实与游戏内效果分层记录，任何一层都不能替代另一层。",
       steps: [
         {
@@ -629,7 +629,7 @@
         },
         {
           id: "22",
-          status: "active",
+          status: "todo",
           title: "热更阈值注册表网页管理",
           desc: "网页增删改阈值，加完即用，全程不碰 GS-1",
           done: [
@@ -641,9 +641,7 @@
             "已把「配置与代码分离」写入核心规则 .claude/rules/core-governance.md",
             "已完成架构决策：网页写 JSON 真源；catalog 白名单/中文路由/候选 manifest 自动派生；Gateway 与 Worker git pull；GS-1 脚本只做固定执行，不持阈值配置"
           ],
-          current: [
-            "设计已定，待实施；当前优先处理 STEP 23 合服成功被 exit_code=255 误判的问题"
-          ],
+          current: [],
           remaining: [
             "迁移 24 条阈值到 config/hotfix_thresholds.json 新 schema",
             "auto_hotfix_registry.py 改为读 JSON，API 不变",
@@ -657,7 +655,7 @@
         },
         {
           id: "23",
-          status: "active",
+          status: "todo",
           title: "合服成功被 SSH 255 误判失败",
           desc: "合服流程已完成，但远端 SSH 连接关闭返回 exit_code=255，飞书错误提示失败",
           done: [
@@ -669,10 +667,9 @@
             "已识别当前待定位边界：实际运行版本/隐藏控制字符、process substitution + break 的输出源中断、combine.sh 预期 exit 1 与 dispatcher 实际记录 255 的差异",
             "已撤销未授权的外层 exc_server_merge.sh 退出码转换与新增测试；不再由外层脚本猜测业务成功"
           ],
-          current: [
-            "只设计/修改统一 Muliu 入口 /data/app/muliu_ws/workspace/code/ok_/combine.sh：建立本次运行边界、持有自己启动的 SSH/监控子进程 PID、完成标记后有序结束监控并返回成功；不改每台目标游戏服脚本，也不改外层 exc_server_merge.sh"
-          ],
+          current: [],
           remaining: [
+            "用户 2026-11-02 表示完成标记不匹配问题自行修改 combine.sh；如仍误判失败，再取实际 combine.sh 与输出原始字节取证",
             "以本次启动边界过滤旧 nohup.log：不能靠前 10 秒/10 行猜测；优先利用现有带时间戳的「开始合服流程」→「此次合服操作流程结束」顺序",
             "用显式子进程 PID/进程组替代 process substitution + ps grep tail；只结束本次 SSH 监控，不触碰 nohup 合服业务进程",
             "完成标记后进入 3 秒排空窗口：继续读取输出并记录明确失败信号；静默或行数不是成功证据，成功仍以本次精确完成标记为准",
@@ -683,7 +680,7 @@
         },
         {
           id: "24",
-          status: "active",
+          status: "done",
           title: "执行结果确定性展示与典型故障库",
           desc: "成功不分析、已知错误不问 AI、未知失败才后台分析并沉淀",
           done: [
@@ -698,17 +695,15 @@
             "已确认：查询成功是否走 AI 由审批页开关切换（默认后台 AI 解读）",
             "已实现：错误特征匹配键（脚本+退出码+规范化原因+关键错误行，不含参数/路由/catalog 版本）",
             "已实现：结果先投递、AI 后台研读只更新卡片；研读任务持久化，重启恢复，3 次后放弃",
-            "已实现：审批页待审核/可用模板两页签，通过/退回/编辑/删除/批量，Host 与请求头防护"
+            "已实现：审批页待审核/可用模板两页签，通过/退回/编辑/删除/批量，Host 与请求头防护",
+            "已部署 Gateway：写成功走固定格式、查询成功后台 AI 解读、失败按错误特征匹配模板库，未命中后台 AI 诊断收为待审核",
+            "人工结果判定：可用模板可设为「执行成功 · 服务器状态存疑」（仅查询类脚本）",
+            "审批台：待审核 / 可用模板 / 最近执行（需求分析模型、发起人昵称）、分页、前端缓存"
           ],
-          current: [
-            "首期代码已实现并本地测试通过（2026-11-03）：execution_report.py / admin_app.py / present_execution_result",
-            "待部署到阿里云 Gateway：配置 admin 段与 background_timeout_seconds，安全组不放行审批端口"
-          ],
+          current: [],
           remaining: [
-            "部署 Gateway 并真实验证：写成功零 AI、查询成功后台更新卡片、失败未命中收集待审核、同错误换服复用",
-            "验收：公网连审批端口失败；对外端口访问审批路径 404；ssh -L 后可打开审批页",
-            "运行一段时间后在审批页统一审核待审核模板",
-            "后续：单模型 deadline 感知池调用、研读专用较小 max_tokens"
+            "运行一段时间后在审批台统一审核待审核故障模板",
+            "单模型 deadline 与研读专用 max_tokens 见 STEP 34"
           ]
         },
         {
@@ -753,7 +748,7 @@
           ],
           current: [],
           remaining: [
-            "部署到线上 Gateway 并在真实失败场景验证卡片送达（需用户授权重启 feishu-gateway.service）"
+            "已随 Gateway 部署上线；后续如遇真实失败场景，留意卡片是否送达"
           ]
         },
         {
@@ -772,8 +767,7 @@
           ],
           current: [],
           remaining: [
-            "部署到线上 Gateway 并观察真实 520 场景是否被重试吸收",
-            "如需持久化调优，再考虑把重试参数接入 config.example.json"
+            "已部署；如需持久化调优，再把重试参数接入配置"
           ]
         },
         {
@@ -792,16 +786,11 @@
             "职责索引已更新为「AI 模型池」章节",
             "测试 420 passed（含池策略、失败换下一个、单模型兼容、配置继承与校验）",
             "已按用户反馈改为 defaults + 扁平 models：models[] 每项形状一致，共享生成参数放独立 defaults 块，消除主次观感",
-            "已补记 AI 池选用的模型名（此前声称保留日志但未实现）"
+            "已补记 AI 池选用的模型名（此前声称保留日志但未实现）",
+            "Gateway config.json 已填入模型池凭据并上线；后续由 STEP 25 按用途分池（planning / chat → Luna + MiniMax，interpretation → Terra）"
           ],
-          current: [
-            "在真实 config/config.json 里填入两个模型的凭据"
-          ],
-          remaining: [
-            "在 config/config.json 填入主模型与 MiniMax 3.1 Flash 的 base_url / api_key / model（凭据不入库）",
-            "部署重启 Gateway，验证随机分摊与失败换模型",
-            "评估策略选择：random 平均负载 vs fallback 质量优先"
-          ]
+          current: [],
+          remaining: []
         },
         {
           id: "12",
@@ -822,18 +811,22 @@
         },
         {
           id: "13",
-          status: "todo",
-          title: "Worker→Muliu 读超时治理",
-          desc: "处理 11 条 submitted_result_unknown：内网 Worker 读操作超时",
+          status: "done",
+          title: "Worker→Muliu 超时与会话失效治理",
+          desc: "读超时 / 连接中断 / 会话失效可识别；提交前自动重试；判断进行到第几步；未提交可继续执行剩余步骤",
           done: [
-            "已确认 DB 中 11 条 submitted_result_unknown，多为「内网 Worker 执行时发生异常：The read operation timed out；请勿重复确认或重试」"
+            "读超时、连接中断识别为木流通信失败（此前原始 TimeoutError 绕过逐步处理，导致 5001 清档后报「结果未核验」）",
+            "提交前请求（登录、读版本、保存参数）自动重试 3 次；轮询日志遇超时 / 5xx 持续重试至时限",
+            "每步提交前记录 MULIU_RUN_VERSION；提交无响应时按是否出现新运行判定已提交 / 未执行 / 未知；忽略仍带上一步运行标记的日志",
+            "失败 / 未知原因带「第 N/M 步」前缀并保留已完成步骤；只读查询通信失败自动重跑一次，写操作永不自动重跑",
+            "确认未提交的步骤：失败卡出现「继续执行剩余 K 步」按钮（程序截取、重新校验，仅原发起人、30 分钟内、限一次）",
+            "会话失效（重定向到 /muliu/login → 404）重新登录重试；提交请求不盲目重提；HTTP 错误只保留状态码与标题",
+            "Gateway / Worker 已部署（4914c91）"
           ],
           current: [],
           remaining: [
-            "定位读超时发生在 Worker→Muliu 哪一环（建立连接 / 读响应 / 轮询任务日志）",
-            "确认是否与全局单租约叠加，导致后续任务长时间排队占坑",
-            "评估 muliu.request_timeout_seconds 与 log_completion_timeout_seconds 是否合理",
-            "确定修复方向后另行实现；不得通过自动重放已提交操作来规避"
+            "生产中观察：超时恢复、会话重登、「继续执行剩余步骤」是否按预期出现",
+            "木流账号单会话：机器人账号不要在别处同时登录；排查时不要用 Worker 账号登录木流（见记忆 no-muliu-login-during-jobs）"
           ]
         },
         {
@@ -856,7 +849,7 @@
           id: "15",
           status: "todo",
           title: "AI 研读输出与终态一致性校验",
-          desc: "是否增加代码校验，防止 AI 摘要误述终态",
+          desc: "研读已改为后台增强、不改终态；剩余：查询类 AI 解读的标签与终态一致性校验",
           done: [
             "已确认代码现状：AI 返回文本直接拼入回复，未校验首行标签与持久化终态的一致性",
             "已确认结果卡在有执行明细时优先展示 AI 摘要",
@@ -864,9 +857,9 @@
           ],
           current: [],
           remaining: [
-            "决定是否增加输出校验：标签匹配持久化终态、submitted_result_unknown 不得显示为失败",
-            "若实施：增加校验逻辑与对应测试",
-            "核实原始请求文本进入 AI 前的上游脱敏约束（当前 interpret_execution_result 直接传 pending_job.text）"
+            "现状：执行结果研读已后台化，写成功 / 结果未知不调 AI，AI 文本不能改终态与卡片颜色（STEP 24）",
+            "仍可选：对查询类「AI 解读」输出增加标签校验（不得把失败说成完成）",
+            "核实原始请求文本进入 AI 前的上游脱敏约束"
           ]
         },
         {
@@ -946,7 +939,8 @@
           remaining: [
             "对全量当前文档做一次链接、职责遗漏和代码事实复核",
             "更新 SESSION-HANDOFF.md，供跨会话继续",
-            "决定是否提交本次文档治理改动（Git commit / push 需用户明确授权）"
+            "决定是否提交本次文档治理改动（Git commit / push 需用户明确授权）",
+            "修正 deployment/gs1/README.md：GS-1 只能经跳板机人工维护，不能 scp（现有措辞不准确）"
           ]
         },
         {
@@ -974,6 +968,176 @@
           remaining: [
             "进游戏确认客户端数值实际变化（脚本成功 ≠ 客户端已生效）",
             "迁移已存在的存量 common 阈值 Patch：为客户端可见阈值补发 client_avatar 副本"
+          ]
+        },
+        {
+          id: "25",
+          status: "done",
+          title: "AI 按用途分池与 Luna 评估",
+          desc: "planning / chat / interpretation 可指向不同模型池；需求分析用快模型，结果研读用强模型",
+          done: [
+            "ai.pools + ai.routing 配置，池级 defaults 覆盖全局；旧写法兼容（e.g. d9177c7）",
+            "30 条真实历史请求对比 Luna 与 Terra：26 条一致；Luna 曾把「2026.11.7 10点」按 UTC 换算差 8 小时（已由 STEP 26 消除）",
+            "Gateway 已上线：planning / chat → gpt-6-luna + MiniMax-M3.1-Flash，interpretation → gpt-5.6-terra"
+          ],
+          current: [],
+          remaining: [
+            "观察 Luna 做需求分析时的不必要澄清 / 误拒（如合服误拒）；偏多则把 routing.planning 改回强池"
+          ]
+        },
+        {
+          id: "26",
+          status: "done",
+          title: "时间文本确定性换算",
+          desc: "AI 只写北京时间文本，程序换算时间戳并在确认卡显示可读时间",
+          done: [
+            "src/utils/time_text.py：多种中文 / ISO 写法 → 北京时间时间戳；缺时刻、相对日期、不存在日期一律拒绝并澄清",
+            "规划器只换算合同 {timestamp} 位置；提示词与 catalog 模式 F 要求 AI 不自行换算",
+            "真实模型复测 8 条时间类请求，Luna / Terra 时间戳全部正确"
+          ],
+          current: [],
+          remaining: []
+        },
+        {
+          id: "27",
+          status: "done",
+          title: "清档企微推送",
+          desc: "计划含清档脚本时推送「准备清档」「正在操作清档」，按区服分群并抄送 QA 群",
+          done: [
+            "按计划脚本路径判断清档（clear / clear_logic_game.py / clear_zone.py / cleardb.py），不由 AI 判断",
+            "Gateway 直接推企微 text 消息并 @all；region_webhooks 按区服分群，未配置区服走默认群，cc_webhooks 抄送合并消息",
+            "撤销过一版「Worker 转发」方案（企微是公网地址，Gateway 可直达）"
+          ],
+          current: [],
+          remaining: [
+            "在真实群里确认两次推送的分群与抄送效果"
+          ]
+        },
+        {
+          id: "28",
+          status: "done",
+          title: "新增全球服测试服环境",
+          desc: "全球服 DEV 5500/5501、weekly 5510/5511、QA 5520/5521，同步 catalog 批量查询合同",
+          done: [
+            "server_environments.json 补充全球服三个环境；sync_hotfix_planner_catalog 重新生成 catalog（14d26e5）",
+            "GS-1 config.ini 已补对应服号映射（用户确认）"
+          ],
+          current: [],
+          remaining: []
+        },
+        {
+          id: "29",
+          status: "active",
+          title: "basic_info.sh 开服误判修复",
+          desc: "运行超过 6 小时即被判「未检测到开服成功」；异常时输出有限日志证据",
+          done: [
+            "根因：supervisor_game_6.log 每小时追加 logger 轮转行，原逻辑只看最后 6 行，开服标记被挤出（7020 实测 101 行）",
+            "新规则：最近一次 SEVER START WORK 之后除轮转行无其他输出即开服成功；否则输出异常行与 bglog/game、zone 最近 1000 行内的异常关键词（acb0d6c）",
+            "本地 4 种场景模拟通过"
+          ],
+          current: [
+            "等待确认 GS-1 已覆盖 /home/serverGeneralScript/basic_info.sh 并验证 7020 显示开服成功"
+          ],
+          remaining: [
+            "审批台中「未检测到开服成功」那条误报产生的待审核模板可删除"
+          ]
+        },
+        {
+          id: "30",
+          status: "done",
+          title: "审批台公网访问与重新设计",
+          desc: "ops.ttlink.asia 经 Cloudflare Access（owner-only，Google 登录）访问，源站自行校验 Access JWT",
+          done: [
+            "nginx ops.ttlink.asia → 127.0.0.1:8901，强制 X-Admin-Proxy 标记；带标记请求须持有效 Access 令牌，直连源站 403（a2e1f63）",
+            "按 frontend-design skill 重新设计：页内刷新、地址栏保留页签、服务端分页、单选控件、状态色条、前端缓存",
+            "审批改动日志记录操作人邮箱；信号诊断 kill -USR1 / -USR2 打印调用栈"
+          ],
+          current: [],
+          remaining: [
+            "改 Gateway config.json 时保留 admin.access_team_domain / access_aud（2026-11-04 曾被覆盖导致公网 403）"
+          ]
+        },
+        {
+          id: "31",
+          status: "active",
+          title: "问答评审、纠正归档与资料回写",
+          desc: "问答页签评审对错；纠正后归档为标准答案供类似问题参考；被纠正的 MD 生成修改建议回写仓库",
+          done: [
+            "设计：docs/superpowers/specs/2026-11-04-qa-review-archive.md",
+            "实现：qa_library（四张表、二元组检索、完全相同直接复用）、审批台「问答」「文档修正」页签、tools/doc_fixes.py（e193c22）",
+            "原 MD 检索改为中文二元组 + 文档频率加权，index.md 关键词并入文档标题",
+            "Gateway 已部署"
+          ],
+          current: [
+            "等待真实问答数据，首次跑通「回答错误 → 纠正 → 归档 → 换问法复用」"
+          ],
+          remaining: [
+            "首次「文档修正」采纳后，跑通 export → 本机 apply → 提交推送 → mark-applied",
+            "归档多了以后评估检索阈值（ARCHIVE_MIN_COVERAGE）是否合适"
+          ]
+        },
+        {
+          id: "32",
+          status: "active",
+          title: "项目计划看板挂到 ops.ttlink.asia/plan",
+          desc: "审批台服务提供 /plan，读仓库里的看板 HTML，同一套 Access 校验",
+          done: [
+            "admin_app 新增 /plan 路由与「项目计划」入口，测试覆盖鉴权与 404"
+          ],
+          current: [
+            "本次与看板同步一起提交推送，Gateway git pull 并重启后生效"
+          ],
+          remaining: [
+            "以后看板更新：推送后 Gateway git pull 即可，无需重启"
+          ]
+        },
+        {
+          id: "33",
+          status: "todo",
+          title: "问答回复在飞书显示 Markdown 表格异常",
+          desc: "知识问答用纯文本回复，表格显示成 |---| 原文",
+          done: [],
+          current: [],
+          remaining: [
+            "二选一：改用卡片（lark_md）回复问答，或提示词禁止输出表格",
+            "确认长回答在卡片中的显示与截断"
+          ]
+        },
+        {
+          id: "34",
+          status: "todo",
+          title: "模型池单模型截止时间与研读输出上限",
+          desc: "后台研读只有总时限，慢模型可能吃满预算；研读专用较小 max_tokens",
+          done: [],
+          current: [],
+          remaining: [
+            "池调用传递绝对 deadline，单模型超时即换下一个",
+            "研读专用 max_tokens（300–500）",
+            "收集模型延迟 p50 / p95 后定参数"
+          ]
+        },
+        {
+          id: "35",
+          status: "todo",
+          title: "改用独立 API 替代木流网页",
+          desc: "用户计划申请专用 API，彻底不走木流网页会话",
+          done: [],
+          current: [],
+          remaining: [
+            "等 API 资料到位后设计执行器替换方案",
+            "替换后可去掉会话失效、单会话、运行标记核对等网页兼容逻辑"
+          ]
+        },
+        {
+          id: "36",
+          status: "todo",
+          title: "部署防呆：角色与配置自检",
+          desc: "2026-11-03 Worker 机器 config.json 被换成 Gateway 配置，Worker 以 Gateway 角色空跑",
+          done: [],
+          current: [],
+          remaining: [
+            "启动时日志打印 runtime.role 与关键段落摘要；Worker 机器上若无 muliu.routes 或 role≠worker 时显式告警",
+            "删除 Worker 上残留的 config.json.wrong-gateway（含飞书 / AI / 企微密钥）——用户执行"
           ]
         }
       ]

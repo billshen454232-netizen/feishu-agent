@@ -276,3 +276,21 @@ def test_qa_dismiss_restore_and_validation(tmp_path):
     assert qa_store.get_record("om_q")["status"] == "pending"
     assert client.post("/api/qa/om_q/archive", headers=HEADERS, json={"canonical_question": "", "answer": "a"}).status_code == 400
     assert "问答" in client.get("/").text and "文档修正" in client.get("/").text
+
+
+def test_plan_board_is_served_behind_the_same_guard(tmp_path, monkeypatch):
+    import src.admin_app as admin_module
+
+    board = tmp_path / "board.html"
+    board.write_text("<html><body>飞书机器人 · 项目计划</body></html>", encoding="utf-8")
+    monkeypatch.setattr(admin_module, "PLAN_BOARD_PATH", board)
+    client = _client(_store(tmp_path))
+
+    response = client.get("/plan")
+    assert response.status_code == 200 and "项目计划" in response.text
+    assert response.headers["cache-control"] == "no-cache"
+    assert client.get("/plan", headers={"X-Admin-Proxy": "cloudflare-access"}).status_code == 403
+    assert TestClient(create_admin_app(_store(tmp_path)), base_url="http://evil.example").get("/plan").status_code == 403
+    board.unlink()
+    assert client.get("/plan").status_code == 404
+    assert 'href="/plan"' in client.get("/").text
