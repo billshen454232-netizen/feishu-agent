@@ -296,7 +296,6 @@ worker  = 主动连 Gateway 领任务 + 本地 Muliu 执行（无飞书/AI 凭�
 | [plan_board.py](../tools/plan_board.py) | 项目计划快照：`export` 导出 JSON、`import` 恢复、`summary` 文字概览。 | Gateway SQLite。 | 否（export 输出到标准输出）。 | 否 | 否（运维工具）。 |
 | [doc_fixes.py](../tools/doc_fixes.py) | 已采纳的资料修改建议回写仓库：Gateway 上 `export` 导出 JSON；开发机 `apply` 修改 `knowledge/index.md`、`knowledge/docs/*.md`（原文需恰好出现 1 次，保留换行风格）；Gateway `git pull` 后 `mark-applied`。 | Gateway SQLite、导出的 JSON。 | 改写 `knowledge/` 下的 MD。 | **是**（apply） | 否（运维工具）。 |
 | [generate_runner_manifest.py](../tools/generate_runner_manifest.py) | 从 catalog 派生**候选** GS-1 runner manifest。 | `config/muliu_script_catalog.md`。 | `deployment/gs1/muliu_runner_manifest.json`。 | **是** | 否（开发期工具）。 |
-| [hotfix_threshold_registry.py](../tools/hotfix_threshold_registry.py) | 加载 `config/hotfix_thresholds.json`，做失败关闭的 JSON 形态校验。 | `config/hotfix_thresholds.json`。 | 校验后的元数据对象。 | 否 | **否**（未接入当前主链）。 |
 
 **当前热更主链**（唯一）：
 
@@ -307,7 +306,7 @@ tools/auto_hotfix_registry.py
 → /home/serverGeneralScript/auto_hotfix_tool.py
 ```
 
-`config/hotfix_thresholds.json` + `tools/hotfix_threshold_registry.py` 是**另一套未接入的候选资料模型**，两者不能并称“唯一来源”。
+`config/hotfix_thresholds.json` 与 `tools/hotfix_threshold_registry.py` 是**已否决的旧方案遗留物**：只在原开发机本地存在，已被 `.gitignore` 忽略，不在仓库里，也没有任何运行代码引用（对应测试已于 2026-11-04 删除）。STEP 22（阈值网页管理）会用新格式另起实现，届时可参考其中的 24 条阈值数据。
 
 ---
 
@@ -385,7 +384,6 @@ tools/auto_hotfix_registry.py
 | `test_server_environments.py` | 服号归属派生、跨区域拒绝、`route_region` 推导。 |
 | `test_server_log_query.py` | 日志查询候选脚本的参数约束与输出脱敏。 |
 | `test_auto_hotfix_tool.py` | 热更注册表映射、Lua Patch 生成、Planner 中文路由。 |
-| `test_hotfix_threshold_registry.py` | JSON 注册表加载与失败关闭校验。 |
 | `test_generate_runner_manifest.py` | 候选 manifest 与 catalog 一致性。 |
 | `test_sync_hotfix_planner_catalog.py` | catalog 同步产物与标记完整性。 |
 | `test_knowledge_base.py` / `test_script_knowledge_base.py` | 知识检索。 |

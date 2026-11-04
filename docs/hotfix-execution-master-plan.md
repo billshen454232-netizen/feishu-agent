@@ -31,7 +31,7 @@ config/muliu_script_catalog.md
 
 - 机器人只可生成 catalog 中精确登记的 `path + args` 合同；热更工具当前对应 `/home/serverGeneralScript/auto_hotfix_tool.py`。
 - [tools/auto_hotfix_registry.py](../tools/auto_hotfix_registry.py) 是当前 catalog 同步使用的 Python 注册表；中文名和别名只用于受控意图路由，不能作为 Lua 表、字段、剧本或自由参数传递。
-- [config/hotfix_thresholds.json](../config/hotfix_thresholds.json) 与 [tools/hotfix_threshold_registry.py](../tools/hotfix_threshold_registry.py) 是另一套未接入当前 catalog 同步主链的 JSON 资料模型。它们不应被称为当前唯一运行时来源或唯一执行白名单。
+- `config/hotfix_thresholds.json` 与 `tools/hotfix_threshold_registry.py` 是已否决的旧 JSON 资料模型遗留物（仅原开发机本地存在、已被 `.gitignore` 忽略、不在仓库中），未接入当前 catalog 同步主链；不应被称为当前唯一运行时来源或唯一执行白名单。
 - [deployment/gs1/muliu_runner_manifest.json](../deployment/gs1/muliu_runner_manifest.json) 是 catalog 派生的候选部署资料；本仓库运行期不读取它，也不能证明 GS-1 存在或消费它。
 
 新增或修改任一热更能力，必须同时更新精确调用合同、注册表、Planner 映射和相应测试；知识资料只说明用途、风险与验证边界，不能单独授予执行能力。

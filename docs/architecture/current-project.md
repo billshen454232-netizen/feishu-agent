@@ -156,7 +156,7 @@ config/muliu_script_catalog.md
 → tools/sync_hotfix_planner_catalog.py
 ```
 
-[config/hotfix_thresholds.json](../../config/hotfix_thresholds.json) 与 [tools/hotfix_threshold_registry.py](../../tools/hotfix_threshold_registry.py) 是另一套 JSON 注册表实现；当前不在 catalog 同步主链中。它们不得再被表述为“当前唯一运行时来源”或“当前 fail-closed 的唯一执行白名单”。
+`config/hotfix_thresholds.json` 与 `tools/hotfix_threshold_registry.py` 是已否决的旧 JSON 注册表方案遗留物：只在原开发机本地存在，被 `.gitignore` 忽略，不在仓库中，也不在 catalog 同步主链中。它们不得被表述为“当前唯一运行时来源”或“当前 fail-closed 的唯一执行白名单”；STEP 22 会用新格式另起实现。
 
 在统一两套注册表前：
 
