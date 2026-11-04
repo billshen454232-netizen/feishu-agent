@@ -297,11 +297,18 @@ def test_plan_board_page_and_api(tmp_path):
     page = client.get("/plan")
     assert page.status_code == 200 and "/api/plan" in page.text and page.headers["cache-control"] == "no-cache"
     data = client.get("/api/plan").json()
-    assert data["total"] == 2 and data["counts"] == {"done": 0, "active": 1, "todo": 1}
+    assert data["total"] == 2 and data["counts"] == {"done": 0, "verifying": 0, "active": 1, "todo": 1}
+    queue = client.get("/api/plan?status=active,todo").json()
+    assert [step["id"] for step in queue["steps"]] == ["01", "02"] and queue["total"] == 2
 
     tunnel = dict(HEADERS, **{"X-Admin-Operator": "claude-code"})
     updated = client.put("/api/plan/steps/01", headers=tunnel, json={"status": "done", "note": "上线验证通过"}).json()
     assert updated["status"] == "done" and updated["updated_by"] == "claude-code"
+    verifying = client.put("/api/plan/steps/02", headers=tunnel, json={"status": "verifying"}).json()
+    assert verifying["status"] == "verifying"
+    assert [step["id"] for step in client.get("/api/plan?status=verifying").json()["steps"]] == ["02"]
+    assert client.get("/api/plan").json()["counts"]["verifying"] == 1
+    assert "待验收" in page.text
     assert client.put("/api/plan/steps/01", headers=HEADERS, json={"status": "obsolete"}).status_code == 400
     assert client.put("/api/plan/steps/99", headers=HEADERS, json={"status": "done"}).status_code == 404
     created = client.post("/api/plan/steps", headers=HEADERS, json={"title": "新想法", "area": "其他"}).json()

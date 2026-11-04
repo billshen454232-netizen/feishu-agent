@@ -196,8 +196,13 @@ def _add_plan_routes(app: FastAPI, plans: PlanStore) -> None:
     """Server-backed project plan board. ``GET /api/plan`` is also the read API for AI assistants."""
 
     @app.get("/api/plan")
-    async def get_plan() -> dict[str, Any]:
-        return plans.get_plan()
+    async def get_plan(status: Optional[str] = None) -> dict[str, Any]:
+        """``status=active,todo`` narrows ``steps`` (counts stay global) — e.g. an assistant's work queue."""
+        plan = plans.get_plan()
+        if status:
+            wanted = {item.strip() for item in status.split(",") if item.strip()}
+            plan["steps"] = [step for step in plan["steps"] if step["status"] in wanted]
+        return plan
 
     @app.put("/api/plan/steps/{step_id}")
     async def update_step(step_id: str, payload: dict[str, Any], request: Request) -> dict[str, Any]:

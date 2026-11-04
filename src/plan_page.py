@@ -53,6 +53,13 @@ PLAN_HTML = r"""<!doctype html>
   .dot { width: 16px; height: 16px; border-radius: 50%; border: 2px solid var(--todo); background: transparent; padding: 0; cursor: pointer; }
   .dot.active { border-color: var(--active); background: radial-gradient(circle, var(--active) 0 3px, transparent 4px); }
   .dot.done { border-color: var(--ok); background: var(--ok); box-shadow: inset 0 0 0 3px #fff; }
+  .dot.verifying { border-color: var(--warn); background: radial-gradient(circle, var(--warn) 0 4px, transparent 5px); }
+  .tabs { display: flex; gap: 4px; margin-top: 12px; border-bottom: 1px solid var(--line); }
+  .tabs button { border: 0; background: none; padding: 8px 14px 9px; cursor: pointer; color: var(--ink-2); border-bottom: 3px solid transparent; font-size: 14px; }
+  .tabs button[aria-selected=true] { color: var(--ink); border-bottom-color: var(--accent); font-weight: 600; }
+  .tabs .n { margin-left: 6px; font-size: 12px; color: var(--ink-3); }
+  .tabs button[data-tab=verifying] .n { color: var(--warn); font-weight: 600; }
+  .group[data-status=verifying] .group-head { color: var(--warn); }
   .sid { font-size: 12px; color: var(--ink-3); }
   .title { font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .area { font-size: 12px; padding: 1px 8px; border-radius: 4px; background: var(--paper); color: var(--ink-2); justify-self: start; white-space: nowrap; }
@@ -114,6 +121,7 @@ PLAN_HTML = r"""<!doctype html>
     <div class="progress"><span id="progress-text"></span><div class="bar"><i id="bar"></i></div></div>
   </div>
   <p class="principle" id="principle"></p>
+  <div class="tabs" id="tabs" role="tablist"></div>
   <div class="controls">
     <input type="search" id="search" placeholder="搜索标题、说明、待办…">
     <select id="area-filter"><option value="">全部领域</option></select>
@@ -133,8 +141,9 @@ PLAN_HTML = r"""<!doctype html>
 <div class="toast" id="toast" role="status"></div>
 
 <script>
-const STATUS = { active: "进行中", todo: "未开始", done: "已完成" };
-const ORDER = ["active", "todo", "done"];
+const STATUS = { active: "进行中", verifying: "待验收", todo: "未开始", done: "已完成" };
+const ORDER = ["active", "verifying", "todo", "done"];
+let tab = new URLSearchParams(location.hash.slice(1)).get("status") || "all";
 const OLD_NOTES = "hotfix-plan-notes-v1", OLD_STATUS = "hotfix-plan-status-overrides-v1";
 const $ = (s) => document.querySelector(s);
 const esc = (t) => String(t ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -179,6 +188,8 @@ function renderHeader() {
   const done = plan.counts.done, total = plan.total || 1;
   $("#progress-text").textContent = `已完成 ${done} / ${plan.total}`;
   $("#bar").style.width = `${Math.round(done / total * 100)}%`;
+  $("#tabs").innerHTML = [["all", "全部", plan.total], ...ORDER.map((k) => [k, STATUS[k], plan.counts[k] || 0])]
+    .map(([k, label, n]) => `<button role="tab" data-tab="${k}" aria-selected="${k === tab}">${label}<span class="n">${n}</span></button>`).join("");
   const select = $("#area-filter"), current = select.value;
   select.innerHTML = '<option value="">全部领域</option>' + plan.areas.map((a) => `<option ${a === current ? "selected" : ""}>${esc(a)}</option>`).join("");
 }
@@ -193,10 +204,10 @@ function matches(step) {
 
 function render() {
   const filtering = $("#area-filter").value || $("#search").value.trim();
-  const html = ORDER.map((status) => {
+  const html = ORDER.filter((status) => tab === "all" || tab === status).map((status) => {
     const steps = plan.steps.filter((s) => s.status === status && matches(s));
-    const isCollapsed = collapsed.has(status) && !filtering;
-    return `<section class="group">
+    const isCollapsed = collapsed.has(status) && !filtering && tab === "all";
+    return `<section class="group" data-status="${status}">
       <div class="group-head" data-group="${status}"><span class="chev">${isCollapsed ? "▸" : "▾"}</span>${STATUS[status]} <span class="n">${steps.length}</span></div>
       ${isCollapsed || !steps.length ? "" : `<div class="list">${steps.map(rowHtml).join("")}</div>`}
     </section>`;
@@ -349,6 +360,13 @@ $("#content").addEventListener("keydown", (e) => {
 });
 document.addEventListener("click", (e) => { if (!e.target.closest(".menu")) closeMenu(); });
 $("#search").addEventListener("input", () => render());
+$("#tabs").addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-tab]");
+  if (!b) return;
+  tab = b.dataset.tab;
+  history.replaceState(null, "", tab === "all" ? "#" : `#status=${tab}`);
+  renderHeader(); render();
+});
 $("#area-filter").addEventListener("change", () => render());
 $("#refresh").onclick = load;
 $("#new-step").onclick = async () => {

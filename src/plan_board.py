@@ -12,7 +12,9 @@ import time
 from pathlib import Path
 from typing import Any
 
-PLAN_STATUSES = ("done", "active", "todo")
+# active / todo: work for the assistant; verifying: done by the assistant, awaiting the owner's
+# acceptance (assistants leave it alone); done: accepted.
+PLAN_STATUSES = ("done", "verifying", "active", "todo")
 LIST_FIELDS = ("done", "current", "remaining")
 TEXT_FIELDS = ("title", "desc", "area", "note", "question")
 DEFAULT_AREAS = ("执行链", "热更", "AI", "审批台", "知识库", "部署", "文档", "其他")
@@ -237,7 +239,7 @@ class PlanStore:
         for field, value in changes.items():
             if field == "status":
                 if value not in PLAN_STATUSES:
-                    raise PlanError("状态只能是 done / active / todo")
+                    raise PlanError("状态只能是 active / verifying / todo / done")
                 values[field] = value
             elif field in TEXT_FIELDS:
                 if not isinstance(value, str) or len(value) > _MAX_TEXT:

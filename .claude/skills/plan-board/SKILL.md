@@ -22,15 +22,16 @@ description: 维护飞书机器人的项目计划看板（存于 Gateway SQLite�
 
 ## 1. 读取进度（先读再说）
 
-查进度、回答「还有什么没做」之前先读接口，不凭记忆：
+查进度、回答「还有什么没做」、开始一项任务之前先读接口，不凭记忆：
 
 ```bash
 # MCP myaliyun exec_bash（Gateway 本机，无需凭据）
-curl -s http://127.0.0.1:8901/api/plan
+curl -s "http://127.0.0.1:8901/api/plan?status=active,todo"   # 我的工作队列
+curl -s http://127.0.0.1:8901/api/plan                        # 全部（含用户的批注 / 疑问）
 cd /opt/feishu-agent && .venv/bin/python tools/plan_board.py summary   # 文字概览
 ```
 
-返回结构：`meta`（标题、原则）、`areas`、`counts`（done/active/todo）、`total`、`steps[]`。每个 step：
+返回结构：`meta`（标题、原则）、`areas`、`counts`（active / verifying / todo / done）、`total`、`steps[]`（`?status=` 只筛 steps，counts 仍是全局）。每个 step：
 
 ```json
 {"id": "29", "status": "active", "area": "执行链", "title": "…", "desc": "…",
@@ -55,11 +56,19 @@ curl -s "http://127.0.0.1:8901/api/plan/events?step_id=29"            # 修改�
 
 可改字段：`status`、`title`、`desc`、`area`、`done`、`current`、`remaining`（文本数组）、`note`、`question`。`flow` 只读（随快照导入）。JSON 里的中文要保证 UTF-8；复杂内容先写临时文件再 `-d @file`。
 
-## 3. 状态规则
+## 3. 状态规则（2026-11-04 用户定）
 
-- **固定三态**：`done` / `active` / `todo`。禁止第四态（接口会拒绝）；
+| 状态 | 含义 | 谁处理 |
+| --- | --- | --- |
+| `active` 进行中 | 正在做 | **AI** |
+| `todo` 未开始 | 已知待办 | **AI** |
+| `verifying` 待验收 | AI 已做完，等用户验收 | **用户**；AI 不再处理，也不替用户验收 |
+| `done` 已完成 | 用户验收通过 | — |
+
+- AI 做完一步：标 `verifying`，**不要自己标 `done`**；用户验收后由用户改为 `done`；
+- 只有这四个值，其他值接口会拒绝；
 - 过时的想法**直接删除**（删除前内容留在修改历史）；
-- `done` 只写有可定位证据的事项；不把候选部署物、计划或推断写成已完成。
+- `done` 数组只写有可定位证据的事项；不把候选部署物、计划或推断写成已完成。
 
 ## 4. 领域
 
@@ -75,7 +84,7 @@ curl -s "http://127.0.0.1:8901/api/plan/events?step_id=29"            # 修改�
 
 ## 7. 完成判据
 
-步骤 `active → done` 时：
+步骤 `active → verifying` 时（`done` 由用户验收后设置）：
 
 - `done` 每项都有可定位证据（代码、测试、配置、用户确认、环境观察）；
 - 真实环境类事项写清「本地实现完成」与「远端 / 游戏内待核验」的边界；

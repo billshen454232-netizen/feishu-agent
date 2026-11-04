@@ -17,7 +17,7 @@ AI：  GET /api/plan  结构化 JSON；Claude Code 经 MCP 在 Gateway 本机访
 | 表 | 内容 |
 | --- | --- |
 | `plan_meta` | 标题、原则、项目标签 |
-| `plan_steps` | `step_id`、`sort_order`、`status`（done / active / todo，三态不变）、`area`、`title`、`desc`、`done` / `current` / `remaining`（JSON 数组）、`flow`（时序图 JSON，只读）、`note`、`question`、`updated_at`、`updated_by` |
+| `plan_steps` | `step_id`、`sort_order`、`status`（active 进行中 / verifying 待验收 / todo 未开始 / done 已完成；AI 处理 active 与 todo，做完标 verifying，用户验收后标 done）、`area`、`title`、`desc`、`done` / `current` / `remaining`（JSON 数组）、`flow`（时序图 JSON，只读）、`note`、`question`、`updated_at`、`updated_by` |
 | `plan_events` | 每次修改的字段、旧值、新值、操作人、时间（审计与历史） |
 
 首次启动 `plan_steps` 为空时，从 `docs/plan-board.json` 导入。
@@ -26,7 +26,7 @@ AI：  GET /api/plan  结构化 JSON；Claude Code 经 MCP 在 Gateway 本机访
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/api/plan` | 全部数据 + 各状态计数；**AI 读取入口** |
+| GET | `/api/plan` | 全部数据 + 各状态计数；**AI 读取入口**；`?status=active,todo` 只返回 AI 的工作队列 |
 | PUT | `/api/plan/steps/{id}` | 改状态、标题、说明、领域、三段列表、批注、疑问 |
 | POST | `/api/plan/steps` | 新增步骤，编号自动递增 |
 | DELETE | `/api/plan/steps/{id}` | 删除（过时的想法）；删除前的内容留在 `plan_events` |
