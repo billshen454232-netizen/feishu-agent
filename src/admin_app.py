@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 import re
 import threading
-from typing import Any
+from typing import Any, Optional
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse
@@ -227,7 +227,7 @@ def _add_plan_routes(app: FastAPI, plans: PlanStore) -> None:
         return {"status": "deleted"}
 
     @app.get("/api/plan/events")
-    async def events(step_id: str | None = None, limit: int = 50) -> dict[str, Any]:
+    async def events(step_id: Optional[str] = None, limit: int = 50) -> dict[str, Any]:
         return {"events": plans.list_events(step_id, max(1, min(limit, 200)))}
 
     @app.post("/api/plan/migrate-local")
