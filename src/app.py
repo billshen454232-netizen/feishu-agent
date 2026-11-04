@@ -17,6 +17,7 @@ from .conversation_log import ConversationLog
 from .access_auth import CloudflareAccessVerifier
 from .admin_app import AdminServer, create_admin_app
 from .clear_notifier import ClearNotifier
+from .plan_board import PlanStore
 from .qa_library import QaService, QaStore
 from .event_handler import FeishuEventHandler
 from .execution_report import ExecutionReportStore
@@ -155,8 +156,10 @@ def create_app(config_path: str | Path = "config/config.json") -> FastAPI:
                 store=qa_store,
                 knowledge_root=config.script_knowledge.path,
             )
+            plan_store = PlanStore(config.job_queue.database_path)
+            plan_store.initialize()
             admin_server = AdminServer(
-                create_admin_app(report_store, access_verifier=verifier, qa_service=admin_qa),
+                create_admin_app(report_store, access_verifier=verifier, qa_service=admin_qa, plan_store=plan_store),
                 port=config.admin.port,
             )
             admin_server.start()

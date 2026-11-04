@@ -1,121 +1,86 @@
 ---
 name: plan-board
-description: 维护飞书机器人的项目计划看板 docs/hotfix-requirements-progress.html。用户说「加计划 / 更新计划 / 计划同步 / 推进计划 / 改看板 / 加步骤 / 进度更新 / 配时序图」时使用；涵盖 PLAN_DATA 状态、FLOWS 时序图配置、批注边界与完成判据。
+description: 维护飞书机器人的项目计划看板（存于 Gateway SQLite，网页 https://ops.ttlink.asia/plan）。用户说「加计划 / 更新计划 / 计划同步 / 推进计划 / 改看板 / 加步骤 / 进度更新 / 查进度 / 配时序图」时使用；涵盖读写接口、状态规则、批注、快照与完成判据。
 ---
 
 # 项目计划看板维护
 
-看板路径：
+看板是**全项目**的待办集中处（标题「飞书机器人 · 项目计划」）。2026-11-04 起数据存在 Gateway SQLite，**不再编辑 HTML**。
 
 ```text
-D:\otherPrograms\feishu_agent\docs\hotfix-requirements-progress.html
+网页：https://ops.ttlink.asia/plan        （Cloudflare Access，owner-only）
+接口：http://127.0.0.1:8901/api/plan        （Gateway 本机；Claude Code 经 MCP myaliyun 访问）
+快照：docs/plan-board.json                 （种子 + 定期导出，git 历史）
+设计：docs/superpowers/specs/2026-11-04-plan-board-server.md
 ```
 
-这是**全项目**的待办集中处（标题「飞书机器人 · 项目计划」）。日常更新只改数据区，不碰渲染。
+`docs/hotfix-requirements-progress.html` 只是跳转说明页。
 
 ## 0. 第一原则：计划即备忘
 
-**已知待办默认上板，不要反问「要不要记」。**
+**已知待办默认上板，不要反问「要不要记」。** 上下文有限——不写进计划就是「用户忘、AI 也忘」。排查中发现的问题、待定方案、待核验事项、待问服务端的问题，只要已知且未完成，就新增 `todo` 步骤。
 
-上下文有限——不写进计划就是「用户忘、AI 也忘」。凡是排查中发现的问题、待定方案、待核验事项、待问服务端的问题，只要已知且未完成，就写成 `todo` 卡片。用户明确说过这一点。
+## 1. 读取进度（先读再说）
 
-## 0.5 布局由来（不要退回旧版）
+查进度、回答「还有什么没做」之前先读接口，不凭记忆：
 
-当前布局是用户 2026-10-28 明确要求的，**取代了旧的「左时间轴 + 右聚焦面板」单屏布局**——用户说那个「看着难受、不太想看」。
-
-- 现在是**平铺卡片网格**，一眼看到全部计划；
-- 点卡片**切换到详情视图**（不是弹窗、不是单屏聚焦）；
-- 详情顶部画**该步骤的时序图**（不是全局侧栏——全局侧栏在列表页也会显示，是 bug，已废弃）。
-
-除非用户再次要求改版，不要退回时间轴或聚焦面板。
-
-## 1. PLAN_DATA：计划卡片
-
-`const PLAN_DATA` 对象，`steps` 数组每项：
-
-```js
-{
-  id: "22",                    // 两位数字字符串，递增
-  status: "todo",              // done | active | todo  三态，禁止第四态
-  title: "步骤标题",
-  desc: "一句话说明",
-  done: ["已完成事项"],         // 已完成，可空
-  current: ["正在做什么"],       // 进行中，无则空数组
-  remaining: ["后续待办"]        // 待办，可空
-}
+```bash
+# MCP myaliyun exec_bash（Gateway 本机，无需凭据）
+curl -s http://127.0.0.1:8901/api/plan
+cd /opt/feishu-agent && .venv/bin/python tools/plan_board.py summary   # 文字概览
 ```
 
-- **状态词固定三态**：`done`（已完成）/ `active`（进行中）/ `todo`（未开始）。禁止 `next`、`pending` 或任何第四态。
-- `done` 只写**已由本地可定位资料或独立环境证据支持**的事项；不把候选部署物、计划或推断标为已完成。
-- 详情页的「已完成 / 正在做什么 / 后面还需做什么」三段直接由这三个数组渲染。
+返回结构：`meta`（标题、原则）、`areas`、`counts`（done/active/todo）、`total`、`steps[]`。每个 step：
 
-## 2. FLOWS：步骤时序图
-
-`const FLOWS` 对象（位于 `loadNotes()` 之前），**按步骤 id 配置**。只有配置了的步骤，详情页顶部才画图——所以列表页不会有图。
-
-```js
-"22": {
-  title: "时序图标题",
-  actors: [
-    { id:"a", name:"角色名", sub:"文件/职责" },
-    { id:"b", name:"角色名", sub:"文件/职责" }
-  ],
-  msgs: [
-    { from:"a", to:"b", s:"done", t:"箭头短标签", d:"点击后的说明，可含 <code>" },
-    { from:"b", to:"b", s:"active", t:"自调用", d:"from===to 画成回环" },
-    { from:"b", to:"a", s:"todo", t:"回传", d:"灰色虚线" }
-  ]
-}
+```json
+{"id": "29", "status": "active", "area": "执行链", "title": "…", "desc": "…",
+ "done": ["…"], "current": ["…"], "remaining": ["…"],
+ "flow": null, "note": "用户批注", "question": "用户疑问",
+ "updated_at": 1793690000, "updated_by": "owner@example.com"}
 ```
 
-**箭头颜色 / 线型 = 完成状态，图本身就是进度条：**
+**用户在网页上写的批注 / 疑问在 `note` / `question` 里，读进度时要一并看。**
 
-| `s` | 视觉 | 用法 |
-| --- | --- | --- |
-| `done` | 绿实线 | 已完成的环节 |
-| `active` | 蓝色 | 正在做的环节 |
-| `todo` | 灰虚线 | 未开始 / 待核验 |
+## 2. 写入（Claude Code 经 MCP 调本机接口）
 
-**步骤推进时，把对应 `msg` 的 `s` 从 `todo → active → done`，图就同步更新。**
+写请求必须带 `X-Admin-Request: 1`；用 `X-Admin-Operator: claude-code` 标明操作人（进修改历史）。
 
-纯内联 SVG 绘制（`flowInner` / `renderFlow` / `selectHop`），**不需要任何外部 JS 库**，跟随深/浅色主题。用户数据经 `escapeHtml` 转义。
+```bash
+H='-H Content-Type:application/json -H X-Admin-Request:1 -H X-Admin-Operator:claude-code'
+curl -s -X PUT  $H http://127.0.0.1:8901/api/plan/steps/29 -d '{"status":"done","current":[]}'
+curl -s -X POST $H http://127.0.0.1:8901/api/plan/steps    -d '{"title":"…","area":"执行链","status":"todo","remaining":["…"]}'
+curl -s -X DELETE $H http://127.0.0.1:8901/api/plan/steps/16
+curl -s "http://127.0.0.1:8901/api/plan/events?step_id=29"            # 修改历史
+```
 
-## 3. 批注与疑问
+可改字段：`status`、`title`、`desc`、`area`、`done`、`current`、`remaining`（文本数组）、`note`、`question`。`flow` 只读（随快照导入）。JSON 里的中文要保证 UTF-8；复杂内容先写临时文件再 `-d @file`。
 
-详情页底部两个 textarea，自动存浏览器 `localStorage`（键 `hotfix-plan-notes-v1`），可导出 Markdown。
+## 3. 状态规则
 
-- **批注只存浏览器本地，不写入 Git**；任何文档不得声称批注已持久化到仓库。
-- 想把批注带进项目，用「导出批注」按钮自行决定放哪。
+- **固定三态**：`done` / `active` / `todo`。禁止第四态（接口会拒绝）；
+- 过时的想法**直接删除**（删除前内容留在修改历史）；
+- `done` 只写有可定位证据的事项；不把候选部署物、计划或推断写成已完成。
 
-## 3.5 手动改状态（浏览器本地覆盖）
+## 4. 领域
 
-点击卡片右上角或详情页的状态徽章，弹出「已完成 / 进行中 / 未开始」菜单可直接切换。
+`执行链`、`热更`、`AI`、`审批台`、`知识库`、`部署`、`文档`、`其他`。新增步骤时选最贴近的一个。
 
-- 改动存 `localStorage`（键 `hotfix-plan-status-overrides-v1`），**只影响本机浏览器视图**，不写仓库里的 `PLAN_DATA`；
-- 导出批注时会附带「本机改过的状态」清单，维护者据此回写 `PLAN_DATA` 才永久生效；
-- 收到用户转来的状态清单时，按清单更新 `PLAN_DATA` 对应 step 的 `status`。
+## 5. 时序图（flow）
 
-## 4. 日常更新只改数据
+按步骤配置的 `{title, actors[{id,name,sub}], msgs[{from,to,s,t,d}]}`；`s` 取 `done/active/todo`（绿实线 / 蓝 / 灰虚线），`d` 只允许 `<code>`。改 flow 需改快照后 `tools/plan_board.py import`（会整体覆盖步骤，先 export 备份）。
 
-只编辑 `PLAN_DATA` 与 `FLOWS`，**不改 `<style>` 和渲染函数**（`flowInner` / `renderFlow` / `selectHop` / `openDetail` 等）。
+## 6. 快照
 
-用户要求改版时才动模板。改版后更新本 skill 与 HTML 顶部注释。
+重要变更后导出快照提交到仓库：在 Gateway 执行 `.venv/bin/python tools/plan_board.py export`，把输出写入本机仓库 `docs/plan-board.json`，提交（推送需用户说「推送」）。
 
-## 5. 完成判据
+## 7. 完成判据
 
-一个步骤从 `active` 转 `done` 时，必须满足：
+步骤 `active → done` 时：
 
-- `done` 数组里的每一项都有可定位证据（代码、测试、配置、用户确认、环境观察）；
-- 真实环境类事项写清「本地实现完成」与「远端/游戏内待核验」的边界；
+- `done` 每项都有可定位证据（代码、测试、配置、用户确认、环境观察）；
+- 真实环境类事项写清「本地实现完成」与「远端 / 游戏内待核验」的边界；
 - **脚本成功 ≠ 服务就绪 ≠ 游戏内已生效**，不可混写。
 
-## 6. 相关资料
+## 8. 已知待办不许散落
 
-- `docs/hotfix-execution-master-plan.md` §7：进度页在热更治理中的位置
-- `docs/documentation-governance-plan.md`：文档治理台账
-- `.claude/rules/core-governance.md`：核心规则源（事实边界、授权边界）
-- `.claude/skills/project-governance/`：复杂任务的取证 → 实现 → 守门 → 验证流程
-
-## 7. 已知待办不许散落
-
-新增待办写进看板，不要只写在聊天、治理计划或记忆里。若其他文档（如治理计划）已有待办，**同步到看板**并注明看板是唯一集中处。
+新增待办写进看板，不要只写在聊天、治理计划或记忆里；其他文档已有的待办同步到看板。

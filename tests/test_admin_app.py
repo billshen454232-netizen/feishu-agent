@@ -278,19 +278,44 @@ def test_qa_dismiss_restore_and_validation(tmp_path):
     assert "问答" in client.get("/").text and "文档修正" in client.get("/").text
 
 
-def test_plan_board_is_served_behind_the_same_guard(tmp_path, monkeypatch):
-    import src.admin_app as admin_module
+def test_plan_board_page_and_api(tmp_path):
+    from src.plan_board import PlanStore
 
-    board = tmp_path / "board.html"
-    board.write_text("<html><body>飞书机器人 · 项目计划</body></html>", encoding="utf-8")
-    monkeypatch.setattr(admin_module, "PLAN_BOARD_PATH", board)
-    client = _client(_store(tmp_path))
+    seed = tmp_path / "seed.json"
+    seed.write_text(json.dumps({
+        "meta": {"title": "飞书机器人 · 项目计划", "principle": "计划即备忘"},
+        "areas": ["执行链", "其他"],
+        "steps": [
+            {"id": "01", "status": "active", "area": "执行链", "title": "A", "desc": "d", "done": ["x"], "current": ["y"], "remaining": []},
+            {"id": "02", "status": "todo", "area": "其他", "title": "B", "desc": "", "done": [], "current": [], "remaining": ["z"]},
+        ],
+    }, ensure_ascii=False), encoding="utf-8")
+    plans = PlanStore(tmp_path / "db.sqlite3")
+    plans.initialize(seed)
+    client = TestClient(create_admin_app(_store(tmp_path), plan_store=plans), base_url="http://127.0.0.1:8901")
 
-    response = client.get("/plan")
-    assert response.status_code == 200 and "项目计划" in response.text
-    assert response.headers["cache-control"] == "no-cache"
-    assert client.get("/plan", headers={"X-Admin-Proxy": "cloudflare-access"}).status_code == 403
-    assert TestClient(create_admin_app(_store(tmp_path)), base_url="http://evil.example").get("/plan").status_code == 403
-    board.unlink()
-    assert client.get("/plan").status_code == 404
+    page = client.get("/plan")
+    assert page.status_code == 200 and "/api/plan" in page.text and page.headers["cache-control"] == "no-cache"
+    data = client.get("/api/plan").json()
+    assert data["total"] == 2 and data["counts"] == {"done": 0, "active": 1, "todo": 1}
+
+    tunnel = dict(HEADERS, **{"X-Admin-Operator": "claude-code"})
+    updated = client.put("/api/plan/steps/01", headers=tunnel, json={"status": "done", "note": "上线验证通过"}).json()
+    assert updated["status"] == "done" and updated["updated_by"] == "claude-code"
+    assert client.put("/api/plan/steps/01", headers=HEADERS, json={"status": "obsolete"}).status_code == 400
+    assert client.put("/api/plan/steps/99", headers=HEADERS, json={"status": "done"}).status_code == 404
+    created = client.post("/api/plan/steps", headers=HEADERS, json={"title": "新想法", "area": "其他"}).json()
+    assert created["id"] == "03" and created["status"] == "todo"
+    assert client.delete("/api/plan/steps/02", headers=HEADERS).status_code == 200
+    events = client.get("/api/plan/events?step_id=01").json()["events"]
+    assert {e["field"] for e in events} == {"status", "note"}
+
+    migrated = client.post("/api/plan/migrate-local", headers=HEADERS, json={
+        "overrides": {"03": "active", "01": "done", "77": "done"}, "notes": {"03": {"note": "旧批注", "question": ""}},
+    }).json()
+    assert migrated == {"statuses": 1, "notes": 1}
+    assert plans.get_step("03")["note"] == "旧批注"
+
+    assert client.get("/api/plan", headers={"X-Admin-Proxy": "cloudflare-access"}).status_code == 403
+    assert TestClient(create_admin_app(_store(tmp_path)), base_url="http://127.0.0.1:8901").get("/plan").status_code == 404
     assert 'href="/plan"' in client.get("/").text

@@ -9,14 +9,16 @@ localhost) and the Host header must be a loopback name (blocks DNS rebinding).
 from __future__ import annotations
 
 import logging
+import re
 import threading
-from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse
 
 from .access_auth import AccessDenied, CloudflareAccessVerifier
+from .plan_board import PlanError, PlanStore
+from .plan_page import PLAN_HTML
 from .qa_library import (
     ARCHIVE_ACTIVE,
     ARCHIVE_STATUSES,
@@ -43,9 +45,6 @@ from .execution_report import (
 logger = logging.getLogger(__name__)
 
 ADMIN_HOST = "127.0.0.1"
-# The project plan board (docs/hotfix-requirements-progress.html), read on every request so a
-# `git pull` is enough to publish an update. Served behind the same host / Access checks.
-PLAN_BOARD_PATH = Path(__file__).resolve().parents[1] / "docs" / "hotfix-requirements-progress.html"
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "[::1]"}
 _MAX_DIAGNOSIS_CHARS = 4000
 
@@ -62,6 +61,7 @@ def create_admin_app(
     *,
     access_verifier: CloudflareAccessVerifier | None = None,
     qa_service: QaService | None = None,
+    plan_store: PlanStore | None = None,
 ) -> FastAPI:
     app = FastAPI(title="执行结果模板审批", docs_url=None, redoc_url=None, openapi_url=None)
 
@@ -70,6 +70,10 @@ def create_admin_app(
         if _request_host(request) not in _LOOPBACK_HOSTS:
             return PlainTextResponse("forbidden host", status_code=403)
         request.state.operator = "ssh-tunnel"
+        self_reported = request.headers.get("x-admin-operator", "")
+        if request.headers.get(PROXY_HEADER) is None and re.fullmatch(r"[\w.@-]{1,40}", self_reported):
+            # Loopback callers (SSH tunnel, Claude Code via MCP) may name themselves for the audit trail.
+            request.state.operator = self_reported
         if request.headers.get(PROXY_HEADER) is not None:
             if request.headers.get(PROXY_HEADER) != PROXY_HEADER_VALUE or access_verifier is None:
                 return PlainTextResponse("public access is not configured", status_code=403)
@@ -90,11 +94,9 @@ def create_admin_app(
 
     @app.get("/plan", response_class=HTMLResponse)
     async def plan_board() -> HTMLResponse:
-        try:
-            html = PLAN_BOARD_PATH.read_text(encoding="utf-8")
-        except OSError:
-            return HTMLResponse("项目计划页面不存在：docs/hotfix-requirements-progress.html", status_code=404)
-        return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
+        if plan_store is None:
+            return HTMLResponse("项目计划未启用", status_code=404)
+        return HTMLResponse(PLAN_HTML, headers={"Cache-Control": "no-cache"})
 
     @app.get("/api/summary")
     async def summary() -> dict[str, Any]:
@@ -184,8 +186,60 @@ def create_admin_app(
 
     if qa_service is not None and qa_service.store is not None:
         _add_qa_routes(app, qa_service)
+    if plan_store is not None:
+        _add_plan_routes(app, plan_store)
 
     return app
+
+
+def _add_plan_routes(app: FastAPI, plans: PlanStore) -> None:
+    """Server-backed project plan board. ``GET /api/plan`` is also the read API for AI assistants."""
+
+    @app.get("/api/plan")
+    async def get_plan() -> dict[str, Any]:
+        return plans.get_plan()
+
+    @app.put("/api/plan/steps/{step_id}")
+    async def update_step(step_id: str, payload: dict[str, Any], request: Request) -> dict[str, Any]:
+        try:
+            step = plans.update_step(step_id, payload, operator=request.state.operator)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="not found") from exc
+        except PlanError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        logger.info("plan step updated id=%s fields=%s operator=%s", step_id, sorted(payload), request.state.operator)
+        return step
+
+    @app.post("/api/plan/steps")
+    async def create_step(payload: dict[str, Any], request: Request) -> dict[str, Any]:
+        try:
+            step = plans.create_step(payload, operator=request.state.operator)
+        except PlanError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        logger.info("plan step created id=%s operator=%s", step["id"], request.state.operator)
+        return step
+
+    @app.delete("/api/plan/steps/{step_id}")
+    async def delete_step(step_id: str, request: Request) -> dict[str, str]:
+        if not plans.delete_step(step_id, operator=request.state.operator):
+            raise HTTPException(status_code=404, detail="not found")
+        logger.info("plan step deleted id=%s operator=%s", step_id, request.state.operator)
+        return {"status": "deleted"}
+
+    @app.get("/api/plan/events")
+    async def events(step_id: str | None = None, limit: int = 50) -> dict[str, Any]:
+        return {"events": plans.list_events(step_id, max(1, min(limit, 200)))}
+
+    @app.post("/api/plan/migrate-local")
+    async def migrate_local(payload: dict[str, Any], request: Request) -> dict[str, int]:
+        overrides = payload.get("overrides") or {}
+        notes = payload.get("notes") or {}
+        if not isinstance(overrides, dict) or not isinstance(notes, dict):
+            raise HTTPException(status_code=400, detail="invalid payload")
+        try:
+            return plans.migrate_local(overrides, notes, operator=request.state.operator)
+        except PlanError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 def _add_qa_routes(app: FastAPI, qa: QaService) -> None:

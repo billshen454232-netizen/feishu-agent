@@ -124,7 +124,7 @@ python tools/generate_runner_manifest.py --check
 |[deployment/gs1/README.md](deployment/gs1/README.md)|候选部署物和远端人工核验清单。|
 |[docs/hotfix-execution-master-plan.md](docs/hotfix-execution-master-plan.md)|热更证据、状态用词与推进规则。|
 |[docs/hotfix-evidence-ledger.md](docs/hotfix-evidence-ledger.md)|**热更阈值证据台账**：逐条的需求来源、key、Lua 目标、Patch 范围与三层证据状态。|
-|[docs/hotfix-requirements-progress.html](docs/hotfix-requirements-progress.html)|**热更推进计划看板**（浏览器打开）：平铺卡片展示各计划状态，点开看详情与批注。新增计划只改其中的 `PLAN_DATA`。|
+|[docs/plan-board.json](docs/plan-board.json)|**项目计划看板**：数据存于 Gateway SQLite，网页 `https://ops.ttlink.asia/plan` 直接读写，AI 读 `GET /api/plan`（Gateway 本机）。本文件是种子与导出快照；`docs/hotfix-requirements-progress.html` 仅为跳转说明。|
 |[docs/documentation-governance-plan.md](docs/documentation-governance-plan.md)|文档治理任务的进度、待办与检查状态。|
 |[docs/archive/README.md](docs/archive/README.md)|已归档的历史计划与设计。|
 
