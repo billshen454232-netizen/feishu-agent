@@ -149,7 +149,7 @@ worker  = 主动连 Gateway 领任务 + 本地 Muliu 执行（无飞书/AI 凭�
   - nginx 对每个转发请求强制设置 `X-Admin-Proxy: cloudflare-access` 与 `Host: 127.0.0.1`；带该标记的请求必须携带有效的 `Cf-Access-Jwt-Assertion`（或 `CF_Authorization` cookie），否则 403；未配置 `access_*` 时公网请求一律 403；
   - SSH 隧道直连 `127.0.0.1:8901` 不带该标记，照常可用；
   - 审批页的改动日志记录操作人邮箱（`operator=`）；
-  - 依赖 `PyJWT[crypto]`（见 `requirements.txt`）。
+  - 依赖 `PyJWT[crypto]`，只有 Gateway 需要（`requirements-gateway.txt`）；创建校验器时才导入，Worker 不装也能启动。
 - 发起人昵称：收到群消息时后台调飞书群成员接口（应用需开通 `im:chat.members:read`），按 open_id 缓存，存入 `message_jobs.user_name`；只在审批页显示，不进 AI 提示词与飞书卡片。查询失败不影响请求处理。
 - 需求分析模型与耗时：规划器记录每次 AI 调用的模型和耗时，存入 `message_jobs.planning_model / planning_ms / planning_calls`。
 - 模板库、研读任务、执行记录与 `message_jobs` 同一个 SQLite 文件；执行记录按 `artifact_retention_days` 清理，模板不清理。

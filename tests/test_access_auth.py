@@ -129,3 +129,14 @@ def test_access_config_requires_both_fields(tmp_path):
         _load_admin({"access_team_domain": TEAM})
     with pytest.raises(ConfigError, match="cloudflareaccess.com"):
         _load_admin({"access_team_domain": "example.com", "access_aud": AUD})
+
+
+def test_workers_can_import_the_app_without_pyjwt():
+    """PyJWT is a Gateway-only dependency (requirements-gateway.txt); Workers must start without it."""
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    code = "import sys; sys.modules['jwt'] = None; import src.access_auth, src.admin_app, src.app"
+    result = subprocess.run([sys.executable, "-c", code], cwd=Path(__file__).parents[1], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr

@@ -71,7 +71,8 @@ Worker 按可信 `route_region` 选择本机 `cn` / `overseas` 私有 Muliu prof
 ```bash
 python -m venv .venv
 source .venv/Scripts/activate  # Windows Git Bash
-python -m pip install -r requirements.txt
+python -m pip install -r requirements.txt           # Worker
+python -m pip install -r requirements-gateway.txt   # Gateway / 开发机（多一个 PyJWT，用于审批页 Access 校验）
 cp config/config.example.json config/config.json
 ```
 
