@@ -388,6 +388,7 @@ Gateway SQLite 热更阈值注册表（网页 /thresholds 编辑，src/hotfix_th
 | `test_auto_hotfix_tool.py` | 热更注册表映射、Lua Patch 生成、Planner 中文路由。 |
 | `test_generate_runner_manifest.py` | 候选 manifest 与 catalog 一致性。 |
 | `test_sync_hotfix_planner_catalog.py` | catalog 环境映射同步产物、执行形态热更合同。 |
+| `test_gs1_inventory.py` | GS-1 盘点脚本（负责人自用）：不泄露 `config.ini` 值与文件内容、只接受 `summary`、不进 catalog / 知识库。 |
 | `test_hotfix_thresholds.py` | 热更阈值注册表：种子迁移、确定性校验、已执行保护、key → 字段 / 表展开、Planner 视图、网页接口。 |
 | `test_knowledge_base.py` / `test_script_knowledge_base.py` | 知识检索。 |
 | `test_conversation.py` / `test_conversation_log.py` | 会话历史与对话归档。 |

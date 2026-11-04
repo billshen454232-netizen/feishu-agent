@@ -10,6 +10,7 @@
 |---|---|---|
 |[server_log_query.py](server_log_query.py)|待部署的受控日志诊断脚本候选。|它已存在于 `/home/serverGeneralScript`，或任何 profile 已经远端验收。|
 |[batch_server_query.py](batch_server_query.py)|待部署的批量版本查询脚本候选。|它已存在于 GS-1，或 GS-1 的路由与 SSH 权限可用。|
+|[gs1_inventory.py](gs1_inventory.py)|GS-1 脚本目录只读盘点（文件清单、SHA-256、`config.ini` 服号键名；不输出内容与 IP）。**仅供 GS-1 负责人手动运行**，不登记 catalog、不进知识库，飞书不可调用。|它已存在于两台 GS-1，或输出等于 GS-1 全部现状（只看 `/home/serverGeneralScript` 顶层）。|
 |[muliu_runner_manifest.json](muliu_runner_manifest.json)|从 catalog 派生的无凭据候选 artifact。|GS-1 有该文件、dispatcher 读取它，或 dispatcher 据此拒绝未登记 argv。|
 
 机器人侧当前唯一执行合同仍是 [../../config/muliu_script_catalog.md](../../config/muliu_script_catalog.md)。该合同通过 Gateway 和 Worker 校验；Worker 向 Task 89 发送的 payload 只有 `path + args`。
@@ -97,6 +98,15 @@ grep -c $'\x1b' /home/serverGeneralScript/auto_hotfix_registry.py
 ```
 
 国内 GS-1 与海外 GS-1 都要覆盖并验证。
+
+`gs1_inventory.py`（负责人自用，国服 `nslg-ali-sh-test-all-gs-1`、海外 `nslg-ali-hk-test-all-gs-1` 各一份）部署后手动运行：
+
+```bash
+cd /home/serverGeneralScript
+python3 -c "import ast; ast.parse(open('gs1_inventory.py').read())" && echo "语法 OK"
+grep -c $'\x1b' gs1_inventory.py        # 应输出 0
+python3.7 gs1_inventory.py summary | head -20
+```
 
 ## 6. 受控人工核验顺序
 
