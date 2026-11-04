@@ -17,8 +17,10 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse
 
 from .access_auth import AccessDenied, CloudflareAccessVerifier
+from .hotfix_thresholds import ThresholdError, ThresholdStore, review_threshold
 from .plan_board import PlanError, PlanStore
 from .plan_page import PLAN_HTML
+from .threshold_page import THRESHOLDS_HTML
 from .qa_library import (
     ARCHIVE_ACTIVE,
     ARCHIVE_STATUSES,
@@ -62,6 +64,8 @@ def create_admin_app(
     access_verifier: CloudflareAccessVerifier | None = None,
     qa_service: QaService | None = None,
     plan_store: PlanStore | None = None,
+    threshold_store: ThresholdStore | None = None,
+    review_client: Any | None = None,
 ) -> FastAPI:
     app = FastAPI(title="执行结果模板审批", docs_url=None, redoc_url=None, openapi_url=None)
 
@@ -97,6 +101,12 @@ def create_admin_app(
         if plan_store is None:
             return HTMLResponse("项目计划未启用", status_code=404)
         return HTMLResponse(PLAN_HTML, headers={"Cache-Control": "no-cache"})
+
+    @app.get("/thresholds", response_class=HTMLResponse)
+    async def thresholds_page() -> HTMLResponse:
+        if threshold_store is None:
+            return HTMLResponse("热更阈值注册表未启用", status_code=404)
+        return HTMLResponse(THRESHOLDS_HTML, headers={"Cache-Control": "no-cache"})
 
     @app.get("/api/summary")
     async def summary() -> dict[str, Any]:
@@ -188,8 +198,67 @@ def create_admin_app(
         _add_qa_routes(app, qa_service)
     if plan_store is not None:
         _add_plan_routes(app, plan_store)
+    if threshold_store is not None:
+        _add_threshold_routes(app, threshold_store, review_client)
 
     return app
+
+
+def _add_threshold_routes(app: FastAPI, thresholds: ThresholdStore, review_client: Any | None) -> None:
+    """Hotfix threshold registry: edits take effect on the next Feishu request (the Planner reads it live)."""
+
+    @app.get("/api/thresholds")
+    async def list_thresholds(state: Optional[str] = None) -> dict[str, Any]:
+        items = thresholds.list_thresholds()
+        if state:
+            items = [item for item in items if item["state"] == state]
+        return {"thresholds": items}
+
+    @app.post("/api/thresholds")
+    async def create_threshold(payload: dict[str, Any], request: Request) -> dict[str, Any]:
+        try:
+            item = thresholds.create(payload, operator=request.state.operator)
+        except ThresholdError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        logger.info("threshold created key=%s operator=%s", item["key"], request.state.operator)
+        return item
+
+    @app.put("/api/thresholds/{key}")
+    async def update_threshold(key: str, payload: dict[str, Any], request: Request) -> dict[str, Any]:
+        payload.pop("key", None)
+        try:
+            item = thresholds.update(key, payload, operator=request.state.operator)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="not found") from exc
+        except ThresholdError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        logger.info("threshold updated key=%s fields=%s operator=%s", key, sorted(payload), request.state.operator)
+        return item
+
+    @app.delete("/api/thresholds/{key}")
+    async def delete_threshold(key: str, request: Request) -> dict[str, str]:
+        try:
+            deleted = thresholds.delete(key, operator=request.state.operator)
+        except ThresholdError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if not deleted:
+            raise HTTPException(status_code=404, detail="not found")
+        logger.info("threshold deleted key=%s operator=%s", key, request.state.operator)
+        return {"status": "deleted"}
+
+    @app.get("/api/thresholds/events")
+    async def threshold_events(key: Optional[str] = None, limit: int = 50) -> dict[str, Any]:
+        return {"events": thresholds.list_events(key, max(1, min(limit, 200)))}
+
+    @app.post("/api/thresholds/review")
+    async def review(payload: dict[str, Any]) -> dict[str, Any]:
+        if review_client is None:
+            raise HTTPException(status_code=503, detail="AI 审核未配置")
+        try:
+            return await review_threshold(review_client, payload, thresholds.list_thresholds())
+        except Exception as exc:  # noqa: BLE001 - advisory only; surface the reason on the page
+            logger.warning("threshold review failed", exc_info=True)
+            raise HTTPException(status_code=502, detail="AI 审核失败：{}".format(type(exc).__name__)) from exc
 
 
 def _add_plan_routes(app: FastAPI, plans: PlanStore) -> None:
@@ -663,7 +732,7 @@ _INDEX_HTML = r"""<!doctype html>
 <header class="masthead">
   <div class="masthead-inner">
     <div>
-      <h1>执行结果审批台 <a class="plan-link" href="/plan" target="_blank" rel="noopener">项目计划</a></h1>
+      <h1>执行结果审批台 <a class="plan-link" href="/plan" target="_blank" rel="noopener">项目计划</a><a class="plan-link" href="/thresholds" target="_blank" rel="noopener">热更阈值</a></h1>
       <p class="lede">失败经 AI 分析后会收进「待审核」。通过的模板会被同类错误直接复用，不再调用 AI；改错了可以退回或删除。</p>
     </div>
     <fieldset class="mode" id="mode">

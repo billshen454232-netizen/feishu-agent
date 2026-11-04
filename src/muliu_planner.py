@@ -7,7 +7,7 @@ import logging
 import time
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import Any, Callable, Optional
 
 from .ai_client import generate_with_provenance
 from .muliu_plan import MuliuPlan, MuliuPlanError, MuliuPlanKind, parse_plan
@@ -80,11 +80,14 @@ class MuliuPlanner:
         script_catalog: MuliuScriptCatalog,
         max_steps: int,
         plan_repair_attempts: int = 1,
+        plan_expander: Optional[Callable[[MuliuPlan], MuliuPlan]] = None,
     ) -> None:
         self._ai_client = ai_client
         self._script_catalog = script_catalog
         self._max_steps = max_steps
         self._plan_repair_attempts = max(0, plan_repair_attempts)
+        # Deterministic post-processing of a validated operation plan (hotfix key → executable field/table form).
+        self._plan_expander = plan_expander
 
     async def create_plan(self, user_text: str) -> MuliuPlan:
         return (await self.create_plan_with_trace(user_text)).plan
@@ -96,6 +99,8 @@ class MuliuPlanner:
             generation = await self._create_plan_with_trace(user_text)
         finally:
             _PLANNING_CALLS.reset(token)
+        if self._plan_expander is not None and generation.plan.kind is MuliuPlanKind.OPERATION:
+            generation = replace(generation, plan=self._plan_expander(generation.plan))
         return replace(generation, ai_calls=tuple(calls))
 
     async def _generate(self, prompt: str) -> str:

@@ -28,6 +28,7 @@ from src.muliu_executor import (
     MuliuSubmissionUnknownError,
     MuliuSubmittedError,
 )
+from src.hotfix_thresholds import ThresholdStore
 from src.muliu_firewall import MuliuFirewall
 from src.muliu_intent import MuliuIntentRouter
 from src.muliu_plan import MuliuPlan, MuliuPlanKind, MuliuStep
@@ -359,6 +360,9 @@ async def test_registered_chinese_hotfix_routes_wait_for_card_confirmation(tmp_p
     store = MessageJobStore(tmp_path / "jobs.sqlite3")
     store.initialize()
     store.create_if_new("om_hotfix", "evt_hotfix", "oc_group", "ou_user", request_text, chat_type="group")
+    thresholds = ThresholdStore(tmp_path / "jobs.sqlite3")
+    thresholds.initialize()
+    registered = thresholds.get(key)
     feishu = FakeFeishuClient()
     executor = FakeExecutor()
     processor = MessageJobProcessor(
@@ -367,7 +371,10 @@ async def test_registered_chinese_hotfix_routes_wait_for_card_confirmation(tmp_p
         ConversationStore(4),
         ai_client=None,
         feishu_client=feishu,
-        operation_planner=FakePlanner(make_hotfix_plan(key, request_text.split("热更", 1)[1].rsplit("为", 1)[0])),
+        # The real planner expands key-form hotfix steps through the Gateway registry before returning.
+        operation_planner=FakePlanner(thresholds.expand_plan(
+            make_hotfix_plan(key, request_text.split("热更", 1)[1].rsplit("为", 1)[0])
+        )),
         muliu_firewall=production_firewall(config),
         route_resolver=production_route_resolver(),
         muliu_executor=executor,
@@ -379,7 +386,10 @@ async def test_registered_chinese_hotfix_routes_wait_for_card_confirmation(tmp_p
     assert job is not None
     assert job.status == "awaiting_confirmation"
     assert executor.plans == []
-    assert json.loads(job.plan_json)["steps"][0]["args"] == ["-s", "5010", "-k", key, "-v", "1"]
+    assert [step["args"] for step in json.loads(job.plan_json)["steps"]] == [
+        ["-s", "5010", "-k", registered["field_name"], "--table", registered["table_name"], "-v", "1", "--patch-type", side]
+        for side in ("common", "client_avatar")
+    ]
     assert feishu.cards[0][1]["elements"][0]["text"]["content"] == json.loads(job.plan_json)["summary"]
 
 

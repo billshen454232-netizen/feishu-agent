@@ -236,6 +236,7 @@ worker  = 主动连 Gateway 领任务 + 本地 Muliu 执行（无飞书/AI 凭�
 | [message_worker.py](../src/message_worker.py) | 消息处理主循环：AI 计划生成、确认卡投递、任务领取、结果回写；结果展示先投递可信卡，再按需后台 AI 研读并只更新卡片说明。 | `MessageJobProcessor`, `MessageJobQueue`, `present_execution_result` |
 | [execution_report.py](../src/execution_report.py) | 执行结果展示分流与典型故障模板库：错误特征（匹配键）计算、模板 / 后台研读任务 / 执行记录 / 运行时设置的 SQLite 存储。不改变任何终态。 | `compute_error_signature`, `ExecutionReportStore`, `is_read_only_result` |
 | [plan_board.py](../src/plan_board.py) / [plan_page.py](../src/plan_page.py) | 项目计划看板：SQLite 存储（步骤、元信息、修改历史），首次从 `docs/plan-board.json` 导入；`/plan` 列表页与 `/api/plan` 读写接口（AI 读取入口）。 | `PlanStore`, `PLAN_HTML` |
+| [hotfix_thresholds.py](../src/hotfix_thresholds.py) / [threshold_page.py](../src/threshold_page.py) | 热更阈值注册表：SQLite 存储（首次从 `config/hotfix_thresholds.seed.json` 导入）、确定性校验、已执行保护；`HotfixPlannerCatalog` 给 Planner 实时生成中文路由与 key 白名单，`expand_plan` 把 `-k <key>` 展开成 `-k <字段> --table <表>`；`/thresholds` 页面与 `/api/thresholds` 接口（含 AI 审核建议）。 | `ThresholdStore`, `HotfixPlannerCatalog`, `THRESHOLDS_HTML` |
 | [qa_library.py](../src/qa_library.py) | 知识问答评审与归档：问答记录、多轮纠正、已审核问答库、资料修改建议的存储；归档检索打分（字符二元组覆盖率 + 脚本 / 类别加分）；问答提示词与 AI 调用（回答、纠正重答、归档草稿）。资料优先级：catalog > 已审核问答 > knowledge/docs。 | `QaStore`, `QaService`, `rank_archive` |
 | [admin_app.py](../src/admin_app.py) | 模板审批页：待审核 / 可用模板两个页签（通过 / 退回 / 删除 / 编辑 / 批量）、只读「最近执行」页签（发起人昵称、需求分析模型与耗时、终态、说明来源、结果研读模型与耗时、AI 说明）、查询成功模式开关。独立服务，**只监听 127.0.0.1**，经 SSH 端口转发访问。 | `create_admin_app`, `AdminServer` |
 | [operation_message.py](../src/operation_message.py) | 计划与结果的飞书文本/卡片格式化，含敏感信息遮罩。 | `format_plan_for_confirmation`, `build_plan_confirmation_card`, `format_execution_result`, `mask_sensitive_operation_data` |
@@ -290,23 +291,24 @@ worker  = 主动连 Gateway 领任务 + 本地 Muliu 执行（无飞书/AI 凭�
 
 | 工具 | 作用 | 输入 | 输出 | 是否改写仓库文件 | 是否运行期依赖 |
 | --- | --- | --- | --- | --- | --- |
-| [auto_hotfix_registry.py](../tools/auto_hotfix_registry.py) | **当前热更阈值 Python 注册表**。同时定义执行端 ASCII key + Lua Patch 目标，以及 Planner 可见的中文名 / aliases。 | 无外部输入（代码即数据）。 | 供 `sync_hotfix_planner_catalog.py` 导入；同名阅读副本可由 `auto_hotfix_tool.py` 使用。 | 否 | 否（FastAPI 运行期不导入；它是 catalog 同步主链的资料源）。 |
+| [auto_hotfix_registry.py](../tools/auto_hotfix_registry.py) | GS-1 侧 `auto_hotfix_tool.py` 导入的旧版字段表（24 条）。机器人**不再读取**；新阈值走 Gateway 注册表，靠 `--table` 传生效路径，不需要改它。 | 无外部输入（代码即数据）。 | 镜像到 `knowledge/scripts/`，供 GS-1 部署参考。 | 否 | 否。 |
 | [auto_hotfix_tool.py](../tools/auto_hotfix_tool.py) | 游戏服阈值免重启热更工具：生成 Lua Patch、写入 `patch_order_list.json`、调用 `run_patch_game.sh`。 | `config.ini`（服号 → IP）、命令行参数。 | Patch / 热更执行结果。 | 否 | 否（独立 CLI；catalog 期望远端同路径脚本，但仓库不能证明其已部署）。 |
-| [sync_hotfix_planner_catalog.py](../tools/sync_hotfix_planner_catalog.py) | 把 `auto_hotfix_registry` 的中文路由和严格 key 白名单同步进 catalog 静态资料，并生成候选 manifest。 | `tools/auto_hotfix_registry.py`、`config/server_environments.json`。 | **改写** `config/muliu_script_catalog.md` 自动区块、候选 manifest。 | **是** | 否（开发期工具）。 |
+| [sync_hotfix_planner_catalog.py](../tools/sync_hotfix_planner_catalog.py) | 把 `config/server_environments.json` 的环境映射同步进 catalog 静态资料，并生成候选 manifest、镜像 `auto_hotfix_registry.py`。热更阈值不经过它。 | `config/server_environments.json`。 | **改写** `config/muliu_script_catalog.md` 环境区块、候选 manifest。 | **是** | 否（开发期工具）。 |
 | [plan_board.py](../tools/plan_board.py) | 项目计划快照：`export` 导出 JSON、`import` 恢复、`summary` 文字概览。 | Gateway SQLite。 | 否（export 输出到标准输出）。 | 否 | 否（运维工具）。 |
 | [doc_fixes.py](../tools/doc_fixes.py) | 已采纳的资料修改建议回写仓库：Gateway 上 `export` 导出 JSON；开发机 `apply` 修改 `knowledge/index.md`、`knowledge/docs/*.md`（原文需恰好出现 1 次，保留换行风格）；Gateway `git pull` 后 `mark-applied`。 | Gateway SQLite、导出的 JSON。 | 改写 `knowledge/` 下的 MD。 | **是**（apply） | 否（运维工具）。 |
 | [generate_runner_manifest.py](../tools/generate_runner_manifest.py) | 从 catalog 派生**候选** GS-1 runner manifest。 | `config/muliu_script_catalog.md`。 | `deployment/gs1/muliu_runner_manifest.json`。 | **是** | 否（开发期工具）。 |
 
-**当前热更主链**（唯一）：
+**当前热更主链**（唯一，2026-11-04 起；设计见 `docs/superpowers/specs/2026-10-30-threshold-registry-web.md`）：
 
 ```text
-tools/auto_hotfix_registry.py
-→ tools/sync_hotfix_planner_catalog.py
-→ config/muliu_script_catalog.md
-→ /home/serverGeneralScript/auto_hotfix_tool.py
+Gateway SQLite 热更阈值注册表（网页 /thresholds 编辑，src/hotfix_thresholds.py）
+→ 每次规划实时生成 Planner 中文路由 + key 白名单（-k <key>）
+→ Gateway 确定性展开：-k <真实字段名> --table <表名> -v <值> --patch-type <类型>
+→ 静态 catalog 执行形态合同（Worker / 防火墙结构校验）
+→ /home/serverGeneralScript/auto_hotfix_tool.py（GS-1 现有版本，不需更新）
 ```
 
-`config/hotfix_thresholds.json` 与 `tools/hotfix_threshold_registry.py` 是**已否决的旧方案遗留物**：只在原开发机本地存在，已被 `.gitignore` 忽略，不在仓库里，也没有任何运行代码引用（对应测试已于 2026-11-04 删除）。STEP 22（阈值网页管理）会用新格式另起实现，届时可参考其中的 24 条阈值数据。
+`config/hotfix_thresholds.json` 与 `tools/hotfix_threshold_registry.py` 是**已否决的旧方案遗留物**：只在原开发机本地存在，已被 `.gitignore` 忽略，不在仓库里，也没有任何运行代码引用（对应测试已于 2026-11-04 删除）。STEP 22 已用 Gateway SQLite 另起实现，种子数据见 `config/hotfix_thresholds.seed.json`。
 
 ---
 
@@ -385,7 +387,8 @@ tools/auto_hotfix_registry.py
 | `test_server_log_query.py` | 日志查询候选脚本的参数约束与输出脱敏。 |
 | `test_auto_hotfix_tool.py` | 热更注册表映射、Lua Patch 生成、Planner 中文路由。 |
 | `test_generate_runner_manifest.py` | 候选 manifest 与 catalog 一致性。 |
-| `test_sync_hotfix_planner_catalog.py` | catalog 同步产物与标记完整性。 |
+| `test_sync_hotfix_planner_catalog.py` | catalog 环境映射同步产物、执行形态热更合同。 |
+| `test_hotfix_thresholds.py` | 热更阈值注册表：种子迁移、确定性校验、已执行保护、key → 字段 / 表展开、Planner 视图、网页接口。 |
 | `test_knowledge_base.py` / `test_script_knowledge_base.py` | 知识检索。 |
 | `test_conversation.py` / `test_conversation_log.py` | 会话历史与对话归档。 |
 | `test_feishu_client.py` | 飞书 API 封装。 |

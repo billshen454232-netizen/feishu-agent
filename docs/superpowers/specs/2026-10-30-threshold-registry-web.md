@@ -1,245 +1,99 @@
 # 热更阈值注册表网页管理
 
-> **状态：设计已定，待实施**  
-> **日期：2026-10-30**  
-> **关联计划：** [项目计划看板](../../hotfix-requirements-progress.html) STEP 22  
-> **前置原则：** 配置与代码分离（用户长期要求；`KNOWN_THRESHOLDS` 塞在 Python 里是违规）
+> **状态：实施中（2026-11-04 改版）**
+> **日期：2026-10-30 初版；2026-11-04 按「网页挂 Gateway」改版**
+> **关联计划：** 项目计划看板 STEP 22（https://ops.ttlink.asia/plan）
+> **前置原则：** 配置与代码分离（`KNOWN_THRESHOLDS` 塞在 Python 里是违规）
 
 ## 1. 目标
 
-让热更阈值的增删改通过网页完成，加一条字段后**立即可用于飞书热更**，全程不需要碰 GS-1。
+热更阈值的增删改在 `https://ops.ttlink.asia/thresholds` 完成，保存后**立即可用于飞书热更**：不改代码、不 git 推拉、不碰 GS-1、不重启服务。
 
 ```text
-网页填表单 → 校验 → AI 审核 → 入库 → 自动同步白名单 → 飞书即可用
+网页填表单 → 确定性校验 →（可选）AI 审核建议 → 写入 Gateway SQLite → 下一条飞书请求即可用
 ```
 
-反向支持：过期或不用的字段可**停用**（软删除）或**删除**（仅限未执行过的）。
+过期字段可**停用**（保留数据）或**删除**（仅限从未执行过的）。
 
-## 2. 现状与问题
+## 2. 2026-11-04 改版要点
 
-### 2.1 配置硬编码在 Python（违反配置/代码分离）
+| 项 | 初版 | 改版 | 原因 |
+| --- | --- | --- | --- |
+| 数据真源 | 开发机 `config/hotfix_thresholds.json` + git pull | **Gateway SQLite**，`config/hotfix_thresholds.seed.json` 只做种子 / 快照 | 网页挂在 Gateway；保存即生效，不需要推拉 |
+| GS-1 | 新增 `-t table.field`，一次性部署 | **不部署**：沿用 GS-1 现有的 `-k <真实字段名> --table <表名>` | GS-1 工具本来就支持未收录字段（`apply_patch` 的 `custom_table` 分支） |
+| 白名单 | sync 工具写进 catalog | Gateway 每次规划时从库实时生成 | 同上 |
+| Worker 复验 | 精确匹配同一份白名单 | **结构校验**：表名 / 字段名必须是合法 Lua 标识符 | Gateway 已精确匹配；Worker 不需要随阈值变更同步 |
+| 剧本范围 / 侧别 | `scenarios` 字段 | 去掉 | 24 条现有数据全部为空；侧别由执行时自然语言决定 |
 
-`tools/auto_hotfix_registry.py` 324 行里约 270 行是 `KNOWN_THRESHOLDS` 的 24 个条目——key、中文名、表名、字段名、别名、侧别全部写死在代码里。加一个字段要：改 Python → 跑测试 → git push → **跳板机手工覆盖 GS-1**。
+## 3. 两段式合同（安全边界）
 
-同类问题还有：
+AI 不接触 Lua 表名 / 字段名，只能选已登记的 ASCII key；Gateway 确定性展开成执行形态。
 
-| 文件 | 硬编码 |
+```text
+Planner 看到（动态 catalog）      -s 5010 -k union_impeach_min -v 1 [--patch-type common]
+        │  Gateway：key 必须在库内且 active，否则拒绝
+        ▼  确定性展开（不经 AI）
+执行形态（静态 catalog）          -s 5010 -k union_impeach_union_member_min --table union_config_setting -v 1 --patch-type common
+                                  -s 5010 -k union_impeach_union_member_min --table union_config_setting -v 1 --patch-type client_avatar
+```
+
+- 不说侧别 → 展开成 `common` + `client_avatar` 两步（双端，宁可多写不漏写）；说了侧别 → 一步；
+- 清理 / 还原：`--cleanup-legacy <key>` / `--restore-auto <key>` 展开为对应真实字段名；
+- 静态 `config/muliu_script_catalog.md` 只登记**执行形态**（Worker 与 Gateway 防火墙用），表名 / 字段名为结构正则 `[A-Za-z_][A-Za-z0-9_]{0,63}`；
+- 动态 catalog（仅 Gateway Planner 使用）把热更合同替换成 Planner 形态，key 正则由库内 active 条目实时生成，并渲染中文路由表；
+- 规划结果先按动态合同校验，展开后再按静态合同（防火墙）校验，确认卡片与入库计划都是执行形态。
+
+## 4. 数据模型（Gateway SQLite）
+
+| 表 | 内容 |
 | --- | --- |
-| `tools/auto_hotfix_tool.py` | `SUPPORTED_PATCH_TYPES`、`DEFAULT_PATCH_TYPE` |
-| `src/operation_message.py` | `SCRIPT_ROOT`、各脚本路径 |
-| `src/muliu_executor.py` | `SCRIPT_ROOT`、`START_SCRIPT_PATH`、`BASIC_INFO_SCRIPT_PATH` |
+| `hotfix_thresholds` | `key`（主键，创建后不可改）、`name`、`aliases`（JSON 数组）、`table_name`、`field_name`、`description`、`state`（active / disabled）、`source`、`notes`、`sort_order`、`created_at`、`updated_at`、`updated_by` |
+| `hotfix_threshold_events` | 每次修改的字段、旧值、新值、操作人、时间 |
 
-### 2.2 GS-1 部署是昂贵操作
+首次启动表为空时从 `config/hotfix_thresholds.seed.json` 导入（24 条，迁自 `tools/auto_hotfix_registry.py`）。
 
-GS-1 是游戏服，**只能跳板机登录，不能 scp**。部署脚本 = 跳板机里手工复制，易出错（2026-10-29 曾因终端复制混入 `0x1B` 控制字符导致 `SyntaxError`）。
+### 4.1 确定性校验（不通过拒绝保存）
 
-因此：**任何需要更新 GS-1 才能生效的方案都不可接受**。
+- `key`：`^[a-z][a-z0-9_]{0,63}$`，全表唯一；
+- `name`、`aliases`：中文路由词全表唯一（含停用条目，避免启用后冲突）；别名必须是数组；
+- `table_name` / `field_name`：`^[A-Za-z_][A-Za-z0-9_]{0,63}$`；`table.field` 全表唯一；
+- 已执行过的条目：表名 / 字段名不可改、不可删除，只能停用（服务器上可能已有对应补丁，改路径会让还原找不到）。
 
-### 2.3 现有数据流
+「执行过」= `message_jobs` 中进入过执行的任务（done / failed / submitted_result_unknown / submission_in_progress / leased / queued_for_worker），其计划步骤引用该 key 或字段名。
 
-```text
-飞书 → Gateway（有 catalog 白名单）→ Muliu Task 89（HTTP）
-     → GS-1 dispatcher → 跑 /home/serverGeneralScript 下脚本
-```
+### 4.2 AI 审核（建议，不阻断）
 
-数据走 HTTP，**只有脚本文件才需要部署**。所以只要让 GS-1 的脚本不依赖本地配置，加阈值就不再需要碰 GS-1。
+网页「AI 审核」按钮：把条目与现有条目的中文名 / 生效路径交给报告模型池，返回字段说明与字段名是否自洽、疑似重复的 key、侧别建议。AI 只读元数据、不输出 Lua、不决定保存。
 
-## 3. 目标架构
+## 5. 网页
 
-### 3.1 单一入口、自动派生
+`/thresholds`（同一套 Cloudflare Access + Host 校验）：
 
-```text
-┌──────────────────────────────┐
-│ 网页：阈值字段管理            │ ← 唯一维护入口
-│  新增 / 编辑 / 停用 / 删除     │
-└──────────────┬───────────────┘
-               ↓ 保存时自动生成
-┌──────────────────────────────┐
-│ config/hotfix_thresholds.json │ ← 数据真源
-└──────────────┬───────────────┘
-               ↓ sync 工具
-┌──────────────────────────────┐
-│ catalog 模式 O 自动生成区      │
-│  ·生效路径白名单（正则）        │ ← 不手工维护
-│  ·中文名 / 别名路由表          │
-│  ·候选 manifest               │
-└──────────────┬───────────────┘
-               ↓ git pull
-      Gateway          Worker          GS-1
-     （校验）        （复验）        （只跑脚本，永不更新）
-```
+- 列表：中文名、key、生效路径、别名、说明、状态、来源、最后修改；搜索、状态筛选；
+- 新增 / 编辑（行内展开）、停用 / 启用、删除（仅未执行过）、AI 审核、修改历史；
+- 接口：`GET /api/thresholds`、`POST /api/thresholds`、`PUT /api/thresholds/{key}`、`DELETE /api/thresholds/{key}`、`POST /api/thresholds/review`、`GET /api/thresholds/events`。
 
-**网页只维护一处，其余全是派生物。** 不会存在「网页加了但白名单没放行」。
+## 6. 影响面
 
-### 3.2 各位置持有什么
-
-| 位置 | 持有 | 更新方式 |
-| --- | --- | --- |
-| 开发机 | `config/hotfix_thresholds.json`（真源） | 网页写入 |
-| Gateway | catalog 白名单 + 运行配置 | git pull |
-| Worker | 同一份 catalog（复验）+ 自己的运行配置 | git pull |
-| **GS-1** | **只有脚本，不持任何配置** | **不更新** |
-
-## 4. 数据模型
-
-`config/hotfix_thresholds.json`（**新 schema，覆盖现有的同名候选文件**——那套从未接入主链）：
-
-```json
-{
-  "schema_version": 1,
-  "thresholds": [
-    {
-      "key": "union_impeach_min",
-      "name": "弹劾发起同盟人数检查",
-      "aliases": ["弹劾人数", "弹劾发起同盟人数"],
-      "table_name": "union_config_setting",
-      "field_name": "union_impeach_union_member_min",
-      "description": "发起弹劾所需的同盟最低人数（原值通常为50）",
-      "scenarios": [],
-      "state": "active",
-      "source": "Excel 第 12 行",
-      "notes": "需求来源标注：客户端",
-      "created_at": "2026-10-30",
-      "updated_at": "2026-10-30"
-    }
-  ]
-}
-```
-
-字段说明：
-
-| 字段 | 含义 | 约束 |
-| --- | --- | --- |
-| `key` | 受控简称，`-k` 用 | `^[a-z][a-z0-9_]{0,63}$`，全表唯一 |
-| `name` | 中文标准名 | 全表唯一，AI 路由用 |
-| `aliases` | 中文别名 | 全表唯一（含 name 不冲突） |
-| `table_name` / `field_name` | Lua 生效路径 | Lua 标识符规则 |
-| `description` | 字段说明 | 自由文本，脱敏 |
-| `scenarios` | 默认剧本范围 | 数字数组，空 = 全部 |
-| `state` | `active` / `disabled` | 停用不删数据 |
-| `source` / `notes` | 需求来源与备注 | 证据台账用 |
-
-**不设 `is_client` / `is_server`**：按用户 2026-10-29 决定，侧别由执行时自然语言决定（不说即双端），注册表不预判。Excel 里的侧别标注记入 `notes` 留痕。
-
-## 5. 调用合同变更：`-k` → `-t <table.field>`
-
-### 5.1 为什么要改
-
-GS-1 的 `auto_hotfix_tool.py` 现在靠本地 `KNOWN_THRESHOLDS` 把 `-k union_impeach_min` 解成表/字段。要让 GS-1 不持配置，**生效路径必须随任务下发**。
-
-### 5.2 改法
-
-| | 现在 | 改后 |
-| --- | --- | --- |
-| args | `["-s","5010","-k","union_impeach_min","-v","2"]` | `["-s","5010","-t","union_config_setting.union_impeach_union_member_min","-v","2"]` |
-| 白名单 | `-k` 的 24 个 key 正则 | `-t` 的 24 个 `table.field` 正则 |
-| GS-1 | 查本地注册表 | 直接用下发的生效路径 |
-
-**安全边界不变**：`<table.field>` 的正则白名单是 24 个精确值，与现在 `-k` 的 24 个 key 白名单等价。AI 依然只能选已登记项，不能注入任意表/字段。
-
-### 5.3 侧别
-
-沿用 [catalog 模式 O 的侧别约定](../../../config/muliu_script_catalog.md)：不说即双端两份，「热更服务端」传 `--patch-type common`，「热更客户端」传 `--patch-type client_avatar`。
-
-## 6. 网页功能
-
-### 6.1 列表
-
-| 列 | 内容 |
+| 位置 | 变化 |
 | --- | --- |
-| key / 中文名 | 受控简称与标准名 |
-| 生效路径 | `table_name.field_name` |
-| 别名 | 逗号分隔 |
-| 说明 | `description` |
-| 状态 | `active` / `disabled` |
-| 来源 | `source` |
+| Gateway | 新表；Planner 用动态 catalog；规划后展开；新页面 |
+| Worker | 拉新静态 catalog（执行形态合同）后重启；之后加阈值不再需要动 Worker |
+| GS-1 | **不变**。前提：GS-1 上的 `auto_hotfix_tool.py` 支持 `--table`（需人工确认一次） |
+| `tools/auto_hotfix_registry.py` | 仅作为 GS-1 部署件保留（GS-1 工具仍 import 它）；机器人不再读取 |
+| `tools/sync_hotfix_planner_catalog.py` | 只同步环境映射与候选 manifest，不再处理热更白名单 |
 
-支持按状态筛选、按名称/字段搜索。
+## 7. 验证方式
 
-### 6.2 新增 / 编辑
-
-表单字段：生效路径（表名 + 字段名）、字段说明、中文名、别名、默认剧本范围、来源。
-
-**提交流程**：
-
-```text
-表单 → 确定性校验（硬门槛）→ AI 审核（建议）→ 写入 JSON
-     → 跑 sync 生成白名单 / 路由表 / manifest → 显示结果
-```
-
-### 6.3 停用 / 删除
-
-| 动作 | 条件 | 效果 |
-| --- | --- | --- |
-| **停用** | 任意 | `state: disabled`，白名单不再包含它，AI 无法调用；数据保留 |
-| **删除** | **仅限从未执行过**的条目 | 物理删除；避免留下 GS-1 上的孤儿补丁 |
-
-已执行过的条目只能停用——因为服务器上可能已有对应补丁文件，物理删除会让它们无法还原。
-
-## 7. 校验与 AI 审核
-
-### 7.1 确定性校验（不通过则拒绝保存）
-
-- `key`、`name`、`aliases` 全表唯一（含与停用条目比对）
-- `key` / `table_name` / `field_name` 符合标识符规则
-- `aliases` 是数组且非单字符串
-- `scenarios` 是数字数组
-
-### 7.2 AI 审核（建议，不阻断）
-
-| 检查 | 输出 |
-| --- | --- |
-| 字段说明与字段名是否自洽 | 一致 / 疑似不一致 + 理由 |
-| 是否像已有条目的重复描述 | 与哪个 key 疑似重复 |
-| 侧别建议 | 客户端 / 服务端 / 双端，仅供记录到 `notes` |
-
-AI 只读取条目元数据，**不输出 Lua、不决定执行**。审核结论显示在网页上，由人决定是否继续保存。
-
-## 8. 同步链
-
-保存后自动执行：
-
-```text
-python tools/sync_hotfix_planner_catalog.py --write
-python tools/generate_runner_manifest.py
-```
-
-生成：
-
-1. catalog 模式 O 的生效路径白名单（正则）
-2. catalog 的中文名 / 别名路由表
-3. `deployment/gs1/muliu_runner_manifest.json`（候选 artifact）
-
-## 9. 实施清单
-
-| # | 项 | 涉及 |
-| --- | --- | --- |
-| 1 | 新 schema 的 `config/hotfix_thresholds.json`，24 条迁入 | 数据 |
-| 2 | `tools/auto_hotfix_registry.py` 改为读 JSON，API 不变 | 后端 |
-| 3 | `auto_hotfix_tool.py` 改为接受 `-t <table.field>`，不再查注册表 | **GS-1 一次性部署** |
-| 4 | catalog 合同：`-k` → `-t`，白名单正则同步 | 合同 |
-| 5 | 网页：列表 / 新增 / 编辑 / 停用 / 删除 + 校验 + AI 审核 | 前后端 |
-| 6 | 同步链集成 | 工具 |
-| 7 | `SUPPORTED_PATCH_TYPES`、脚本路径提入配置 | 配置分离 |
-| 8 | 测试：数据校验、同步、合同、工具行为 | 测试 |
-
-### 9.1 一次性部署成本
-
-第 3 项改 `auto_hotfix_tool.py` 的行为，**必须部署一次 GS-1**（跳板机手工覆盖）。这是本次改造唯一一次 GS-1 操作——之后加/改/停用阈值**永不碰 GS-1**。
-
-## 10. 不在本次范围
-
-- 不改起服 / 关服 / 清档等其它脚本的调用合同（模式 A–N 保持手写骨架）
-- 不自动部署 GS-1（保留人工确认）
-- 不改 Muliu Task 89 调用链
-- 不引入新的 Patch 类型
-
-## 11. 验证方式
-
-1. 网页新增一条测试阈值 → 白名单正则出现该生效路径 → 飞书能识别中文名 → 生成的 args 是 `-t <table.field>`
-2. 停用该条 → 白名单不再包含 → 飞书无法识别
-3. 网页新增**未经 GS-1 部署**的阈值 → 直接热更成功（验证「加完即用」）
-4. 确定性校验各负例均被拒绝
-5. 420+ 既有测试不回归
+1. 网页新增一条测试阈值 → 下一条飞书请求能识别中文名 → 确认卡片是 `-k <字段> --table <表>` 两步；
+2. 停用该条 → 飞书不再识别；
+3. 新增一条 GS-1 本地注册表里**没有**的字段 → 直接热更成功（验证「加完即用」）；
+4. 确定性校验各负例被拒绝；已执行条目不能删、不能改路径；
+5. 既有测试不回归，并在 Gateway 的 Python 3.9 上跑全量。
 
 > **边界：** 网页保存成功、白名单更新成功、热更脚本退出成功，**都不等于游戏内已生效**；客户端效果仍须实际观察。
+
+## 8. 不在本次范围
+
+- 不改其它脚本的调用合同；不改 Muliu Task 89 调用链；不引入新 Patch 类型；
+- 不改 GS-1 上的 `auto_hotfix_tool.py`（`SUPPORTED_PATCH_TYPES` 等 GS-1 侧硬编码留待以后单独评估）。

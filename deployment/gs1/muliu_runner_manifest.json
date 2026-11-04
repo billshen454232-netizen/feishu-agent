@@ -512,19 +512,25 @@
       "risk": "write"
     },
     {
-      "name": "hotfix-server-threshold",
+      "name": "hotfix-threshold-apply",
       "path": "/home/serverGeneralScript/auto_hotfix_tool.py",
       "args": [
         "-s",
         "{server_id}",
         "-k",
-        "{key}",
+        "{field}",
+        "--table",
+        "{table}",
         "-v",
-        "{value}"
+        "{value}",
+        "--patch-type",
+        "{patch_type}"
       ],
       "variables": {
-        "key": "(?:auto_join_team_min_limit|capital_city_extra_quota|faction_building_member_limit|faction_building_palace_level|faction_swap_team_member_min|faction_team_show_member_limit|final_default_open_scenario_limit|found_nation_reward_num_limit|hard_recycle_player_limit|one_city_max_main_city_num|rank_quota|soft_recycle_player_limit|team_mini_choose_region_group|team_reward_member_count|union_impeach_min|union_impeach_power_min|union_impeach_power_rank|union_max_member_init|union_max_member_limit|union_merge_min_member|union_rage_min_level|union_rage_min_member|union_token_least_member|week_suppress_camp_success_limit)",
+        "field": "[A-Za-z_][A-Za-z0-9_]{0,63}",
+        "patch_type": "avatar|battle|center|client_account|client_avatar|common|login|scene|test|union|unionmirror",
         "server_id": "[0-9]{3,8}",
+        "table": "[A-Za-z_][A-Za-z0-9_]{0,63}",
         "value": "[0-9]{1,16}"
       },
       "runner": [
@@ -539,10 +545,10 @@
         "-s",
         "{server_id}",
         "--cleanup-legacy",
-        "{key}"
+        "{field}"
       ],
       "variables": {
-        "key": "(?:auto_join_team_min_limit|capital_city_extra_quota|faction_building_member_limit|faction_building_palace_level|faction_swap_team_member_min|faction_team_show_member_limit|final_default_open_scenario_limit|found_nation_reward_num_limit|hard_recycle_player_limit|one_city_max_main_city_num|rank_quota|soft_recycle_player_limit|team_mini_choose_region_group|team_reward_member_count|union_impeach_min|union_impeach_power_min|union_impeach_power_rank|union_max_member_init|union_max_member_limit|union_merge_min_member|union_rage_min_level|union_rage_min_member|union_token_least_member|week_suppress_camp_success_limit)",
+        "field": "[A-Za-z_][A-Za-z0-9_]{0,63}",
         "server_id": "[0-9]{3,8}"
       },
       "runner": [
@@ -557,35 +563,11 @@
         "-s",
         "{server_id}",
         "--restore-auto",
-        "{key}"
+        "{field}"
       ],
       "variables": {
-        "key": "(?:auto_join_team_min_limit|capital_city_extra_quota|faction_building_member_limit|faction_building_palace_level|faction_swap_team_member_min|faction_team_show_member_limit|final_default_open_scenario_limit|found_nation_reward_num_limit|hard_recycle_player_limit|one_city_max_main_city_num|rank_quota|soft_recycle_player_limit|team_mini_choose_region_group|team_reward_member_count|union_impeach_min|union_impeach_power_min|union_impeach_power_rank|union_max_member_init|union_max_member_limit|union_merge_min_member|union_rage_min_level|union_rage_min_member|union_token_least_member|week_suppress_camp_success_limit)",
+        "field": "[A-Za-z_][A-Za-z0-9_]{0,63}",
         "server_id": "[0-9]{3,8}"
-      },
-      "runner": [
-        "python3.7"
-      ],
-      "risk": "write"
-    },
-    {
-      "name": "hotfix-server-threshold-with-patch-type",
-      "path": "/home/serverGeneralScript/auto_hotfix_tool.py",
-      "args": [
-        "-s",
-        "{server_id}",
-        "-k",
-        "{key}",
-        "-v",
-        "{value}",
-        "--patch-type",
-        "{patch_type}"
-      ],
-      "variables": {
-        "key": "(?:auto_join_team_min_limit|capital_city_extra_quota|faction_building_member_limit|faction_building_palace_level|faction_swap_team_member_min|faction_team_show_member_limit|final_default_open_scenario_limit|found_nation_reward_num_limit|hard_recycle_player_limit|one_city_max_main_city_num|rank_quota|soft_recycle_player_limit|team_mini_choose_region_group|team_reward_member_count|union_impeach_min|union_impeach_power_min|union_impeach_power_rank|union_max_member_init|union_max_member_limit|union_merge_min_member|union_rage_min_level|union_rage_min_member|union_token_least_member|week_suppress_camp_success_limit)",
-        "patch_type": "avatar|battle|center|client_account|client_avatar|common|login|scene|test|union|unionmirror",
-        "server_id": "[0-9]{3,8}",
-        "value": "[0-9]{1,16}"
       },
       "runner": [
         "python3.7"

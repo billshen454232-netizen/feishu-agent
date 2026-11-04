@@ -275,17 +275,15 @@ async def test_targeted_live_scenario_query_uses_basic_info_contract(user_text):
         ("给 5010 服热更战队交换人数为 1", "faction_swap_team_member_min"),
     ],
 )
-async def test_production_catalog_exposes_generated_chinese_hotfix_routes(user_text, key):
+async def test_production_catalog_exposes_generated_chinese_hotfix_routes(tmp_path, user_text, key):
     from pathlib import Path
 
+    from src.hotfix_thresholds import HotfixPlannerCatalog, ThresholdStore
+
     catalog_path = Path(__file__).parents[1] / "config" / "muliu_script_catalog.md"
-
-    class ProductionCatalog:
-        def read(self):
-            return catalog_path.read_text(encoding="utf-8")
-
-        def read_call_contracts(self):
-            return parse_call_contracts(self.read())
+    thresholds = ThresholdStore(tmp_path / "db.sqlite3")
+    thresholds.initialize()
+    ProductionCatalog = lambda: HotfixPlannerCatalog(catalog_path, thresholds)  # noqa: E731 - Gateway planner view
 
     response = json.dumps({
         "kind": "operation",

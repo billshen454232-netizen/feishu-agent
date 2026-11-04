@@ -76,5 +76,5 @@
 ## 维护规则
 
 - 本表只记**证据与来源**，不维护机器人执行许可——唯一许可是 [config/muliu_script_catalog.md](../config/muliu_script_catalog.md)。
-- key / 中文名 / Lua 目标以 [tools/auto_hotfix_registry.py](../tools/auto_hotfix_registry.py) 为准，不在此复制维护。
+- key / 中文名 / Lua 目标以 Gateway 热更阈值注册表（网页 `/thresholds`）为准，不在此复制维护。
 - 需求来源以原始 Excel `游戏服改配置.xlsx` 为准；`docs/hotfix_thresholds_excel_export.json` 是本地导出副本。

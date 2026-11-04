@@ -335,36 +335,12 @@
   - `<patch_type>`：仅在明确指定类型时填写，只允许 `avatar`、`battle`、`center`、`client_account`、`client_avatar`、`common`、`login`、`scene`、`test`、`union`、`unionmirror`。类型决定远端目录和清单 `patch_type`，不能填写路径或任意文本。
 - **清理与还原规则**：执行前按服号和字段精确筛选清单中的自动 Patch，先备份清单；清理旧版只处理历史 `client_avatar/auto_patch_...` 文件，完整还原才会移除该字段的所有自动 Patch。两种动作都会更新清单、删除对应自动 `.lua` 文件并重新触发热更。
 - **远端影响**：生成、清理或还原 Patch 都会修改目标服运行时配置，高风险操作，必须群内卡片确认。
+- **两段式合同**：计划里只写 `-k <key>` 形态（上方模板）。Gateway 校验 key 已登记且启用后，确定性展开为执行形态 `-k <真实字段名> --table <表名> -v <value> --patch-type <类型>`（不说侧别时展开成 `common` + `client_avatar` 两步），清理 / 还原展开为真实字段名；文件末尾的机器合同登记的是执行形态。不要自己输出执行形态。
 
 <!-- HOTFIX_THRESHOLD_REGISTRY:BEGIN -->
-#### 已登记热更阈值中文路由（自动生成）
+#### 已登记热更阈值中文路由（运行时生成）
 
-> 唯一来源：`tools/auto_hotfix_registry.py`。仅本表中的中文标准名和别名可以映射到对应 `-k`；不得按相近词义创建别名。
-
-- 中文标准名：`弹劾发起同盟人数检查`；别名：`弹劾人数`、`弹劾发起同盟人数`；执行：`-k union_impeach_min`；Patch 类型：`common` + `client_avatar`
-- 中文标准名：`弹劾发起者繁荣度检查`；执行：`-k union_impeach_power_min`；Patch 类型：`common` + `client_avatar`
-- 中文标准名：`弹劾发起者同盟繁荣度排名要求`；执行：`-k union_impeach_power_rank`；Patch 类型：`common` + `client_avatar`
-- 中文标准名：`同盟精锐AI大营人数要求`；执行：`-k union_rage_min_member`；Patch 类型：`common` + `client_avatar`
-- 中文标准名：`同盟精锐AI大营等级`；执行：`-k union_rage_min_level`；Patch 类型：`common` + `client_avatar`
-- 中文标准名：`同盟令获取同盟人数阈值`；别名：`同盟令人数`；执行：`-k union_token_least_member`；Patch 类型：`common` + `client_avatar`
-- 中文标准名：`同盟初始人数上限`；执行：`-k union_max_member_init`；Patch 类型：`common` + `client_avatar`
-- 中文标准名：`同盟人数最大上限`；执行：`-k union_max_member_limit`；Patch 类型：`common` + `client_avatar`
-- 中文标准名：`合盟人数限制`；执行：`-k union_merge_min_member`；Patch 类型：`common` + `client_avatar`
-- 中文标准名：`S7烽火台和黄天纸马开启人数限制`；别名：`S7专属建筑开启人数`、`S7 专属建筑开启人数`；执行：`-k faction_building_member_limit`；Patch 类型：`common` + `client_avatar`
-- 中文标准名：`S7专属建筑宫殿等级限制`；执行：`-k faction_building_palace_level`；Patch 类型：`common` + `client_avatar`
-- 中文标准名：`黄巾县域落城上限`；执行：`-k one_city_max_main_city_num`；Patch 类型：`common` + `client_avatar`
-- 中文标准名：`国都/州府额外霸业名额`；别名：`霸业名额`、`国都霸业名额`、`州府霸业名额`；执行：`-k capital_city_extra_quota`；Patch 类型：`common` + `client_avatar`
-- 中文标准名：`霸业名额服务端字段`；执行：`-k rank_quota`；Patch 类型：`common` + `client_avatar`
-- 中文标准名：`战队选边人数`；执行：`-k team_mini_choose_region_group`；Patch 类型：`common` + `client_avatar`
-- 中文标准名：`散人匹配战队人数阈值`；执行：`-k auto_join_team_min_limit`；Patch 类型：`common` + `client_avatar`
-- 中文标准名：`阵营预选战队人数显示阈值`；别名：`剧本预选州战队人数显示阈值`、`预选州战队人数显示阈值`；执行：`-k faction_team_show_member_limit`；Patch 类型：`common` + `client_avatar`
-- 中文标准名：`战队交换人数`；别名：`战队交换人数阈值`；执行：`-k faction_swap_team_member_min`；Patch 类型：`common` + `client_avatar`
-- 中文标准名：`跨赛季组队成团人数阈值`；执行：`-k team_reward_member_count`；Patch 类型：`common` + `client_avatar`
-- 中文标准名：`自选剧本人数最低限制`；执行：`-k final_default_open_scenario_limit`；Patch 类型：`common` + `client_avatar`
-- 中文标准名：`俸禄发放人数阈值`；执行：`-k week_suppress_camp_success_limit`；Patch 类型：`common` + `client_avatar`
-- 中文标准名：`软回收最低落堡人数要求`；执行：`-k soft_recycle_player_limit`；Patch 类型：`common` + `client_avatar`
-- 中文标准名：`硬回收启动注册人数`；执行：`-k hard_recycle_player_limit`；Patch 类型：`common` + `client_avatar`
-- 中文标准名：`虎视中原立国活动人数`；执行：`-k found_nation_reward_num_limit`；Patch 类型：`common` + `client_avatar`
+> 本区块由 Gateway 在每次规划时用热更阈值注册表（`/thresholds` 页面）实时替换；仓库里的静态文件不登记任何阈值。
 <!-- HOTFIX_THRESHOLD_REGISTRY:END -->
 
 标准计划示例：
@@ -444,7 +420,10 @@
       },
       "runner": "bash",
       "risk": "read",
-      "route_scopes": ["cn", "overseas"]
+      "route_scopes": [
+        "cn",
+        "overseas"
+      ]
     },
     {
       "name": "basic-account-season-history",
@@ -855,20 +834,26 @@
       "risk": "write"
     },
     {
-      "name": "hotfix-server-threshold",
+      "name": "hotfix-threshold-apply",
       "path": "/home/serverGeneralScript/auto_hotfix_tool.py",
       "args": [
         "-s",
         "{server_id}",
         "-k",
-        "{key}",
+        "{field}",
+        "--table",
+        "{table}",
         "-v",
-        "{value}"
+        "{value}",
+        "--patch-type",
+        "{patch_type}"
       ],
       "variables": {
         "server_id": "[0-9]{3,8}",
-        "key": "(?:auto_join_team_min_limit|capital_city_extra_quota|faction_building_member_limit|faction_building_palace_level|faction_swap_team_member_min|faction_team_show_member_limit|final_default_open_scenario_limit|found_nation_reward_num_limit|hard_recycle_player_limit|one_city_max_main_city_num|rank_quota|soft_recycle_player_limit|team_mini_choose_region_group|team_reward_member_count|union_impeach_min|union_impeach_power_min|union_impeach_power_rank|union_max_member_init|union_max_member_limit|union_merge_min_member|union_rage_min_level|union_rage_min_member|union_token_least_member|week_suppress_camp_success_limit)",
-        "value": "[0-9]{1,16}"
+        "field": "[A-Za-z_][A-Za-z0-9_]{0,63}",
+        "table": "[A-Za-z_][A-Za-z0-9_]{0,63}",
+        "value": "[0-9]{1,16}",
+        "patch_type": "avatar|battle|center|client_account|client_avatar|common|login|scene|test|union|unionmirror"
       },
       "runner": "python3.7",
       "risk": "write"
@@ -880,11 +865,11 @@
         "-s",
         "{server_id}",
         "--cleanup-legacy",
-        "{key}"
+        "{field}"
       ],
       "variables": {
         "server_id": "[0-9]{3,8}",
-        "key": "(?:auto_join_team_min_limit|capital_city_extra_quota|faction_building_member_limit|faction_building_palace_level|faction_swap_team_member_min|faction_team_show_member_limit|final_default_open_scenario_limit|found_nation_reward_num_limit|hard_recycle_player_limit|one_city_max_main_city_num|rank_quota|soft_recycle_player_limit|team_mini_choose_region_group|team_reward_member_count|union_impeach_min|union_impeach_power_min|union_impeach_power_rank|union_max_member_init|union_max_member_limit|union_merge_min_member|union_rage_min_level|union_rage_min_member|union_token_least_member|week_suppress_camp_success_limit)"
+        "field": "[A-Za-z_][A-Za-z0-9_]{0,63}"
       },
       "runner": "python3.7",
       "risk": "write"
@@ -896,33 +881,11 @@
         "-s",
         "{server_id}",
         "--restore-auto",
-        "{key}"
+        "{field}"
       ],
       "variables": {
         "server_id": "[0-9]{3,8}",
-        "key": "(?:auto_join_team_min_limit|capital_city_extra_quota|faction_building_member_limit|faction_building_palace_level|faction_swap_team_member_min|faction_team_show_member_limit|final_default_open_scenario_limit|found_nation_reward_num_limit|hard_recycle_player_limit|one_city_max_main_city_num|rank_quota|soft_recycle_player_limit|team_mini_choose_region_group|team_reward_member_count|union_impeach_min|union_impeach_power_min|union_impeach_power_rank|union_max_member_init|union_max_member_limit|union_merge_min_member|union_rage_min_level|union_rage_min_member|union_token_least_member|week_suppress_camp_success_limit)"
-      },
-      "runner": "python3.7",
-      "risk": "write"
-    },
-    {
-      "name": "hotfix-server-threshold-with-patch-type",
-      "path": "/home/serverGeneralScript/auto_hotfix_tool.py",
-      "args": [
-        "-s",
-        "{server_id}",
-        "-k",
-        "{key}",
-        "-v",
-        "{value}",
-        "--patch-type",
-        "{patch_type}"
-      ],
-      "variables": {
-        "server_id": "[0-9]{3,8}",
-        "key": "(?:auto_join_team_min_limit|capital_city_extra_quota|faction_building_member_limit|faction_building_palace_level|faction_swap_team_member_min|faction_team_show_member_limit|final_default_open_scenario_limit|found_nation_reward_num_limit|hard_recycle_player_limit|one_city_max_main_city_num|rank_quota|soft_recycle_player_limit|team_mini_choose_region_group|team_reward_member_count|union_impeach_min|union_impeach_power_min|union_impeach_power_rank|union_max_member_init|union_max_member_limit|union_merge_min_member|union_rage_min_level|union_rage_min_member|union_token_least_member|week_suppress_camp_success_limit)",
-        "value": "[0-9]{1,16}",
-        "patch_type": "avatar|battle|center|client_account|client_avatar|common|login|scene|test|union|unionmirror"
+        "field": "[A-Za-z_][A-Za-z0-9_]{0,63}"
       },
       "runner": "python3.7",
       "risk": "write"

@@ -275,12 +275,13 @@ def test_production_catalog_accepts_ordered_registered_steps():
         ),
         (
             "/home/serverGeneralScript/auto_hotfix_tool.py",
-            ["-s", "5000", "-k", "capital_city_extra_quota", "-v", "1"],
+            ["-s", "5000", "-k", "capital_city_extra_quota", "--table", "rank_config", "-v", "1",
+             "--patch-type", "client_avatar"],
         ),
         (
             "/home/serverGeneralScript/auto_hotfix_tool.py",
             [
-                "-s", "5000", "-k", "capital_city_extra_quota", "-v", "1",
+                "-s", "5000", "-k", "capital_city_extra_quota", "--table", "rank_config", "-v", "1",
                 "--patch-type", "common",
             ],
         ),

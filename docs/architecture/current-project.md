@@ -148,21 +148,17 @@ awaiting_confirmation
 
 ## 6. 热更资料边界
 
-当前热更调用合同的机器人侧权威仍是：
+当前热更调用合同的机器人侧权威（2026-11-04 起）：
 
 ```text
-config/muliu_script_catalog.md
-→ tools/auto_hotfix_registry.py
-→ tools/sync_hotfix_planner_catalog.py
+Gateway SQLite 热更阈值注册表（网页 /thresholds 编辑，src/hotfix_thresholds.py）
+→ 每次规划实时生成 Planner 中文路由 + key 白名单（-k <key>）
+→ Gateway 确定性展开：-k <真实字段名> --table <表名> -v <值> --patch-type <类型>
+→ 静态 catalog 执行形态合同（Worker / 防火墙结构校验）
+→ /home/serverGeneralScript/auto_hotfix_tool.py（GS-1 现有版本，不需更新）
 ```
 
-`config/hotfix_thresholds.json` 与 `tools/hotfix_threshold_registry.py` 是已否决的旧 JSON 注册表方案遗留物：只在原开发机本地存在，被 `.gitignore` 忽略，不在仓库中，也不在 catalog 同步主链中。它们不得被表述为“当前唯一运行时来源”或“当前 fail-closed 的唯一执行白名单”；STEP 22 会用新格式另起实现。
-
-在统一两套注册表前：
-
-- 不得同时将两者称为唯一来源；
-- 不得仅凭 JSON 资料否定或扩大当前 catalog 已登记能力；
-- 每项热更仍须区分“调用链路成功”与“游戏内效果已验证”。
+`config/hotfix_thresholds.json` 与 `tools/hotfix_threshold_registry.py` 是已否决的旧 JSON 注册表方案遗留物（仅原开发机本地存在、被 `.gitignore` 忽略），不得被表述为当前来源。每项热更仍须区分“调用链路成功”与“游戏内效果已验证”。
 
 热更推进原则见 [docs/hotfix-execution-master-plan.md](../hotfix-execution-master-plan.md)。
 

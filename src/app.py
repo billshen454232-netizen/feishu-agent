@@ -18,6 +18,7 @@ from .access_auth import CloudflareAccessVerifier
 from .admin_app import AdminServer, create_admin_app
 from .clear_notifier import ClearNotifier
 from .plan_board import PlanStore
+from .hotfix_thresholds import HotfixPlannerCatalog, ThresholdStore
 from .qa_library import QaService, QaStore
 from .event_handler import FeishuEventHandler
 from .execution_report import ExecutionReportStore
@@ -60,20 +61,25 @@ def create_app(config_path: str | Path = "config/config.json") -> FastAPI:
     feishu_client = FeishuClient(config.feishu)
     job_queue = MessageJobQueue()
 
-    script_catalog = MuliuScriptCatalog(config.muliu.script_catalog_path)
+    threshold_store = ThresholdStore(config.job_queue.database_path)
+    threshold_store.initialize()
+    # The Planner sees hotfix keys from the live registry; executed plans use the static executable contracts.
+    script_catalog = HotfixPlannerCatalog(config.muliu.script_catalog_path, threshold_store)
+    executable_contracts = MuliuScriptCatalog(config.muliu.script_catalog_path).read_call_contracts()
     operation_planner = MuliuPlanner(
         ai_client=planning_ai_client,
         script_catalog=script_catalog,
         max_steps=config.muliu.max_steps,
+        plan_expander=threshold_store.expand_plan,
     )
     muliu_firewall = MuliuFirewall(
         config.muliu,
-        call_contracts=script_catalog.read_call_contracts(),
+        call_contracts=executable_contracts,
     )
     muliu_executor = MuliuExecutor(config.muliu) if config.runtime.role == "local" else None
     route_resolver = MuliuPlanRouteResolver(
         config.execution_interpretation.server_environments_path,
-        script_catalog.read_call_contracts(),
+        executable_contracts,
     )
     script_knowledge_base = None
     if config.script_knowledge.enabled:
@@ -159,7 +165,14 @@ def create_app(config_path: str | Path = "config/config.json") -> FastAPI:
             plan_store = PlanStore(config.job_queue.database_path)
             plan_store.initialize()
             admin_server = AdminServer(
-                create_admin_app(report_store, access_verifier=verifier, qa_service=admin_qa, plan_store=plan_store),
+                create_admin_app(
+                    report_store,
+                    access_verifier=verifier,
+                    qa_service=admin_qa,
+                    plan_store=plan_store,
+                    threshold_store=threshold_store,
+                    review_client=create_ai_client(config.ai_for("interpretation")),
+                ),
                 port=config.admin.port,
             )
             admin_server.start()

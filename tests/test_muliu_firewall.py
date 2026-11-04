@@ -170,8 +170,8 @@ def test_validates_hotfix_server_threshold_contract():
         steps=[
             MuliuStep(
                 path="/home/serverGeneralScript/auto_hotfix_tool.py",
-                args=["-s", "5010", "-k", "union_impeach_min", "-v", "1"],
-                description="热更 5010 服弹劾发起同盟人数阈值为 1",
+                args=["-s", "5010", "-k", "union_impeach_union_member_min", "--table", "union_config_setting", "-v", "1", "--patch-type", "client_avatar"],
+                description="热更 5010 服弹劾发起同盟人数阈值为 1（客户端）",
             )
         ],
     )
@@ -183,10 +183,7 @@ def test_validates_hotfix_server_threshold_contract():
         steps=[
             MuliuStep(
                 path="/home/serverGeneralScript/auto_hotfix_tool.py",
-                args=[
-                    "-s", "5010", "-k", "union_impeach_min", "-v", "1",
-                    "--patch-type", "common",
-                ],
+                args=["-s", "5010", "-k", "union_impeach_union_member_min", "--table", "union_config_setting", "-v", "1", "--patch-type", "common"],
                 description="以 common 类型热更 5010 服弹劾发起同盟人数阈值为 1",
             )
         ],
@@ -225,7 +222,7 @@ def test_validates_hotfix_server_threshold_contract():
         steps=[
             MuliuStep(
                 path="/home/serverGeneralScript/auto_hotfix_tool.py",
-                args=["-s", "5010; rm -rf /", "-k", "union_impeach_min", "-v", "1"],
+                args=["-s", "5010; rm -rf /", "-k", "union_impeach_union_member_min", "--table", "union_config_setting", "-v", "1", "--patch-type", "common"],
                 description="注入攻击",
             )
         ],
@@ -234,13 +231,13 @@ def test_validates_hotfix_server_threshold_contract():
         firewall.validate(invalid_plan)
 
     unknown_key_plan = MuliuPlan(
-        summary="未登记热更 key",
+        summary="Planner 形态不能直达执行",
         kind=MuliuPlanKind.OPERATION,
         steps=[
             MuliuStep(
                 path="/home/serverGeneralScript/auto_hotfix_tool.py",
                 args=["-s", "5010", "-k", "unknown_threshold", "-v", "1"],
-                description="尝试使用格式合法但未登记的 key",
+                description="key 形态必须先经 Gateway 注册表展开",
             )
         ],
     )
@@ -253,13 +250,22 @@ def test_validates_hotfix_server_threshold_contract():
         steps=[
             MuliuStep(
                 path="/home/serverGeneralScript/auto_hotfix_tool.py",
-                args=[
-                    "-s", "5010", "-k", "union_impeach_min", "-v", "1",
-                    "--patch-type", "../../etc",
-                ],
+                args=["-s", "5010", "-k", "union_impeach_union_member_min", "--table", "union_config_setting", "-v", "1", "--patch-type", "../../etc"],
                 description="尝试写入非白名单目录",
             )
         ],
     )
     with pytest.raises(MuliuFirewallError):
         firewall.validate(invalid_patch_type_plan)
+
+    for field, table in (("a.b", "t"), ("f", "t;rm"), ("f", "")):
+        with pytest.raises(MuliuFirewallError):
+            firewall.validate(MuliuPlan(
+                summary="生效路径必须是合法 Lua 标识符",
+                kind=MuliuPlanKind.OPERATION,
+                steps=[MuliuStep(
+                    path="/home/serverGeneralScript/auto_hotfix_tool.py",
+                    args=["-s", "5010", "-k", field, "--table", table, "-v", "1", "--patch-type", "common"],
+                    description="注入",
+                )],
+            ))

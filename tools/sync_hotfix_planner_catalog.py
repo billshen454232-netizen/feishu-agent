@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""同步当前热更 registry 到 Planner 静态资料和候选部署产物。
+"""同步环境映射到 Planner 静态资料，并派生候选部署产物。
 
-当前 catalog 同步主链使用 ``tools.auto_hotfix_registry``。JSON registry
-``config/hotfix_thresholds.json`` 尚未接入该主链，不能与其并称唯一来源。
+热更阈值不再经过本工具：中文路由与 key 白名单由 Gateway 热更阈值注册表
+（``src/hotfix_thresholds.py``，网页 ``/thresholds``）在每次规划时实时生成。
+``tools/auto_hotfix_registry.py`` 只作为 GS-1 部署件镜像到 ``knowledge/scripts/``。
 """
 
 from __future__ import print_function
@@ -18,7 +19,6 @@ if str(REPOSITORY_ROOT) not in sys.path:
 
 from src.muliu_script_catalog import MuliuScriptCatalog
 from src.server_environments import ServerEnvironments, ServerEnvironmentsError
-from tools.auto_hotfix_registry import hotfix_key_pattern, render_planner_catalog_section
 
 
 DEFAULT_CATALOG_PATH = REPOSITORY_ROOT / "config" / "muliu_script_catalog.md"
@@ -27,11 +27,8 @@ DEFAULT_REGISTRY_PATH = REPOSITORY_ROOT / "tools" / "auto_hotfix_registry.py"
 DEFAULT_REGISTRY_MIRROR_PATH = REPOSITORY_ROOT / "knowledge" / "scripts" / "auto_hotfix_registry.py"
 DEFAULT_MANIFEST_PATH = REPOSITORY_ROOT / "deployment" / "gs1" / "muliu_runner_manifest.json"
 
-ROUTING_BEGIN = "<!-- HOTFIX_THRESHOLD_REGISTRY:BEGIN -->"
-ROUTING_END = "<!-- HOTFIX_THRESHOLD_REGISTRY:END -->"
 ENVIRONMENT_BEGIN = "<!-- ENVIRONMENT_MAPPING:BEGIN -->"
 ENVIRONMENT_END = "<!-- ENVIRONMENT_MAPPING:END -->"
-BROAD_KEY_PATTERN = '"key": "[A-Za-z0-9_]{1,64}"'
 
 
 class HotfixCatalogSyncError(RuntimeError):
@@ -96,36 +93,18 @@ def render_environment_mapping_section(environments):
 
 
 def render_catalog(catalog_text, environment_path=DEFAULT_ENVIRONMENT_PATH):
-    """Render generated environment and hotfix registry sections into the catalog."""
+    """Render the generated environment mapping section into the catalog."""
     try:
         environments = ServerEnvironments.load(environment_path)
     except ServerEnvironmentsError as exc:
         raise HotfixCatalogSyncError("环境注册表无效：{}".format(exc)) from exc
-    catalog_text = _replace_marked_block(
+    return _replace_marked_block(
         catalog_text,
         ENVIRONMENT_BEGIN,
         ENVIRONMENT_END,
         render_environment_mapping_section(environments),
         "环境映射",
     )
-
-    rendered = _replace_marked_block(
-        catalog_text,
-        ROUTING_BEGIN,
-        ROUTING_END,
-        render_planner_catalog_section(),
-        "热更注册表",
-    )
-
-    strict_key_pattern = '"key": "{}"'.format(hotfix_key_pattern())
-    generated_pattern_count = rendered.count(BROAD_KEY_PATTERN) + rendered.count(strict_key_pattern)
-    if generated_pattern_count != 4:
-        raise HotfixCatalogSyncError(
-            "热更调用合同中必须恰有 4 个受控 key 正则；当前为 {}".format(
-                generated_pattern_count
-            )
-        )
-    return rendered.replace(BROAD_KEY_PATTERN, strict_key_pattern)
 
 
 def expected_artifacts(catalog_path=DEFAULT_CATALOG_PATH, environment_path=DEFAULT_ENVIRONMENT_PATH):
@@ -166,7 +145,7 @@ def write_artifacts(catalog_path=DEFAULT_CATALOG_PATH, environment_path=DEFAULT_
 
 def main():
     parser = argparse.ArgumentParser(
-        description="同步当前热更 registry 到 Planner catalog 与候选 manifest。"
+        description="同步环境映射到 Planner catalog，并派生候选 manifest。"
     )
     parser.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG_PATH)
     parser.add_argument("--environments", type=Path, default=DEFAULT_ENVIRONMENT_PATH)
