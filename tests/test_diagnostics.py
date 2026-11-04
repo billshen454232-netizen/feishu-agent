@@ -25,3 +25,12 @@ async def test_install_is_a_no_op_without_posix_signals(monkeypatch):
     monkeypatch.delattr(signal, "SIGUSR1", raising=False)
 
     assert install_stack_dump_signals() is False
+
+
+@pytest.mark.skipif(not hasattr(signal, "SIGUSR1"), reason="POSIX signals only")
+def test_install_is_a_no_op_off_the_main_thread():
+    class OffMainThreadLoop:  # uvloop's behaviour when the lifespan runs in a test client's worker thread
+        def add_signal_handler(self, *_args):
+            raise ValueError("add_signal_handler() can only be called from the main thread")
+
+    assert install_stack_dump_signals(OffMainThreadLoop()) is False

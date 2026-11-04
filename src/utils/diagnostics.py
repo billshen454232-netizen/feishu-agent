@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 
 def install_stack_dump_signals(loop: asyncio.AbstractEventLoop | None = None) -> bool:
-    """Register the dump signals; returns False on platforms without SIGUSR1/SIGUSR2 (Windows)."""
+    """Register the dump signals; returns False without SIGUSR1/SIGUSR2 (Windows) or off the main thread."""
     usr1 = getattr(signal, "SIGUSR1", None)
     usr2 = getattr(signal, "SIGUSR2", None)
     if usr1 is None or usr2 is None:
@@ -27,7 +27,8 @@ def install_stack_dump_signals(loop: asyncio.AbstractEventLoop | None = None) ->
     target_loop = loop or asyncio.get_running_loop()
     try:
         target_loop.add_signal_handler(usr2, dump_asyncio_tasks)
-    except (NotImplementedError, RuntimeError):
+    except (NotImplementedError, RuntimeError, ValueError):
+        # ValueError: uvloop outside the main thread (e.g. a test client running the lifespan in a worker thread).
         return False
     return True
 
