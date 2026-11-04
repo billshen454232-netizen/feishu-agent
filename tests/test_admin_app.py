@@ -1,3 +1,5 @@
+import json
+
 from fastapi.testclient import TestClient
 
 from src.admin_app import create_admin_app
@@ -188,3 +190,89 @@ def test_admin_server_does_not_touch_process_logging(tmp_path):
     AdminServer(create_admin_app(_store(tmp_path)), port=1)
 
     assert {name: (logging.getLogger(name).level, list(logging.getLogger(name).handlers)) for name in names} == before
+
+
+# ---------------------------------------------------------------- Q&A review
+
+
+class _QaAI:
+    def __init__(self):
+        self.prompts = []
+
+    async def generate(self, history, prompt):
+        self.prompts.append(prompt)
+        if "输出一个 JSON 对象" in prompt:
+            return json.dumps({
+                "canonical_question": "对外开服和普通开服的区别", "category": "开服", "keywords": ["对外", "op"],
+                "scripts": ["control_is_pub.sh"],
+                "doc_fixes": [{"doc_path": "knowledge/docs/control_is_pub.md", "original_excerpt": "op：外部体验开服。",
+                               "proposed_excerpt": "op：对外开服。", "reason": "补充说法"}],
+            }, ensure_ascii=False)
+        return "修正后的回答"
+
+
+def _qa_client(tmp_path):
+    from src.qa_library import QaService, QaStore
+
+    docs = tmp_path / "kb" / "docs"
+    docs.mkdir(parents=True)
+    (docs / "control_is_pub.md").write_text("# control_is_pub.sh\n\nop：外部体验开服。\n", encoding="utf-8")
+    qa_store = QaStore(tmp_path / "db.sqlite3")
+    qa_store.initialize()
+    qa_store.record("om_q", "对外和开服啥区别", "错误回答", sources={"docs": ["knowledge/docs/control_is_pub.md"], "archives": []},
+                    model="luna", elapsed_ms=800)
+    ai = _QaAI()
+    service = QaService(answer_client=ai, curation_client=ai, capability_context=lambda: "注册表", catalog_text=lambda: "c",
+                        store=qa_store, knowledge_root=tmp_path / "kb")
+    return _client_with(create_admin_app(_store(tmp_path), qa_service=service)), qa_store, ai
+
+
+def _client_with(app):
+    return TestClient(app, base_url="http://127.0.0.1:8901")
+
+
+def test_qa_review_correct_archive_and_doc_fix_flow(tmp_path):
+    client, qa_store, ai = _qa_client(tmp_path)
+
+    summary = client.get("/api/summary").json()
+    assert summary["qa"]["pending"] == 1 and summary["doc_fixes"]["pending"] == 0
+    listed = client.get("/api/qa?status=pending").json()
+    assert listed["total"] == 1 and listed["items"][0]["answer"] == "错误回答"
+
+    corrected = client.post("/api/qa/om_q/correct", headers=HEADERS, json={"correction": "对外是 op 模式"}).json()
+    assert corrected["round"] == 1 and corrected["answer"] == "修正后的回答"
+    assert "对外是 op 模式" in ai.prompts[-1]
+    assert client.get("/api/qa?status=correcting").json()["items"][0]["revisions"][0]["answer"] == "修正后的回答"
+
+    draft = client.post("/api/qa/om_q/draft", headers=HEADERS).json()
+    assert draft["answer"] == "修正后的回答" and len(draft["doc_fixes"]) == 1
+
+    archived = client.post("/api/qa/om_q/archive", headers=HEADERS, json=dict(draft, doc_fixes=draft["doc_fixes"])).json()
+    assert archived == {"archive_id": 1, "doc_fixes": 1}
+    assert qa_store.get_record("om_q")["status"] == "archived"
+    library = client.get("/api/qa-archive?status=active").json()
+    assert library["items"][0]["canonical_question"] == "对外开服和普通开服的区别" and library["items"][0]["stale"] is False
+
+    fix = client.get("/api/doc-fixes?status=pending").json()["items"][0]
+    assert client.put("/api/doc-fixes/{}".format(fix["suggestion_id"]), headers=HEADERS,
+                      json={"status": "accepted", "proposed_excerpt": "op：对外（外部体验）开服。"}).status_code == 200
+    assert client.put("/api/doc-fixes/{}".format(fix["suggestion_id"]), headers=HEADERS, json={"status": "applied"}).status_code == 400
+    assert client.get("/api/doc-fixes?status=accepted").json()["items"][0]["proposed_excerpt"] == "op：对外（外部体验）开服。"
+
+    assert client.put("/api/qa-archive/1", headers=HEADERS, json={"status": "retired"}).status_code == 200
+    assert client.get("/api/qa-archive?status=retired").json()["total"] == 1
+    assert client.delete("/api/qa-archive/1", headers=HEADERS).status_code == 200
+
+
+def test_qa_dismiss_restore_and_validation(tmp_path):
+    client, qa_store, _ai = _qa_client(tmp_path)
+
+    assert client.post("/api/qa/om_q/correct", headers=HEADERS, json={"correction": " "}).status_code == 400
+    assert client.post("/api/qa/om_x/correct", headers=HEADERS, json={"correction": "x"}).status_code == 404
+    client.post("/api/qa/om_q/dismiss", headers=HEADERS)
+    assert qa_store.get_record("om_q")["status"] == "dismissed"
+    assert client.post("/api/qa/om_q/correct", headers=HEADERS, json={"correction": "x"}).status_code == 409
+    client.post("/api/qa/om_q/restore", headers=HEADERS)
+    assert qa_store.get_record("om_q")["status"] == "pending"
+    assert client.post("/api/qa/om_q/archive", headers=HEADERS, json={"canonical_question": "", "answer": "a"}).status_code == 400
+    assert "问答" in client.get("/").text and "文档修正" in client.get("/").text

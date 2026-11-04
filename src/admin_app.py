@@ -16,6 +16,20 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse
 
 from .access_auth import AccessDenied, CloudflareAccessVerifier
+from .qa_library import (
+    ARCHIVE_ACTIVE,
+    ARCHIVE_STATUSES,
+    CATEGORIES,
+    FIX_ACCEPTED,
+    FIX_IGNORED,
+    FIX_PENDING,
+    FIX_STATUSES,
+    QA_ARCHIVED,
+    QA_DISMISSED,
+    QA_PENDING,
+    QA_STATUSES,
+    QaService,
+)
 from .execution_report import (
     PATTERN_CANDIDATE,
     PATTERN_OUTCOMES,
@@ -39,7 +53,12 @@ PROXY_HEADER = "x-admin-proxy"
 PROXY_HEADER_VALUE = "cloudflare-access"
 
 
-def create_admin_app(store: ExecutionReportStore, *, access_verifier: CloudflareAccessVerifier | None = None) -> FastAPI:
+def create_admin_app(
+    store: ExecutionReportStore,
+    *,
+    access_verifier: CloudflareAccessVerifier | None = None,
+    qa_service: QaService | None = None,
+) -> FastAPI:
     app = FastAPI(title="执行结果模板审批", docs_url=None, redoc_url=None, openapi_url=None)
 
     @app.middleware("http")
@@ -67,7 +86,12 @@ def create_admin_app(store: ExecutionReportStore, *, access_verifier: Cloudflare
 
     @app.get("/api/summary")
     async def summary() -> dict[str, Any]:
-        return {"counts": store.count_patterns(), "read_success_mode": store.read_success_mode()}
+        result: dict[str, Any] = {"counts": store.count_patterns(), "read_success_mode": store.read_success_mode()}
+        if qa_service is not None and qa_service.store is not None:
+            result["qa"] = qa_service.store.count_records()
+            result["qa_archive"] = qa_service.store.count_archive()
+            result["doc_fixes"] = qa_service.store.count_doc_fixes()
+        return result
 
     @app.get("/api/patterns")
     async def list_patterns(status: str = PATTERN_CANDIDATE, page: int = 1, page_size: int = 20) -> dict[str, Any]:
@@ -146,7 +170,160 @@ def create_admin_app(store: ExecutionReportStore, *, access_verifier: Cloudflare
         logger.info("template review read_success_mode=%s operator=%s", mode, request.state.operator)
         return {"read_success_mode": mode}
 
+    if qa_service is not None and qa_service.store is not None:
+        _add_qa_routes(app, qa_service)
+
     return app
+
+
+def _add_qa_routes(app: FastAPI, qa: QaService) -> None:
+    """Q&A review: list, correct (AI re-answer), draft + confirm archive, archive library, doc fixes."""
+    qa_store = qa.store
+
+    def record_or_404(message_id: str) -> dict[str, Any]:
+        record = qa_store.get_record(message_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="not found")
+        record["revisions"] = qa_store.list_revisions(message_id)
+        return record
+
+    @app.get("/api/qa")
+    async def list_qa(status: str = QA_PENDING, page: int = 1, page_size: int = 20) -> dict[str, Any]:
+        if status not in QA_STATUSES:
+            raise HTTPException(status_code=400, detail="unknown status")
+        page, page_size = _paging(page, page_size)
+        items, total = qa_store.list_records(status, limit=page_size, offset=(page - 1) * page_size)
+        return {"items": items, "total": total, "page": page, "page_size": page_size}
+
+    @app.post("/api/qa/{message_id}/correct")
+    async def correct(message_id: str, payload: dict[str, Any], request: Request) -> dict[str, Any]:
+        correction = payload.get("correction")
+        if not isinstance(correction, str) or not correction.strip() or len(correction) > 2000:
+            raise HTTPException(status_code=400, detail="纠正说明需为 1-2000 字")
+        record = record_or_404(message_id)
+        if record["status"] not in {QA_PENDING, "correcting"}:
+            raise HTTPException(status_code=409, detail="该问答当前状态不能纠正")
+        corrections = [revision["correction"] for revision in record["revisions"]] + [correction.strip()]
+        try:
+            answer = await qa.reanswer(record, corrections)
+        except Exception as exc:  # noqa: BLE001 - surface AI trouble to the reviewer
+            logger.warning("qa reanswer failed message_id=%s error=%s", message_id, type(exc).__name__)
+            raise HTTPException(status_code=502, detail="AI 重新回答失败：{}".format(type(exc).__name__)) from exc
+        round_number = qa_store.add_revision(
+            message_id, correction.strip(), answer.text,
+            model=answer.model, elapsed_ms=answer.elapsed_ms, operator=request.state.operator,
+        )
+        logger.info("qa corrected message_id=%s round=%s operator=%s", message_id, round_number, request.state.operator)
+        return {"round": round_number, "answer": answer.text, "model": answer.model, "elapsed_ms": answer.elapsed_ms}
+
+    @app.post("/api/qa/{message_id}/draft")
+    async def draft(message_id: str) -> dict[str, Any]:
+        record = record_or_404(message_id)
+        final_answer = record["revisions"][-1]["answer"] if record["revisions"] else record["answer"]
+        try:
+            return await qa.draft_archive(record, final_answer, corrected=bool(record["revisions"]))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("qa archive draft failed message_id=%s error=%s", message_id, type(exc).__name__)
+            raise HTTPException(status_code=502, detail="AI 生成归档信息失败：{}".format(type(exc).__name__)) from exc
+
+    @app.post("/api/qa/{message_id}/archive")
+    async def archive(message_id: str, payload: dict[str, Any], request: Request) -> dict[str, Any]:
+        record = record_or_404(message_id)
+        question = str(payload.get("canonical_question", "")).strip()
+        answer = str(payload.get("answer", "")).strip()
+        category = str(payload.get("category", "通用"))
+        if not question or not answer or len(question) > 300 or len(answer) > 8000:
+            raise HTTPException(status_code=400, detail="标准问法与答案不能为空")
+        if category not in CATEGORIES:
+            raise HTTPException(status_code=400, detail="unknown category")
+        archive_id = qa_store.add_archive(
+            source_message_id=message_id,
+            canonical_question=question,
+            answer=answer,
+            category=category,
+            keywords=str(payload.get("keywords", ""))[:500],
+            scripts=str(payload.get("scripts", ""))[:300],
+            catalog_digest=qa.catalog_digest(),
+            operator=request.state.operator,
+        )
+        cited = set(record.get("sources", {}).get("docs", []))
+        fixes = 0
+        for fix in payload.get("doc_fixes") or []:
+            if not isinstance(fix, dict):
+                continue
+            path, original = str(fix.get("doc_path", "")), str(fix.get("original_excerpt", ""))
+            doc = qa._doc_file(path) if path in cited else None
+            if not doc or not original or doc.read_text(encoding="utf-8", errors="replace").count(original) != 1:
+                continue
+            qa_store.add_doc_fix(archive_id, path, original, str(fix.get("proposed_excerpt", "")),
+                                 str(fix.get("reason", ""))[:300])
+            fixes += 1
+        qa_store.set_record_status(message_id, QA_ARCHIVED)
+        logger.info("qa archived message_id=%s archive=%s fixes=%s operator=%s",
+                    message_id, archive_id, fixes, request.state.operator)
+        return {"archive_id": archive_id, "doc_fixes": fixes}
+
+    @app.post("/api/qa/{message_id}/dismiss")
+    async def dismiss(message_id: str) -> dict[str, str]:
+        record_or_404(message_id)
+        qa_store.set_record_status(message_id, QA_DISMISSED)
+        return {"status": QA_DISMISSED}
+
+    @app.post("/api/qa/{message_id}/restore")
+    async def restore(message_id: str) -> dict[str, str]:
+        record_or_404(message_id)
+        qa_store.set_record_status(message_id, QA_PENDING)
+        return {"status": QA_PENDING}
+
+    @app.get("/api/qa-archive")
+    async def list_archive(status: str = ARCHIVE_ACTIVE, page: int = 1, page_size: int = 20) -> dict[str, Any]:
+        if status not in ARCHIVE_STATUSES:
+            raise HTTPException(status_code=400, detail="unknown status")
+        page, page_size = _paging(page, page_size)
+        items, total = qa_store.list_archive(status, limit=page_size, offset=(page - 1) * page_size)
+        digest = qa.catalog_digest()
+        for item in items:
+            item["stale"] = bool(digest and item.get("catalog_digest") and item["catalog_digest"] != digest)
+        return {"items": items, "total": total, "page": page, "page_size": page_size}
+
+    @app.put("/api/qa-archive/{archive_id}")
+    async def edit_archive(archive_id: int, payload: dict[str, Any], request: Request) -> dict[str, str]:
+        try:
+            changed = qa_store.update_archive(archive_id, payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if not changed:
+            raise HTTPException(status_code=404, detail="not found")
+        logger.info("qa archive edited id=%s fields=%s operator=%s", archive_id, sorted(payload), request.state.operator)
+        return {"status": "ok"}
+
+    @app.delete("/api/qa-archive/{archive_id}")
+    async def delete_archive(archive_id: int, request: Request) -> dict[str, str]:
+        if not qa_store.delete_archive(archive_id):
+            raise HTTPException(status_code=404, detail="not found")
+        logger.info("qa archive deleted id=%s operator=%s", archive_id, request.state.operator)
+        return {"status": "deleted"}
+
+    @app.get("/api/doc-fixes")
+    async def list_doc_fixes(status: str = FIX_PENDING, page: int = 1, page_size: int = 20) -> dict[str, Any]:
+        if status not in FIX_STATUSES:
+            raise HTTPException(status_code=400, detail="unknown status")
+        page, page_size = _paging(page, page_size)
+        items, total = qa_store.list_doc_fixes(status, limit=page_size, offset=(page - 1) * page_size)
+        return {"items": items, "total": total, "page": page, "page_size": page_size}
+
+    @app.put("/api/doc-fixes/{suggestion_id}")
+    async def edit_doc_fix(suggestion_id: int, payload: dict[str, Any], request: Request) -> dict[str, str]:
+        status = payload.get("status")
+        proposed = payload.get("proposed_excerpt")
+        if status is not None and status not in {FIX_PENDING, FIX_ACCEPTED, FIX_IGNORED}:
+            raise HTTPException(status_code=400, detail="已回写状态只能由回写工具设置")
+        if proposed is not None and (not isinstance(proposed, str) or len(proposed) > 8000):
+            raise HTTPException(status_code=400, detail="invalid proposed_excerpt")
+        if not qa_store.update_doc_fix(suggestion_id, status=status, proposed_excerpt=proposed):
+            raise HTTPException(status_code=404, detail="not found")
+        logger.info("doc fix updated id=%s status=%s operator=%s", suggestion_id, status, request.state.operator)
+        return {"status": "ok"}
 
 
 def _paging(page: int, page_size: int) -> tuple[int, int]:
@@ -358,6 +535,41 @@ _INDEX_HTML = r"""<!doctype html>
   .state-box p { margin: 0 0 4px; }
   .state-box .hint { color: var(--ink-3); font-size: 13px; }
   .state-box.error { border-style: solid; border-color: #efc6c2; }
+  /* ---------- filters / Q&A / doc fixes ---------- */
+  .filters { display: flex; flex-wrap: wrap; gap: 6px; margin: -4px 0 14px; }
+  .chip {
+    padding: 4px 12px; border-radius: 14px; border: 1px solid var(--line); background: var(--panel);
+    color: var(--ink-2); font-size: 13px; cursor: pointer;
+  }
+  .chip[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+  .qa-question { font-size: 15px; font-weight: 600; margin: 8px 0 6px; }
+  .label { font-size: 12px; color: var(--ink-3); margin: 10px 0 4px; }
+  .prose {
+    white-space: pre-wrap; word-break: break-word; line-height: 1.7; font-size: 13px;
+    background: #f8fafb; border-radius: 4px; padding: 10px 12px; max-height: 360px; overflow: auto;
+  }
+  .rev { border-left: 3px solid var(--verdict); padding-left: 12px; margin-top: 12px; }
+  .rev blockquote { margin: 0; padding: 6px 10px; background: #fff7ed; border-radius: 4px; font-size: 13px; white-space: pre-wrap; }
+  .sources { font-size: 12px; color: var(--ink-3); margin-top: 6px; }
+  .badge { font-size: 12px; padding: 1px 8px; border-radius: 4px; }
+  .badge.ok { background: #e8f5ee; color: var(--ok); }
+  .badge.warn { background: #fff4e5; color: var(--verdict); }
+  .form-grid { display: grid; grid-template-columns: 110px 1fr; gap: 8px 12px; align-items: center; margin-top: 10px; }
+  .form-grid label { font-size: 12px; color: var(--ink-3); }
+  .form-grid input, .form-grid select, .panel-box textarea, .form-grid textarea {
+    width: 100%; padding: 6px 8px; border: 1px solid var(--line); border-radius: 4px; background: #fff;
+  }
+  .form-grid textarea, .panel-box textarea { min-height: 90px; resize: vertical; line-height: 1.6; }
+  .panel-box { margin-top: 12px; padding: 12px 14px; border: 1px dashed var(--line); border-radius: var(--radius); background: #fcfcfd; }
+  .panel-box .actions { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+  .diff-old { background: #fdecea; border-left: 3px solid var(--bad); }
+  .diff-new { background: #e8f5ee; border-left: 3px solid var(--ok); }
+  .fix-item { margin-top: 10px; }
+  textarea.fix-proposed, textarea.fix-new, textarea.correction {
+    width: 100%; min-height: 90px; resize: vertical; padding: 8px 10px; border: 1px solid var(--line); border-radius: 4px; background: #fff; line-height: 1.6;
+  }
+  .fix-item .fix-head { display: flex; gap: 8px; align-items: center; font-size: 13px; }
+  .row-actions { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
   .toast {
     position: fixed; right: 24px; bottom: 24px; max-width: 360px;
     background: var(--ink); color: #fff; padding: 10px 14px; border-radius: var(--radius); font-size: 13px;
@@ -392,6 +604,8 @@ _INDEX_HTML = r"""<!doctype html>
       <a href="#tab=candidate" data-tab="candidate">待审核 <span class="count" id="n-candidate">–</span></a>
       <a href="#tab=verified" data-tab="verified">可用模板 <span class="count" id="n-verified">–</span></a>
       <a href="#tab=executions" data-tab="executions">最近执行</a>
+      <a href="#tab=qa" data-tab="qa">问答 <span class="count" id="n-qa">–</span></a>
+      <a href="#tab=docfix" data-tab="docfix">文档修正 <span class="count" id="n-docfix">–</span></a>
     </nav>
   </div>
 </header>
@@ -407,6 +621,7 @@ _INDEX_HTML = r"""<!doctype html>
     <span class="stamp" id="stamp"></span>
     <button class="btn" id="refresh" title="重新加载当前列表">刷新</button>
   </div>
+  <div class="filters" id="filters" hidden></div>
   <div id="content" aria-live="polite"></div>
   <div class="pager" id="pager" hidden>
     <button class="btn" id="prev">上一页</button>
@@ -432,7 +647,22 @@ const EMPTY = {
   candidate: ["没有待审核的模板。", "新的失败经 AI 分析后会自动出现在这里。"],
   verified: ["还没有可用模板。", "在「待审核」里通过的模板会出现在这里。"],
   executions: ["还没有执行记录。", "在飞书群里执行一次操作后，这里会出现记录。"],
+  "qa:pending": ["没有待评审的问答。", "组员在群里问脚本、能力相关的问题后，回答会出现在这里。"],
+  "qa:correcting": ["没有纠正中的问答。", "在「待评审」里标记回答错误后会进入这里。"],
+  "qa:archive": ["归档库还是空的。", "评审确认或纠正后的问答会归档到这里，之后类似问题会参考它们回答。"],
+  "qa:retired": ["没有已下线的归档。", "下线的归档不再参与回答，可以随时恢复。"],
+  "qa:dismissed": ["没有标记为不归档的问答。", ""],
+  "qa:reused": ["还没有直接复用归档答案的问答。", "提问与归档的标准问法完全相同时，会直接回复归档答案。"],
+  "docfix:pending": ["没有待处理的文档修正建议。", "纠正过的问答归档时，会为它引用过的资料生成修改建议。"],
+  "docfix:accepted": ["没有已采纳、待回写的建议。", "采纳的建议由开发机回写到仓库，见下方说明。"],
+  "docfix:applied": ["还没有已回写的建议。", ""],
+  "docfix:ignored": ["没有已忽略的建议。", ""],
 };
+const QA_FILTERS = [["pending", "待评审"], ["correcting", "纠正中"], ["archive", "归档库"], ["retired", "已下线"], ["dismissed", "不归档"], ["reused", "直接复用"]];
+const FIX_FILTERS = [["pending", "待处理"], ["accepted", "已采纳"], ["applied", "已回写"], ["ignored", "已忽略"]];
+const CATEGORIES = ["开服", "关服", "清档", "合服", "热更", "配置", "查询", "通用"];
+const TABS = ["candidate", "verified", "executions", "qa", "docfix"];
+const DEFAULT_FILTER = { qa: "pending", docfix: "pending" };
 
 const $ = (s) => document.querySelector(s);
 const esc = (t) => String(t ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -444,15 +674,19 @@ const fmt = (ts) => {
 };
 const clock = () => { const d = new Date(); return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`; };
 
-let state = { tab: "candidate", page: 1 };
+let state = { tab: "candidate", filter: "", page: 1 };
 let total = 0;
 const dirty = new Set();
 // Client cache: switching tabs / pages reuses data until 刷新 or a change invalidates it.
 const cache = new Map();          // "tab:page" -> { data, at }
 let summaryCache = null;          // { data, at }
-const cacheKey = () => `${state.tab}:${state.page}`;
+const cacheKey = () => `${state.tab}:${state.filter}:${state.page}`;
 function invalidateTemplates() {
-  for (const key of [...cache.keys()]) if (!key.startsWith("executions:")) cache.delete(key);
+  for (const key of [...cache.keys()]) if (key.startsWith("candidate:") || key.startsWith("verified:")) cache.delete(key);
+  summaryCache = null;
+}
+function invalidateQa() {
+  for (const key of [...cache.keys()]) if (key.startsWith("qa:") || key.startsWith("docfix:")) cache.delete(key);
   summaryCache = null;
 }
 function invalidateAll() { cache.clear(); summaryCache = null; }
@@ -460,11 +694,14 @@ function invalidateAll() { cache.clear(); summaryCache = null; }
 function readHash() {
   const params = new URLSearchParams(location.hash.slice(1));
   const tab = params.get("tab");
-  state.tab = ["candidate", "verified", "executions"].includes(tab) ? tab : "candidate";
+  state.tab = TABS.includes(tab) ? tab : "candidate";
+  const filters = state.tab === "qa" ? QA_FILTERS : state.tab === "docfix" ? FIX_FILTERS : [];
+  const filter = params.get("filter");
+  state.filter = filters.some(([key]) => key === filter) ? filter : (DEFAULT_FILTER[state.tab] || "");
   state.page = Math.max(1, parseInt(params.get("page") || "1", 10) || 1);
 }
 function writeHash() {
-  const hash = `#tab=${state.tab}` + (state.page > 1 ? `&page=${state.page}` : "");
+  const hash = `#tab=${state.tab}` + (state.filter ? `&filter=${state.filter}` : "") + (state.page > 1 ? `&page=${state.page}` : "");
   if (location.hash !== hash) history.replaceState(null, "", hash);
 }
 
@@ -501,8 +738,9 @@ async function load({ force = false } = {}) {
   document.querySelectorAll("nav.tabs a").forEach((a) => {
     if (a.dataset.tab === state.tab) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
   });
-  const isTemplates = state.tab !== "executions";
+  const isTemplates = state.tab === "candidate" || state.tab === "verified";
   ["#select-all-wrap", "#batch-approve", "#batch-delete"].forEach((s) => { $(s).hidden = !isTemplates; });
+  renderFilters();
   $("#batch-approve").hidden = state.tab !== "candidate";
   $("#batch-revert").hidden = state.tab !== "verified";
   $("#select-all").checked = false;
@@ -515,14 +753,13 @@ async function load({ force = false } = {}) {
     const summary = summaryCache.data;
     $("#n-candidate").textContent = summary.counts.candidate;
     $("#n-verified").textContent = summary.counts.verified;
+    $("#n-qa").textContent = summary.qa ? summary.qa.pending : "–";
+    $("#n-docfix").textContent = summary.doc_fixes ? summary.doc_fixes.pending : "–";
     setMode(summary.read_success_mode);
     let entry = cached;
     if (!entry) {
-      const url = isTemplates
-        ? `/api/patterns?status=${state.tab}&page=${state.page}&page_size=${PAGE_SIZE}`
-        : `/api/executions?page=${state.page}&page_size=${PAGE_SIZE}`;
-      entry = { data: await api("GET", url), at: clock() };
-      const items = isTemplates ? entry.data.patterns : entry.data.executions;
+      entry = { data: await api("GET", listUrl()), at: clock() };
+      const items = entry.data.patterns || entry.data.executions || entry.data.items || [];
       if (!items.length && state.page > 1) { state.page -= 1; return load(); }
       cache.set(cacheKey(), entry);
     }
@@ -531,9 +768,15 @@ async function load({ force = false } = {}) {
       dirty.clear();
       renderTemplates(entry.data.patterns);
       $("#summary").textContent = `${state.tab === "candidate" ? "待审核" : "可用模板"} ${total} 条`;
-    } else {
+    } else if (state.tab === "executions") {
       renderExecutions(entry.data.executions);
       $("#summary").textContent = `最近执行 ${total} 条`;
+    } else if (state.tab === "qa") {
+      if (state.filter === "archive" || state.filter === "retired") renderArchive(entry.data.items); else renderQa(entry.data.items);
+      $("#summary").textContent = `问答：${QA_FILTERS.find(([k]) => k === state.filter)[1]} ${total} 条`;
+    } else {
+      renderDocFixes(entry.data.items);
+      $("#summary").textContent = `文档修正：${FIX_FILTERS.find(([k]) => k === state.filter)[1]} ${total} 条`;
     }
     renderPager();
     $("#stamp").textContent = `数据更新于 ${entry.at}`;
@@ -550,6 +793,256 @@ async function load({ force = false } = {}) {
     updateBatchButtons();
   }
 }
+
+function listUrl() {
+  const paging = `page=${state.page}&page_size=${PAGE_SIZE}`;
+  if (state.tab === "candidate" || state.tab === "verified") return `/api/patterns?status=${state.tab}&${paging}`;
+  if (state.tab === "executions") return `/api/executions?${paging}`;
+  if (state.tab === "qa") {
+    if (state.filter === "archive") return `/api/qa-archive?status=active&${paging}`;
+    if (state.filter === "retired") return `/api/qa-archive?status=retired&${paging}`;
+    return `/api/qa?status=${state.filter}&${paging}`;
+  }
+  return `/api/doc-fixes?status=${state.filter}&${paging}`;
+}
+
+function renderFilters() {
+  const filters = state.tab === "qa" ? QA_FILTERS : state.tab === "docfix" ? FIX_FILTERS : null;
+  const box = $("#filters");
+  box.hidden = !filters;
+  if (!filters) return;
+  box.innerHTML = filters.map(([key, label]) =>
+    `<button class="chip" data-filter="${key}" aria-pressed="${key === state.filter}">${label}</button>`).join("");
+}
+
+function emptyFor(key) {
+  const [title, hint] = EMPTY[key] || ["暂无内容。", ""];
+  return `<div class="state-box"><p>${title}</p>${hint ? `<p class="hint">${hint}</p>` : ""}</div>`;
+}
+
+const secs = (ms) => ms ? `${(ms / 1000).toFixed(1)} 秒` : "";
+
+function renderQa(items) {
+  if (!items.length) { $("#content").innerHTML = emptyFor(`qa:${state.filter}`); return; }
+  $("#content").innerHTML = items.map((r) => {
+    const sources = [
+      ...(r.sources.archives || []).map((id) => `已审核问答 #${id}`),
+      ...(r.sources.docs || []).map((path) => path.replace("knowledge/", "")),
+    ];
+    const revisions = (r.revisions || []).map((v) => `
+      <div class="rev">
+        <div class="label">第 ${v.round} 轮纠正${v.operator ? `（${esc(v.operator)}）` : ""}</div>
+        <blockquote>${esc(v.correction)}</blockquote>
+        <div class="label">AI 重新回答${v.model ? `：${esc(v.model)}，${secs(v.elapsed_ms)}` : ""}</div>
+        <div class="prose">${esc(v.answer)}</div>
+      </div>`).join("");
+    let actions = "";
+    if (r.status === "pending") {
+      actions = `<button class="btn primary" data-qa="draft">回答正确，去归档</button>
+        <button class="btn" data-qa="open-correct">回答错误</button>
+        <button class="btn" data-qa="dismiss">不归档</button>`;
+    } else if (r.status === "correcting") {
+      actions = `<button class="btn primary" data-qa="draft">这次对了，去归档</button>
+        <button class="btn" data-qa="open-correct">继续纠正</button>
+        <button class="btn" data-qa="dismiss">不归档</button>`;
+    } else if (r.status === "dismissed") {
+      actions = `<button class="btn" data-qa="restore">恢复为待评审</button>`;
+    }
+    return `
+    <article class="tpl qa" data-mid="${esc(r.message_id)}">
+      <div class="tpl-head">
+        <span class="script">${esc(r.user_name || r.user_id) || "未知成员"}</span>
+        <dl class="facts">
+          <div><dt>时间</dt><dd>${fmt(r.created_at)}</dd></div>
+          ${r.planning_model ? `<div><dt>需求分析</dt><dd>${esc(r.planning_model)}，${secs(r.planning_ms)}</dd></div>` : ""}
+          ${r.answer_model ? `<div><dt>回答</dt><dd>${esc(r.answer_model)}，${secs(r.answer_ms)}</dd></div>` : ""}
+        </dl>
+      </div>
+      <p class="qa-question">${esc(r.question)}</p>
+      <div class="label">${r.status === "reused" ? "直接复用的已审核答案" : "机器人回答"}</div>
+      <div class="prose">${esc(r.answer)}</div>
+      ${sources.length ? `<p class="sources">引用来源：${esc(sources.join("，"))}</p>` : ""}
+      ${revisions}
+      ${actions ? `<div class="row-actions">${actions}</div>` : ""}
+      <div class="panel-box correct-box" hidden>
+        <div class="label">哪里错了？写清楚正确的说法即可，AI 会据此重新回答（新答案只在这里显示，不发回群里）</div>
+        <textarea class="correction" maxlength="2000"></textarea>
+        <div class="actions"><button class="btn primary" data-qa="correct">让 AI 重新回答</button><button class="btn" data-qa="close-correct">取消</button></div>
+      </div>
+      <div class="panel-box archive-box" hidden></div>
+    </article>`;
+  }).join("");
+}
+
+function renderArchiveForm(box, d) {
+  const fixes = (d.doc_fixes || []).map((f, i) => `
+    <div class="fix-item" data-i="${i}">
+      <div class="fix-head"><input type="checkbox" class="fix-pick" checked aria-label="采用这条修改建议">
+        <strong>${esc(f.doc_path.replace("knowledge/", ""))}</strong><span class="sources">${esc(f.reason)}</span></div>
+      <div class="label">原文</div><pre class="lines diff-old">${esc(f.original_excerpt)}</pre>
+      <div class="label">建议改为</div><textarea class="fix-new">${esc(f.proposed_excerpt)}</textarea>
+      <input type="hidden" class="fix-path" value="${esc(f.doc_path)}"><textarea class="fix-old" hidden>${esc(f.original_excerpt)}</textarea>
+    </div>`).join("");
+  box.innerHTML = `
+    <div class="label">AI 已生成归档信息，确认或修改后归档。之后类似问题会参考这条答案。</div>
+    <div class="form-grid">
+      <label>标准问法</label><input class="a-question" value="${esc(d.canonical_question)}" maxlength="300">
+      <label>类别</label><select class="a-category">${CATEGORIES.map((c) => `<option ${c === d.category ? "selected" : ""}>${c}</option>`).join("")}</select>
+      <label>关键词与同义词</label><input class="a-keywords" value="${esc(d.keywords)}" placeholder="用逗号分隔">
+      <label>涉及脚本</label><input class="a-scripts" value="${esc(d.scripts)}" placeholder="如 start, control_is_pub.sh">
+      <label>答案</label><textarea class="a-answer">${esc(d.answer)}</textarea>
+    </div>
+    ${fixes ? `<div class="label" style="margin-top:14px">资料修改建议（勾选的会进入「文档修正」等待你采纳）</div>${fixes}` : ""}
+    <div class="actions"><button class="btn primary" data-qa="archive">确认归档</button><button class="btn" data-qa="close-archive">取消</button></div>`;
+  box.hidden = false;
+}
+
+function renderArchive(items) {
+  if (!items.length) { $("#content").innerHTML = emptyFor(`qa:${state.filter}`); return; }
+  $("#content").innerHTML = items.map((a) => `
+    <article class="tpl arch" data-aid="${a.archive_id}">
+      <div class="tpl-head">
+        <span class="script">问答 #${a.archive_id}</span>
+        <span class="tag">${esc(a.category)}</span>
+        <dl class="facts">
+          <div><dt>被引用</dt><dd>${a.hit_count} 次</dd></div>
+          <div><dt>最近引用</dt><dd>${fmt(a.last_hit_at)}</dd></div>
+          <div><dt>归档于</dt><dd>${fmt(a.created_at)}</dd></div>
+          ${a.operator ? `<div><dt>归档人</dt><dd>${esc(a.operator)}</dd></div>` : ""}
+        </dl>
+        ${a.written_back ? '<span class="badge ok">资料已回写</span>' : ""}
+        ${a.stale ? '<span class="badge warn" title="执行注册表在归档后有变化，答案可能过时">注册表已变化，请复核</span>' : ""}
+      </div>
+      <div class="form-grid">
+        <label>标准问法</label><input class="a-question" value="${esc(a.canonical_question)}" maxlength="300">
+        <label>类别</label><select class="a-category">${CATEGORIES.map((c) => `<option ${c === a.category ? "selected" : ""}>${c}</option>`).join("")}</select>
+        <label>关键词与同义词</label><input class="a-keywords" value="${esc(a.keywords)}">
+        <label>涉及脚本</label><input class="a-scripts" value="${esc(a.scripts)}">
+        <label>答案</label><textarea class="a-answer">${esc(a.answer)}</textarea>
+      </div>
+      <div class="row-actions">
+        <button class="btn" data-qa="save-archive">保存修改</button>
+        ${a.status === "active" ? '<button class="btn" data-qa="retire">下线</button>' : '<button class="btn" data-qa="reactivate">恢复上线</button>'}
+        <button class="btn danger" data-qa="delete-archive">删除</button>
+      </div>
+    </article>`).join("");
+}
+
+function renderDocFixes(items) {
+  const note = state.filter === "accepted"
+    ? `<div class="state-box" style="text-align:left;margin-bottom:12px"><p>回写方式</p>
+       <p class="hint">采纳的建议需要在开发机上回写仓库：在 Gateway 执行 <code>.venv/bin/python tools/doc_fixes.py export &gt; fixes.json</code> 导出，
+       在本机仓库执行 <code>python tools/doc_fixes.py apply fixes.json</code> 修改资料并提交推送，Gateway <code>git pull</code> 后执行
+       <code>.venv/bin/python tools/doc_fixes.py mark-applied &lt;编号…&gt;</code>。也可以直接让 Claude Code 代办。</p></div>` : "";
+  if (!items.length) { $("#content").innerHTML = note + emptyFor(`docfix:${state.filter}`); return; }
+  $("#content").innerHTML = note + items.map((f) => {
+    const editable = f.status === "pending";
+    const actions = {
+      pending: '<button class="btn primary" data-qa="fix-accept">采纳</button><button class="btn" data-qa="fix-ignore">忽略</button>',
+      accepted: '<button class="btn" data-qa="fix-reopen">退回待处理</button>',
+      ignored: '<button class="btn" data-qa="fix-reopen">恢复待处理</button>',
+    }[f.status] || "";
+    return `
+    <article class="tpl fix" data-fid="${f.suggestion_id}">
+      <div class="tpl-head">
+        <span class="script">${esc(f.doc_path.replace("knowledge/", ""))}</span>
+        <span class="tag">建议 #${f.suggestion_id}</span>
+        <dl class="facts"><div><dt>来自归档</dt><dd>#${f.archive_id} ${esc(f.canonical_question)}</dd></div>
+          <div><dt>生成于</dt><dd>${fmt(f.created_at)}</dd></div></dl>
+      </div>
+      ${f.reason ? `<p class="reason">原因：${esc(f.reason)}</p>` : ""}
+      <div class="label">原文</div><pre class="lines diff-old">${esc(f.original_excerpt)}</pre>
+      <div class="label">建议改为</div>
+      ${editable ? `<textarea class="fix-proposed">${esc(f.proposed_excerpt)}</textarea>` : `<pre class="lines diff-new">${esc(f.proposed_excerpt)}</pre>`}
+      ${actions ? `<div class="row-actions">${actions}</div>` : ""}
+    </article>`;
+  }).join("");
+}
+
+async function qaAction(button) {
+  const act = button.dataset.qa;
+  const card = button.closest("article");
+  const mid = card.dataset.mid, aid = card.dataset.aid, fid = card.dataset.fid;
+  const busy = async (label, work) => {
+    const original = button.textContent;
+    button.disabled = true; button.textContent = label;
+    try { return await work(); } finally { button.disabled = false; button.textContent = original; }
+  };
+  try {
+    if (act === "open-correct") { card.querySelector(".correct-box").hidden = false; card.querySelector(".correction").focus(); return; }
+    if (act === "close-correct") { card.querySelector(".correct-box").hidden = true; return; }
+    if (act === "close-archive") { card.querySelector(".archive-box").hidden = true; return; }
+    if (act === "correct") {
+      const text = card.querySelector(".correction").value.trim();
+      if (!text) { toast("先写下哪里错了", true); return; }
+      await busy("AI 正在重新回答…", () => api("POST", `/api/qa/${encodeURIComponent(mid)}/correct`, { correction: text }));
+      toast("已生成新答案");
+      state.filter = "correcting"; state.page = 1; invalidateQa(); return load();
+    }
+    if (act === "draft") {
+      const draft = await busy("AI 正在整理…", () => api("POST", `/api/qa/${encodeURIComponent(mid)}/draft`));
+      renderArchiveForm(card.querySelector(".archive-box"), draft);
+      return;
+    }
+    if (act === "archive") {
+      const box = card.querySelector(".archive-box");
+      const fixes = [...box.querySelectorAll(".fix-item")].filter((el) => el.querySelector(".fix-pick").checked).map((el) => ({
+        doc_path: el.querySelector(".fix-path").value,
+        original_excerpt: el.querySelector(".fix-old").value,
+        proposed_excerpt: el.querySelector(".fix-new").value,
+        reason: el.querySelector(".sources").textContent,
+      }));
+      const r = await busy("正在归档…", () => api("POST", `/api/qa/${encodeURIComponent(mid)}/archive`, {
+        canonical_question: box.querySelector(".a-question").value,
+        category: box.querySelector(".a-category").value,
+        keywords: box.querySelector(".a-keywords").value,
+        scripts: box.querySelector(".a-scripts").value,
+        answer: box.querySelector(".a-answer").value,
+        doc_fixes: fixes,
+      }));
+      toast(`已归档为问答 #${r.archive_id}` + (r.doc_fixes ? `，生成 ${r.doc_fixes} 条资料修改建议` : ""));
+      invalidateQa(); return load();
+    }
+    if (act === "dismiss") { await api("POST", `/api/qa/${encodeURIComponent(mid)}/dismiss`); toast("已标记为不归档"); invalidateQa(); return load(); }
+    if (act === "restore") { await api("POST", `/api/qa/${encodeURIComponent(mid)}/restore`); toast("已恢复为待评审"); invalidateQa(); return load(); }
+    if (act === "save-archive") {
+      await api("PUT", `/api/qa-archive/${aid}`, {
+        canonical_question: card.querySelector(".a-question").value,
+        category: card.querySelector(".a-category").value,
+        keywords: card.querySelector(".a-keywords").value,
+        scripts: card.querySelector(".a-scripts").value,
+        answer: card.querySelector(".a-answer").value,
+      });
+      toast("已保存"); invalidateQa(); return;
+    }
+    if (act === "retire" || act === "reactivate") {
+      await api("PUT", `/api/qa-archive/${aid}`, { status: act === "retire" ? "retired" : "active" });
+      toast(act === "retire" ? "已下线，不再参与回答" : "已恢复上线"); invalidateQa(); return load();
+    }
+    if (act === "delete-archive") {
+      if (!confirm(`删除问答 #${aid}？删除后不再参与回答。`)) return;
+      await api("DELETE", `/api/qa-archive/${aid}`); toast("已删除"); invalidateQa(); return load();
+    }
+    if (act === "fix-accept" || act === "fix-ignore" || act === "fix-reopen") {
+      const body = { status: act === "fix-accept" ? "accepted" : act === "fix-ignore" ? "ignored" : "pending" };
+      const proposed = card.querySelector(".fix-proposed");
+      if (proposed && act === "fix-accept") body.proposed_excerpt = proposed.value;
+      await api("PUT", `/api/doc-fixes/${fid}`, body);
+      toast({ "fix-accept": "已采纳，等待回写仓库", "fix-ignore": "已忽略", "fix-reopen": "已退回待处理" }[act]);
+      invalidateQa(); return load();
+    }
+  } catch (err) { toast(`操作失败：${err.message}`, true); }
+}
+
+$("#content").addEventListener("click", (e) => {
+  const button = e.target.closest("button[data-qa]");
+  if (button) qaAction(button);
+});
+$("#filters").addEventListener("click", (e) => {
+  const chip = e.target.closest("button[data-filter]");
+  if (!chip || chip.dataset.filter === state.filter) return;
+  state.filter = chip.dataset.filter; state.page = 1; load();
+});
 
 function setMode(mode) {
   document.querySelectorAll('#mode input').forEach((i) => { i.checked = i.value === mode; });
@@ -753,7 +1246,7 @@ $("#content").addEventListener("keydown", (e) => {
 document.querySelectorAll("nav.tabs a").forEach((a) => a.addEventListener("click", (e) => {
   e.preventDefault();
   if (a.dataset.tab === state.tab || !confirmDiscard()) return;
-  state = { tab: a.dataset.tab, page: 1 };
+  state = { tab: a.dataset.tab, filter: DEFAULT_FILTER[a.dataset.tab] || "", page: 1 };
   load();
 }));
 $("#refresh").onclick = () => { if (confirmDiscard()) load({ force: true }); };

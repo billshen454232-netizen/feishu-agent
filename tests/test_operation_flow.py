@@ -1475,3 +1475,43 @@ async def test_failure_notification_failure_keeps_job_failed_and_does_not_raise(
     assert "520" in (job.last_error or "")
 
 
+
+
+@pytest.mark.asyncio
+async def test_knowledge_answer_is_recorded_for_review_and_archive_is_reused(tmp_path):
+    from src.qa_library import QaService, QaStore
+
+    config = make_config()
+    store = MessageJobStore(tmp_path / "jobs.sqlite3")
+    store.initialize()
+    qa_store = QaStore(tmp_path / "jobs.sqlite3")
+    qa_store.initialize()
+    feishu = FakeFeishuClient()
+    ai = FakeAIClient()
+    processor = MessageJobProcessor(
+        config, store, ConversationStore(4), ai_client=ai, feishu_client=feishu,
+        operation_planner=FakeTracePlanner(make_knowledge_plan()),
+        muliu_firewall=production_firewall(config), route_resolver=production_route_resolver(),
+        script_knowledge_base=FakeScriptKnowledgeBase(), script_catalog=FakeCatalog(), intent_router=MuliuIntentRouter(),
+        qa_service=QaService(answer_client=ai, knowledge_base=FakeScriptKnowledgeBase(),
+                             capability_context=FakeCatalog().read_capability_context, store=qa_store),
+    )
+    question = "我要怎么查询某个服务器现在的 Patch 列表？"
+    store.create_if_new("om_q1", "evt_q1", "oc_group", "ou_user", question, chat_type="group")
+
+    await processor.process_one("om_q1")
+
+    record = qa_store.get_record("om_q1")
+    assert record["status"] == "pending" and record["question"] == question
+    assert record["sources"]["docs"] == ["knowledge/docs/cc_patch.md"]
+
+    qa_store.add_archive(source_message_id="om_q1", canonical_question=question, answer="用 cc_patch.py -s <服号> -ck 查询。",
+                         category="查询", keywords="patch, 补丁", scripts="cc_patch.py", catalog_digest="", operator="me")
+    calls_before = len(ai.calls)
+    store.create_if_new("om_q2", "evt_q2", "oc_group", "ou_user", question, chat_type="group")
+
+    await processor.process_one("om_q2")
+
+    assert len(ai.calls) == calls_before  # planner is faked; the identical question skipped the answer AI call
+    assert feishu.replies[-1][1].startswith("📚 以下为已审核答案（问答 #1）")
+    assert qa_store.get_record("om_q2")["status"] == "reused"

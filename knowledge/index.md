@@ -20,7 +20,7 @@
 |`start`|启动游戏服务；默认会启动 Zone 与游戏逻辑服务|启动、开服、启动服务、Zone|[start.md](docs/start.md)|
 |`shutdown`|常规或强制关闭游戏、Zone 或 GVG 相关进程|关闭、停服、关服、kill、GVG|[shutdown.md](docs/shutdown.md)|
 |`starttime`|检查或修改 Debug 开服时间配置和时间戳文件|开服时间、启动时间、时间戳、Debug|[starttime.md](docs/starttime.md)|
-|`control_is_pub.sh`|独立控制调试 / GM 面板、发布模式或外部体验开服|GM面板、调试面板、发布模式、外部开服、public_game|[control_is_pub.md](docs/control_is_pub.md)|
+|`control_is_pub.sh`|独立控制调试 / GM 面板、发布模式或外部体验开服|GM面板、调试面板、发布模式、外部开服、对外脚本、对外开服、外部体验、public_game|[control_is_pub.md](docs/control_is_pub.md)|
 |`exc_server_merge.sh`|生成合服配置并启动合服工具|合服、服务器合并、合到、合服工具|[exc_server_merge.md](docs/exc_server_merge.md)|
 |`stop_combine_tool.sh`|仅关闭目标服合服工具拉起的 combine 进程|关闭合服进程、停止合服工具、关闭 combine|[stop_combine_tool.md](docs/stop_combine_tool.md)|
 

@@ -17,6 +17,7 @@ from .conversation_log import ConversationLog
 from .access_auth import CloudflareAccessVerifier
 from .admin_app import AdminServer, create_admin_app
 from .clear_notifier import ClearNotifier
+from .qa_library import QaService, QaStore
 from .event_handler import FeishuEventHandler
 from .execution_report import ExecutionReportStore
 from .feishu_client import FeishuClient
@@ -51,6 +52,8 @@ def create_app(config_path: str | Path = "config/config.json") -> FastAPI:
     job_store.initialize()
     report_store = ExecutionReportStore(config.job_queue.database_path)
     report_store.initialize()
+    qa_store = QaStore(config.job_queue.database_path)
+    qa_store.initialize()
     conversations = ConversationStore(config.conversation.max_history_messages)
     ai_client, planning_ai_client, interpretation_ai_client = _create_role_ai_clients(config)
     feishu_client = FeishuClient(config.feishu)
@@ -103,6 +106,15 @@ def create_app(config_path: str | Path = "config/config.json") -> FastAPI:
         report_store=report_store,
         interpretation_ai_client=interpretation_ai_client,
         clear_notifier=ClearNotifier(config.clear_notification) if config.clear_notification.enabled else None,
+        qa_service=QaService(
+            answer_client=ai_client,
+            curation_client=interpretation_ai_client,
+            knowledge_base=script_knowledge_base,
+            capability_context=script_catalog.read_capability_context,
+            catalog_text=script_catalog.read,
+            store=qa_store,
+            knowledge_root=config.script_knowledge.path,
+        ),
     )
     event_handler = FeishuEventHandler(config, job_store, job_queue, job_processor=job_processor)
 
@@ -133,7 +145,20 @@ def create_app(config_path: str | Path = "config/config.json") -> FastAPI:
                 if config.admin.access_team_domain
                 else None
             )
-            admin_server = AdminServer(create_admin_app(report_store, access_verifier=verifier), port=config.admin.port)
+            admin_qa = QaService(
+                # Separate clients: the review page runs its own event loop in another thread.
+                answer_client=create_ai_client(config.ai_for("chat")),
+                curation_client=create_ai_client(config.ai_for("interpretation")),
+                knowledge_base=script_knowledge_base,
+                capability_context=script_catalog.read_capability_context,
+                catalog_text=script_catalog.read,
+                store=qa_store,
+                knowledge_root=config.script_knowledge.path,
+            )
+            admin_server = AdminServer(
+                create_admin_app(report_store, access_verifier=verifier, qa_service=admin_qa),
+                port=config.admin.port,
+            )
             admin_server.start()
         try:
             yield

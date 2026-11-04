@@ -41,6 +41,7 @@ from .execution_report import (
     is_read_only_result,
     result_scope,
 )
+from .qa_library import QA_PENDING, QA_REUSED, QaService
 from .server_environments import ServerEnvironments, ServerEnvironmentsError
 from .worker_protocol import parse_execution_result, serialize_execution_result
 
@@ -115,6 +116,7 @@ class MessageJobProcessor:
         report_store: ExecutionReportStore | None = None,
         interpretation_ai_client: Any | None = None,
         clear_notifier: Any | None = None,
+        qa_service: QaService | None = None,
     ) -> None:
         self._config = config
         self._store = store
@@ -145,6 +147,11 @@ class MessageJobProcessor:
         self._member_lookup_at: dict[str, float] = {}
         self._background_tasks: set[asyncio.Task[None]] = set()
         self._clear_notifier = clear_notifier
+        self._qa_service = qa_service or QaService(
+            answer_client=ai_client,
+            knowledge_base=script_knowledge_base,
+            capability_context=self._capability_context,
+        )
         self._stopping = False
 
     def start(self) -> None:
@@ -939,43 +946,59 @@ class MessageJobProcessor:
         job: Any,
         decision: MuliuPlan,
     ) -> tuple[int, int, int, bool, str, tuple[str, ...]]:
-        """Answer a planner-classified knowledge request with current registry context."""
+        """Answer a planner-classified knowledge request (catalog > archived Q&A > MD docs)."""
         knowledge_started = time.perf_counter()
-        result = self._script_knowledge_base.search(job.text) if self._script_knowledge_base is not None else None
+        answer = await self._qa_service.answer(job.text, decision.summary)
         knowledge_ms = self._elapsed_ms(knowledge_started)
-        source_paths = [source.path for source in result.sources] if result is not None and result.hit else []
-        sources = "\n".join("- {}".format(path) for path in source_paths)
-        document_context = result.context if result is not None and result.hit else "（未命中补充脚本资料）"
-        capability_context = self._capability_context()
-        prompt = (
-            "你是测试服脚本资料问答助手。只依据下列当前执行注册表和本地资料回答用户的问题。"
-            "回答应简洁、准确，用中文说明当前可执行能力、用途、参数形状、风险和前置检查。"
-            "当前执行注册表优先于旧资料中的‘未登记’表述；若资料与注册表冲突，以注册表为准。"
-            "不得生成执行计划、不得请求确认执行、不得输出自由 Shell 命令、不得补充资料中没有的服务器地址、账号、凭据、内部环境信息或操作细节。"
-            "如果注册表没有对应能力，直接说明尚未登记，不要猜测。\n\n"
-            "规划器的受限决策摘要：{}\n\n当前执行注册表：\n{}\n\n本地资料：\n{}\n\n来源列表：\n{}\n\n用户问题：{}"
-        ).format(decision.summary, capability_context, document_context, sources or "（无）", job.text)
-        ai_started = time.perf_counter()
-        generation = await generate_with_provenance(self._ai_client, [], prompt)
-        ai_ms = self._elapsed_ms(ai_started)
-        reply = generation.text
-        if source_paths:
-            reply = "📚 以下回答基于当前执行注册表和本地脚本资料生成。\n\n{}\n\n来源：\n{}".format(reply, sources)
+        source_paths = list(answer.doc_paths)
+        archive_refs = "、".join("#{}".format(archive_id) for archive_id in answer.archive_ids)
+        if answer.reused_archive_id is not None:
+            reply = "📚 以下为已审核答案（问答 #{}）。\n\n{}".format(answer.reused_archive_id, answer.text)
         else:
-            reply = "📚 以下回答基于当前执行注册表生成。\n\n{}".format(reply)
+            lines = ["- {}".format(path) for path in source_paths]
+            if archive_refs:
+                lines.insert(0, "- 已审核问答 {}".format(archive_refs))
+            if source_paths:
+                reply = "📚 以下回答基于当前执行注册表和本地脚本资料生成。\n\n{}\n\n来源：\n{}".format(
+                    answer.text, "\n".join(lines)
+                )
+            elif archive_refs:
+                reply = "📚 以下回答基于当前执行注册表和已审核问答生成。\n\n{}\n\n来源：\n{}".format(
+                    answer.text, "\n".join(lines)
+                )
+            else:
+                reply = "📚 以下回答基于当前执行注册表生成。\n\n{}".format(answer.text)
 
         self._conversations.append(job.chat_id, "user", job.text)
         self._conversations.append(job.chat_id, "assistant", reply)
         reply_started = time.perf_counter()
         await self._reply_and_finish(message_id, reply)
+        self._record_qa(job, answer)
         return (
             knowledge_ms,
-            ai_ms,
+            answer.elapsed_ms,
             self._elapsed_ms(reply_started),
             bool(source_paths),
             reply,
             tuple(source_paths),
         )
+
+    def _record_qa(self, job: Any, answer: Any) -> None:
+        store = self._qa_service.store
+        if store is None:
+            return
+        try:
+            store.record(
+                job.message_id,
+                job.text,
+                answer.text,
+                sources={"docs": list(answer.doc_paths), "archives": list(answer.archive_ids)},
+                model=answer.model,
+                elapsed_ms=answer.elapsed_ms,
+                status=QA_REUSED if answer.reused_archive_id is not None else QA_PENDING,
+            )
+        except Exception:  # noqa: BLE001 - review bookkeeping must never affect the reply
+            logger.warning("qa record not stored message_id=%s", job.message_id, exc_info=True)
 
     def _resolve_route_snapshot(self, plan: MuliuPlan) -> MuliuRouteSnapshot:
         if self._route_resolver is None:

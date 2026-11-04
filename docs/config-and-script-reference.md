@@ -235,6 +235,7 @@ worker  = 主动连 Gateway 领任务 + 本地 Muliu 执行（无飞书/AI 凭�
 | [message_jobs.py](../src/message_jobs.py) | 任务状态机与持久化：`awaiting_confirmation → confirmed → submission_in_progress → queued_for_worker/leased → done/failed/submitted_result_unknown`。 | `MessageJob`, `MessageJobStore` |
 | [message_worker.py](../src/message_worker.py) | 消息处理主循环：AI 计划生成、确认卡投递、任务领取、结果回写；结果展示先投递可信卡，再按需后台 AI 研读并只更新卡片说明。 | `MessageJobProcessor`, `MessageJobQueue`, `present_execution_result` |
 | [execution_report.py](../src/execution_report.py) | 执行结果展示分流与典型故障模板库：错误特征（匹配键）计算、模板 / 后台研读任务 / 执行记录 / 运行时设置的 SQLite 存储。不改变任何终态。 | `compute_error_signature`, `ExecutionReportStore`, `is_read_only_result` |
+| [qa_library.py](../src/qa_library.py) | 知识问答评审与归档：问答记录、多轮纠正、已审核问答库、资料修改建议的存储；归档检索打分（字符二元组覆盖率 + 脚本 / 类别加分）；问答提示词与 AI 调用（回答、纠正重答、归档草稿）。资料优先级：catalog > 已审核问答 > knowledge/docs。 | `QaStore`, `QaService`, `rank_archive` |
 | [admin_app.py](../src/admin_app.py) | 模板审批页：待审核 / 可用模板两个页签（通过 / 退回 / 删除 / 编辑 / 批量）、只读「最近执行」页签（发起人昵称、需求分析模型与耗时、终态、说明来源、结果研读模型与耗时、AI 说明）、查询成功模式开关。独立服务，**只监听 127.0.0.1**，经 SSH 端口转发访问。 | `create_admin_app`, `AdminServer` |
 | [operation_message.py](../src/operation_message.py) | 计划与结果的飞书文本/卡片格式化，含敏感信息遮罩。 | `format_plan_for_confirmation`, `build_plan_confirmation_card`, `format_execution_result`, `mask_sensitive_operation_data` |
 | [conversation.py](../src/conversation.py) | 会话历史存取。 | `ConversationStore` |
@@ -262,6 +263,7 @@ worker  = 主动连 Gateway 领任务 + 本地 Muliu 执行（无飞书/AI 凭�
 | --- | --- | --- | --- |
 | [muliu_intent.py](../src/muliu_intent.py) | 非权威请求提示，供观测与 UI 文案使用。 | `MuliuIntentRouter` | **不**决定是否执行。 |
 | [muliu_planner.py](../src/muliu_planner.py) | 把飞书请求转成注册表校验过的 Muliu 决策（operation / knowledge / clarify / reject）。 | `MuliuPlanner`, `MuliuPlanGeneration` | **不**执行脚本。 |
+| [utils/text_match.py](../src/utils/text_match.py) | 中英文混合短问句的词项切分：英文单词 + 中文字符二元组（去掉常见无信息二元组），用于资料检索与归档问答检索。 | `terms`, `coverage`, `normalize` | **不**做语义理解。 |
 | [utils/time_text.py](../src/utils/time_text.py) | 时间文本 → 北京时间 Unix 时间戳的确定性换算。规划器把合同 `{timestamp}` 位置上 AI 写出的时间文本（如 `2026-11-07T10:00`）换算成数字，并在步骤说明追加可读时间；没有具体时刻、相对日期、不存在的日期一律拒绝，交给 AI 澄清。AI 不再自行换算时间戳。 | `parse_time_text`, `muliu_planner.convert_time_arguments` | **不**猜测缺失的时刻或时区。 |
 | [muliu_plan.py](../src/muliu_plan.py) | AI 生成计划的严格 JSON 解析：`kind`、`route_scope`、`steps[]`。 | `parse_plan`, `MuliuPlan`, `MuliuStep` | **不**判断合同是否合法。 |
 | [muliu_script_catalog.py](../src/muliu_script_catalog.py) | 解析并校验 catalog 中的精确调用合同（`path + args` 模板 + 变量正则 + risk）。 | `MuliuScriptCatalog`, `MuliuCallContracts`, `parse_call_contracts` | **不**推断未登记的脚本或参数。 |
@@ -277,7 +279,7 @@ worker  = 主动连 Gateway 领任务 + 本地 Muliu 执行（无飞书/AI 凭�
 | 模块 | 职责 | 关键符号 |
 | --- | --- | --- |
 | [knowledge_base.py](../src/knowledge_base.py) | 双链 vault 知识库检索（可选启用）。 | `DualChainVaultKnowledgeBase` |
-| [script_knowledge_base.py](../src/script_knowledge_base.py) | 只检索本地脱敏脚本文档，回答“脚本是干什么的”。 | `ScriptKnowledgeBase` |
+| [script_knowledge_base.py](../src/script_knowledge_base.py) | 只检索本地脱敏脚本文档（`knowledge/index.md`、`knowledge/docs/*.md`），回答“脚本是干什么的”。打分：中文按字符二元组、按文档频率加权（常见词几乎不计分）；`index.md` 表格的「用途 / 关键词」列作为对应文档的同义说法并入标题，命中加倍。 | `ScriptKnowledgeBase` |
 | [server_environments.py](../src/server_environments.py) | 加载并校验 `server_environments.json`，派生服号归属。 | `ServerEnvironments`, `EnvironmentMapping` |
 | [muliu_script_registry.py](../src/muliu_script_registry.py) | **预留空壳**：为未来本地脚本注册表保留。当前无实现、无消费者。 | — |
 
@@ -290,6 +292,7 @@ worker  = 主动连 Gateway 领任务 + 本地 Muliu 执行（无飞书/AI 凭�
 | [auto_hotfix_registry.py](../tools/auto_hotfix_registry.py) | **当前热更阈值 Python 注册表**。同时定义执行端 ASCII key + Lua Patch 目标，以及 Planner 可见的中文名 / aliases。 | 无外部输入（代码即数据）。 | 供 `sync_hotfix_planner_catalog.py` 导入；同名阅读副本可由 `auto_hotfix_tool.py` 使用。 | 否 | 否（FastAPI 运行期不导入；它是 catalog 同步主链的资料源）。 |
 | [auto_hotfix_tool.py](../tools/auto_hotfix_tool.py) | 游戏服阈值免重启热更工具：生成 Lua Patch、写入 `patch_order_list.json`、调用 `run_patch_game.sh`。 | `config.ini`（服号 → IP）、命令行参数。 | Patch / 热更执行结果。 | 否 | 否（独立 CLI；catalog 期望远端同路径脚本，但仓库不能证明其已部署）。 |
 | [sync_hotfix_planner_catalog.py](../tools/sync_hotfix_planner_catalog.py) | 把 `auto_hotfix_registry` 的中文路由和严格 key 白名单同步进 catalog 静态资料，并生成候选 manifest。 | `tools/auto_hotfix_registry.py`、`config/server_environments.json`。 | **改写** `config/muliu_script_catalog.md` 自动区块、候选 manifest。 | **是** | 否（开发期工具）。 |
+| [doc_fixes.py](../tools/doc_fixes.py) | 已采纳的资料修改建议回写仓库：Gateway 上 `export` 导出 JSON；开发机 `apply` 修改 `knowledge/index.md`、`knowledge/docs/*.md`（原文需恰好出现 1 次，保留换行风格）；Gateway `git pull` 后 `mark-applied`。 | Gateway SQLite、导出的 JSON。 | 改写 `knowledge/` 下的 MD。 | **是**（apply） | 否（运维工具）。 |
 | [generate_runner_manifest.py](../tools/generate_runner_manifest.py) | 从 catalog 派生**候选** GS-1 runner manifest。 | `config/muliu_script_catalog.md`。 | `deployment/gs1/muliu_runner_manifest.json`。 | **是** | 否（开发期工具）。 |
 | [hotfix_threshold_registry.py](../tools/hotfix_threshold_registry.py) | 加载 `config/hotfix_thresholds.json`，做失败关闭的 JSON 形态校验。 | `config/hotfix_thresholds.json`。 | 校验后的元数据对象。 | 否 | **否**（未接入当前主链）。 |
 
