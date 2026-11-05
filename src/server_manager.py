@@ -168,7 +168,8 @@ class ServerManagerClient:
         lines.append("进程状态（status 任务 run_id={}）：{}".format(status.run_id or "无", states))
         if status.server_states and all(value == "ready" for value in status.server_states.values()):
             lines.append("服务器已就绪（ready）")
-        lines.append("说明：API 不提供 supervisor / bglog 异常日志；排查起服失败请用起服失败诊断或切回木流")
+        else:
+            lines.append("服务器未就绪；需要看起服报错时可以说「诊断 {} 服起服失败」".format(server_id))
         return lines
 
     def run(self, task: ApiTask, submission: str, reason: str) -> ApiOutcome:

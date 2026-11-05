@@ -307,7 +307,7 @@ def test_server_info_route_reads_config_version_and_status():
     assert "当前代码版本:\nob_release_261103" in log
     assert "1794016800 -> 2026-11-" in log and "剧本 3001，赛季 1，对外 False，启动模式 qa_gs" in log
     assert "服务器已就绪（ready）" in log and log.splitlines()[-1] == "AI_OP_END status=success"
-    assert "must-not-leak" not in log
+    assert "must-not-leak" not in log and "诊断" not in log  # ready: no troubleshooting hint
     status_post = next(body for method, path, body in fake.requests if method == "POST")
     assert status_post["task_type"] == "status" and status_post["targets"] == ["game_2006", "zone_200601"]
 
