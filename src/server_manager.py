@@ -128,15 +128,17 @@ class ServerManagerClient:
         self._clock = clock
 
     def server_ids(self) -> set[str]:
-        response = self._http.get(self._base + "/servers", params={"env": self._env})
+        response = self._http.get(self._base + "/servers", params={"env": self._env} if self._env else None)
         response.raise_for_status()
         return {str(item.get("id")) for item in response.json().get("servers", []) if item.get("id")}
 
     def run(self, task: ApiTask, submission: str, reason: str) -> ApiOutcome:
         body = {
-            "env": self._env, "task_type": task.task_type, "targets": list(task.targets),
+            "task_type": task.task_type, "targets": list(task.targets),
             "params": {"fast": True}, "submission_id": submission, "reason": reason[:200],
         }
+        if self._env:  # the server team may drop ``env`` (only qa_test exists); empty config = omit it
+            body["env"] = self._env
         try:
             response = self._http.post(self._base + "/tasks", json=body)
         except httpx.HTTPError as exc:

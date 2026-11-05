@@ -75,9 +75,11 @@ class FakeApi:
     def __init__(self, *, post="ok", statuses=("queued", "succeeded"), registered=True, final="succeeded"):
         self.post, self.statuses, self.registered, self.final = post, list(statuses), registered, final
         self.requests = []
+        self.queries = []
 
     def handler(self, request):
         self.requests.append((request.method, request.url.path, json.loads(request.content) if request.content else None))
+        self.queries.append(str(request.url.query, "ascii") if isinstance(request.url.query, bytes) else str(request.url.query))
         path = request.url.path
         if request.method == "POST" and path.endswith("/tasks"):
             if self.post == "timeout":
@@ -118,6 +120,19 @@ def test_client_submits_with_submission_id_and_polls_to_terminal():
     assert (method, path) == ("POST", "/server_manager/api/tasks")
     assert body == {"env": "qa_test", "task_type": "start", "targets": ["game_2006"], "params": {"fast": True},
                     "submission_id": "fb-abc-s1-t1", "reason": "飞书机器人 第1步：起服"}
+
+
+def test_empty_env_is_not_sent():
+    fake = FakeApi()
+    client = ServerManagerClient(
+        "https://sm.example.com", "", http_client=httpx.Client(transport=httpx.MockTransport(fake.handler)),
+        poll_interval_seconds=0, sleep=lambda _s: None,
+    )
+    client.run(ApiTask("start", ("game_2006",)), "fb-5", "r")
+    client.server_ids()
+
+    assert "env" not in fake.requests[0][2]
+    assert all("env=" not in query for query in fake.queries)
 
 
 def test_ambiguous_submit_resolved_by_submission_record():

@@ -273,6 +273,7 @@ class ServerManagerConfig:
     """
 
     enabled: bool = False
+    # Environment YAML name; only qa_test exists. Empty = do not send ``env`` (in case the API drops it).
     env: str = "qa_test"
     # Region (cn / overseas) -> instance base URL, e.g. https://example.com (``/server_manager/api`` is appended).
     regions: dict[str, str] = field(default_factory=dict)
@@ -496,7 +497,7 @@ def _load_server_manager(raw: Any) -> ServerManagerConfig:
         raise ConfigError("server_manager.enabled 为 true 时必须填写 regions")
     return ServerManagerConfig(
         enabled=enabled,
-        env=str(raw.get("env", "qa_test")).strip() or "qa_test",
+        env=str(raw.get("env", "qa_test")).strip(),
         regions=regions,
         poll_interval_seconds=_require_positive_number(float(raw.get("poll_interval_seconds", 3)), "server_manager.poll_interval_seconds"),
         task_timeout_seconds=_require_positive_number(float(raw.get("task_timeout_seconds", 900)), "server_manager.task_timeout_seconds"),
