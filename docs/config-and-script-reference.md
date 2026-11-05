@@ -316,6 +316,8 @@ Gateway SQLite 热更阈值注册表（网页 /thresholds 编辑，src/hotfix_th
 
 > **重要边界：** 本目录是**脱敏阅读副本**，供知识问答和文档核对使用。它**不等于** GS-1 上 `/home/serverGeneralScript/` 的实际文件，也不代表机器人能调用的范围。机器人能调用什么，只看 catalog。
 
+**版本来源（2026-11-05 同步）**：以国服 GS-1（`nslg-ali-sh-test-all-gs-1`）为准，用负责人自用的 `deployment/gs1/gs1_inventory.py` 盘点 + 打包导出，逐文件核对 SHA-256 后更新。海外 GS-1 是运维打包国服脚本部署的，脚本本体基本一致，差异只在配置（IP、数据库连接、配置名）；已知的配置名差异：`control_is_pub.sh` 海外用 `NSLG_IS_PUBLISH`（国服 `IS_PUBLISH`），`shutdown` 海外有 `krdev/krweekly/krqa`（国服为 `jyh`），`exc_server_merge.sh` 海外调用 `python3.7`（国服 `python3`）。`combine_demo_new.lua`、`clear_logic_game.py`、`clear_zone.py`、`cleardb.py` 的 IP、账号、密码、Mongo 地址已替换为占位符（后三个被 `.gitignore` 忽略，不入库）。国服 GS-1 **没有** `server_log_query.py`（只有海外部署了）。
+
 ### 4.1 已登记调用合同且有阅读副本的脚本
 
 下表列出本仓库存在阅读副本、且 catalog 已登记的调用合同。**阅读副本 + catalog 登记不证明 GS-1 已部署该脚本**；目标文件、hash、权限与可达性仍由环境维护者独立核验。

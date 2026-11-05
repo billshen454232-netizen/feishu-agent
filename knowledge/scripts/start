@@ -1,30 +1,182 @@
 #!/bin/bash
-server_id=$1
-if_no_zone=$2
-# 获取远程服务器的IP
-REMOTE_HOST=$(awk -F '=' -v key="$server_id"_game '$1 == key {print $2}' config.ini)
-# 如果不开启战区 直接启动逻辑服
-if [[ $if_no_zone == "noz" ]];then
-    echo "只启动gamelogic服务器"
-    if [[ "$server_id" == "4001" ]];then
-        bash yc_start.sh
-        exit 0
+set -u
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+CONFIG_FILE="$SCRIPT_DIR/config.ini"
+
+server_id=${1:-}
+action=${2:-normal}
+
+if [[ -z "$server_id" ]]; then
+    echo "用法: $0 <server_id|dev|weekly|qa|devgvg|weeklygvg|qagvg> [normal|noz|gvgzone|gvgdaemon]" >&2
+    exit 1
+fi
+
+get_game_host() {
+    local id=$1
+    awk -F '=' -v key="${id}_game" '$1 == key {print $2}' "$CONFIG_FILE"
+}
+
+require_game_host() {
+    local id=$1
+    local host
+    host=$(get_game_host "$id")
+    if [[ -z "$host" ]]; then
+        echo "找不到服务器 ${id} 对应的 ${id}_game 配置" >&2
+        exit 1
     fi
-    ssh "root@$REMOTE_HOST" "cd /data/app/game-server && bash release_bin/start_game.sh"
-    exit 0
-fi
+    printf '%s' "$host"
+}
 
-if [[ "$server_id" == "4001" ]];then
-    bash yc_start.sh
-    exit 0
-fi
+ssh_game() {
+    local host=$1
+    local command=$2
+    ssh "root@$host" "$command"
+}
 
+start_normal() {
+    local host=$1
+    ssh_game "$host" "cd /data/app/game-server && bash release_bin/start_zone.sh"
+    ssh_game "$host" "cd /data/app/game-server && bash release_bin/start_game.sh"
+}
 
+start_jyh() {
+    local id=$1
+    host=$(require_game_host "$id")
+    ssh_game "$host" "cd /data/app/game-server && bash release_bin/start_microservices.sh"
+}
 
-# 执行启动战区服的脚本
-ssh "root@$REMOTE_HOST" "cd /data/app/game-server && bash release_bin/start_zone.sh"
+start_cross() {
+    local id=$1
+    host=$(require_game_host "$id")
+    ssh_game "$host" "cd /data/app/game-server && bash release_bin/start_cross.sh"
+}
 
-#sleep 15
-# 执行启动游戏服的脚本
-ssh "root@$REMOTE_HOST" "cd /data/app/game-server && bash release_bin/start_game.sh"
+start_noz() {
+    local host=$1
+    echo "只启动gamelogic服务器"
+    ssh_game "$host" "cd /data/app/game-server && bash release_bin/start_game.sh"
+}
+
+start_gvg_zone() {
+    local host=$1
+    ssh_game "$host" "cd /data/app/game-server/ && bash release_bin/start_gvg_zone.sh"
+}
+
+start_gvg_daemon() {
+    local host=$1
+    ssh_game "$host" "cd /data/app/game-server/ && bash release_bin/start_gvg_zone_daemon.sh"
+}
+
+start_normal_server() {
+    local id=$1
+    local mode=$2
+    local host
+    host=$(require_game_host "$id")
+
+    case "$mode" in
+        normal)
+            start_normal "$host"
+            ;;
+        noz)
+            if [[ "$id" == "4001" ]]; then
+                bash yc_start.sh
+            else
+                start_noz "$host"
+            fi
+            ;;
+        gvgzone)
+            start_gvg_zone "$host"
+            ;;
+        gvgdaemon)
+            start_gvg_daemon "$host"
+            ;;
+        *)
+            echo "未知操作: $mode" >&2
+            exit 1
+            ;;
+    esac
+}
+
+get_gvg_ids() {
+    local id=$1
+    case "$id" in
+        weeklygvg)
+            printf '%s\n' "2022" "2023" "2024" "2025"
+            ;;
+        devgvg)
+            printf '%s\n' "2026" "2027"
+            ;;
+        qagvg)
+            printf '%s\n' "2028" "2029"
+            ;;
+        *)
+            echo "未知 GVG 服务器: $id" >&2
+            exit 1
+            ;;
+    esac
+}
+
+start_special_gvg() {
+    local id=$1
+    local mode=$2
+    local gvg_ids=()
+    local hosts=()
+    local gvg_id
+    local host
+    local zone_host
+    local daemon_hosts=()
+
+    mapfile -t gvg_ids < <(get_gvg_ids "$id")
+    for gvg_id in "${gvg_ids[@]}"; do
+        host=$(require_game_host "$gvg_id")
+        hosts+=("$host")
+    done
+
+    zone_host=${hosts[0]}
+    daemon_hosts=("${hosts[@]:1}")
+
+    case "$mode" in
+        normal|noz)
+            start_gvg_zone "$zone_host"
+            sleep 15
+            for host in "${daemon_hosts[@]}"; do
+                start_gvg_daemon "$host"
+            done
+            ;;
+        gvgzone)
+            start_gvg_zone "$zone_host"
+            ;;
+        gvgdaemon)
+            for host in "${daemon_hosts[@]}"; do
+                start_gvg_daemon "$host"
+            done
+            ;;
+        *)
+            echo "未知操作: $mode" >&2
+            exit 1
+            ;;
+    esac
+}
+
+case "$server_id" in
+    4001)
+        bash yc_start.sh
+        ;;
+    jyh)
+        start_jyh "2021"
+        ;;
+    cross)
+        start_cross "4050"
+        ;;
+    dev|weekly|qa)
+        python3 asyncio_start.py "$server_id"
+        ;;
+    weeklygvg|devgvg|qagvg)
+        start_special_gvg "$server_id" "$action"
+        ;;
+    *)
+        start_normal_server "$server_id" "$action"
+        ;;
+esac
 

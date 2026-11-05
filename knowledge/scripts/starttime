@@ -7,11 +7,14 @@
 # 配置管理脚本路径
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MODIFY_CONFIG_SCRIPT="$SCRIPT_DIR/script_helper/modify_remote_config.sh"
-MODIFY_SCRIPT="script_helper/modify_remote_config.sh"
+MODIFY_SCRIPT="$SCRIPT_DIR/script_helper/modify_remote_config.sh"
 # 默认配置文件路径
 CONFIG_FILE="/data/app/game-etc/server_cluster_config.lua"
+CONFIG_FILE_GVG="/data/app/gvg_zone-etc/server_cluster_config.lua"
 # Debug时间戳文件路径
 DEBUG_TIME_FILE="/data/app/game-server/server_common/Debug_ServerStartTime.lua"
+DEBUG_TIME_FILE_APP_ROOT="/data/app/game-server/Debug_ServerStartTime.lua"
+DEBUG_TIME_FILE_GAME_ETC="/data/app/game-server/etc/Debug_ServerStartTime.lua"
 # 配置块名称
 CONFIG_SECTION="common"
 # 要检查和添加的配置项
@@ -218,6 +221,10 @@ if [ "$USE_CURRENT_TIME" = true ]; then
     # 将值改为 nil，保留逗号：{ ... }, → nil,
     ssh root@$REMOTE_HOST "sed -i 's|^\([[:space:]]*debug_serverstarttime_config[[:space:]]*=[[:space:]]*\){.*},|\1nil,|' $CONFIG_FILE"
 
+    # gvg服务器需要额外处理
+    if [ "$SERVER_ID" == "2022" ] || [ "$SERVER_ID" == "2026" ] || [ "$SERVER_ID" == "2028" ]; then
+        ssh root@$REMOTE_HOST "sed -i 's|^\([[:space:]]*debug_serverstarttime_config[[:space:]]*=[[:space:]]*\){.*},|\1nil,|' $CONFIG_FILE_GVG"
+    fi
     if [ $? -eq 0 ]; then
         echo "✅ 配置已设为 nil，游戏服将使用默认当前时间"
     else
@@ -259,6 +266,19 @@ elif [ -n "$TIMESTAMP_INPUT" ]; then
         # NEW_CONFIG_LINE="    $CONFIG_KEY = $CONFIG_VALUE,"
         # ssh root@$REMOTE_HOST "sed -i \"/^config\\['$CONFIG_SECTION'\\][[:space:]]*=[[:space:]]*{/a\\$NEW_CONFIG_LINE\" $CONFIG_FILE" >/dev/null 2>&1
     fi
+    if [ "$SERVER_ID" == "2022" ] || [ "$SERVER_ID" == "2026" ] || [ "$SERVER_ID" == "2028" ]; then
+        if ssh root@$REMOTE_HOST "grep -q '$CONFIG_KEY' $CONFIG_FILE" 2>/dev/null; then
+        # 配置存在，取消注释：将 = nil -- { ... } 改为 = { ... }
+        # ssh root@$REMOTE_HOST "sed -i 's|^\([[:space:]]*debug_serverstarttime_config[[:space:]]*=[[:space:]]*\)nil -- \({.*}\)|\1\2|' $CONFIG_FILE" >/dev/null 2>&1
+        bash "$MODIFY_SCRIPT" -s "$SERVER_ID" -f "$CONFIG_FILE_GVG" -p inside -c common -k debug_serverstarttime_config -v "{ fpath = './', file='Debug_ServerStartTime', rpath = '' }"
+
+        else
+            # 配置不存在，添加配置
+            bash "$MODIFY_SCRIPT" -s "$SERVER_ID" -f "$CONFIG_FILE_GVG" -p inside -c common -k debug_serverstarttime_config -v "{ fpath = './', file='Debug_ServerStartTime', rpath = '' }"
+            # NEW_CONFIG_LINE="    $CONFIG_KEY = $CONFIG_VALUE,"
+            # ssh root@$REMOTE_HOST "sed -i \"/^config\\['$CONFIG_SECTION'\\][[:space:]]*=[[:space:]]*{/a\\$NEW_CONFIG_LINE\" $CONFIG_FILE" >/dev/null 2>&1
+        fi
+    fi
 
     # 创建/更新时间戳文件
     echo "正在更新时间戳文件..."
@@ -272,12 +292,25 @@ elif [ -n "$TIMESTAMP_INPUT" ]; then
 
     # 确保目录存在
     ssh root@$REMOTE_HOST "mkdir -p $(dirname $DEBUG_TIME_FILE)" >/dev/null 2>&1
-
     # 写入时间戳文件
     ssh root@$REMOTE_HOST "cat > $DEBUG_TIME_FILE << 'EOFMARKER'
 return $TIMESTAMP
 EOFMARKER
 " >/dev/null 2>&1
+    if [ "$SERVER_ID" == "2022" ] || [ "$SERVER_ID" == "2026" ] || [ "$SERVER_ID" == "2028" ]; then
+        ssh root@$REMOTE_HOST "mkdir -p $(dirname $DEBUG_TIME_FILE_APP_ROOT)" >/dev/null 2>&1
+        ssh root@$REMOTE_HOST "mkdir -p $(dirname $DEBUG_TIME_FILE_GAME_ETC)" >/dev/null 2>&1
+        ssh root@$REMOTE_HOST "cat > $DEBUG_TIME_FILE_APP_ROOT << 'EOFMARKER'
+return $TIMESTAMP
+EOFMARKER
+" >/dev/null 2>&1
+        ssh root@$REMOTE_HOST "cat > $DEBUG_TIME_FILE_GAME_ETC << 'EOFMARKER'
+return $TIMESTAMP
+EOFMARKER
+" >/dev/null 2>&1
+    fi
+
+
 
     READABLE_TIME=$(python3 -c "from datetime import datetime; print(datetime.fromtimestamp($TIMESTAMP).strftime('%Y-%m-%d %H:%M:%S'))")
     echo "✅ 已设置开服时间为: $READABLE_TIME ($TIMESTAMP)"
@@ -310,3 +343,4 @@ if [ "$IS_BACKUP" = "yes" ] || [ "$IS_BACKUP" = "true" ] || [ "$IS_BACKUP" = "y"
     echo "备份文件已保存在远程服务器上（*.backup.*）"
 fi
 echo "========================================"
+

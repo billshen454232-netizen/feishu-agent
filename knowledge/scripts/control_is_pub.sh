@@ -21,14 +21,14 @@ if [ "$is_revert" == "k" ]; then
     # k: 设置 IS_PUBLISH = false（关闭发布，开启调试）
     echo "正在关闭发布模式（IS_PUBLISH = false）..."
     bash "$MODIFY_SCRIPT" -s "$server_id" -f "$CONFIG_FILE" -p inside -c common -k IS_PUBLISH -v false
-    bash "$MODIFY_SCRIPT" -s "$server_id" -f "$CONFIG_FILE_ENV" -p after -k NSLG_IS_PUBLISH -v false
+    bash "$MODIFY_SCRIPT" -s "$server_id" -f "$CONFIG_FILE_ENV" -p after -k IS_PUBLISH -v false
     echo "调试面板已开启"
 
 elif [ "$is_revert" == "re" ]; then
     # re: 设置 IS_PUBLISH = true（开启发布，关闭调试）
     echo "正在开启发布模式（IS_PUBLISH = true）..."
     bash "$MODIFY_SCRIPT" -s "$server_id" -f "$CONFIG_FILE" -p inside -c common -k IS_PUBLISH -v true
-    bash "$MODIFY_SCRIPT" -s "$server_id" -f "$CONFIG_FILE_ENV" -p after -k NSLG_IS_PUBLISH -v true
+    bash "$MODIFY_SCRIPT" -s "$server_id" -f "$CONFIG_FILE_ENV" -p after -k IS_PUBLISH -v true
     echo "外部环境已打开，调试面板已关闭"
 
 else
@@ -39,3 +39,4 @@ else
     echo "  op - 走开服脚本"
     exit 1
 fi
+

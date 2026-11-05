@@ -227,7 +227,7 @@ def main():
     parser.add_argument('-f','--patchname', help='patch文件名字 前缀是uf表示传文件,ul表示传列表')
     parser.add_argument('-r','--recover', help='备份相关 如果备份填bak 恢复备份填re')
     parser.add_argument('-m','--modify-json', action='store_true', help='检查时删除JSON中没有对应文件的条目')
-    parser.add_argument('-d','--delete', help='删除指定的patch文件（如 avatar_patch_60952.lua）并重新排序')
+    parser.add_argument('-d','--delete', help='删除指定的patch文件名（如 avatar_patch_60952.lua）并重新排序order_list(不会删除文件)')
     args = parser.parse_args()
     # host的配置文件路径
     ini_file_path="config.ini"

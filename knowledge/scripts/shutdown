@@ -68,6 +68,17 @@ shutdown_kill() {
     echo "服务器已关闭"
 }
 
+kill_microservice() {
+    local id=$1
+    host=$(require_game_host "$id")
+    echo "[$id][$host] 杀进程关服"
+    echo "杀进程关服"
+    ssh_game "$host" "cd /data/app/game-server/bin && bash kill_microservices.sh"
+    sleep 2
+    echo "DEV交易行服务器已关闭"
+}
+
+
 shutdown_autokill() {
     local host=$1
     local process_count
@@ -111,6 +122,8 @@ shutdown_normal_server() {
         kill)
             if [[ "$id" == "4001" ]]; then
                 bash yc_shutdown.sh kill
+            elif [[ "$id" == "jyh" ]]; then
+                kill_microservice "$host"
             else
                 shutdown_kill "$host"
             fi
@@ -213,9 +226,12 @@ case "$server_id" in
             shutdown_normal_server "$server_id" "$action"
         fi
         ;;
-    dev|weekly|qa|krdev|krweekly|krqa)
+    dev|weekly|qa)
         python3 asyncio_shutdown.py "$server_id"
         echo "$server_id"
+        ;;
+    jyh)
+        kill_microservice "2021"
         ;;
     weeklygvg|devgvg|qagvg)
         shutdown_special_gvg "$server_id" "$action"
@@ -224,3 +240,4 @@ case "$server_id" in
         shutdown_normal_server "$server_id" "$action"
         ;;
 esac
+

@@ -27,7 +27,7 @@
 
 ## 3. 能力对照
 
-### 3.1 语义核实（2026-11-04，读 `/api/servers` 的 operations 与 GS-1 上 `/data/app/nslg_server_manager` 源码）
+### 3.1 语义核实（2026-11-04，读 `/api/servers` 的 operations 与 GS-1 上 `/data/app/nslg_server_manager` 源码；2026-11-05 用国服 GS-1 实际脚本复核：`clear` 与本地副本一致，`start` / `shutdown` 普通服路径不变）
 
 | 动作 | GS-1 脚本 | Server Manager | 结论 |
 | --- | --- | --- | --- |
@@ -51,6 +51,7 @@
 | `shutdown-mode` `shutdown {id} kill` | `kill [game_{id}, zone_{id}01]` | 迁移 |
 | `shutdown qagvg {normal/kill/autokill/gvgzone}` | `kill [qa_gvg_zone]`（主 = 2028、从 = 2029，IP 哈希已核对；`kill_gvg_zone.sh` 杀本 gvg_zone 分组全部 skynet lua 进程，已包含 daemon / gate，GS-1 先 zone 后 daemon 的两步等效于它） | 迁移 |
 | `shutdown qagvg gvgdaemon`（只杀 room_daemon / room_gate） | 无对应命令 | 保留木流 |
+| `start qagvg {normal/noz}`（国服 `start`：第一台起 zone 中心、其余起 daemon） | `start [qa_gvg_zone]`（主 `start_gvg_zone.sh`、从 `start_gvg_zone_daemon.sh`，与之对应） | 二期（机器人目前未登记 gvg 起服合同） |
 | `shutdown weeklygvg / devgvg ...`（2022–2027） | API 无这两组 gvg | 保留木流 |
 | `shutdown {id} autokill`（普通服）、环境名批量关服（dev / weekly / qa / kr*） | 无直接对应 | 保留木流（批量关服可在二期用多目标 `stop` 评估） |
 | `clear-server` `clear {id}` | `kill [game_{id}, zone_{id}01]` → `clear [game_{id}, zone_{id}01]` | 迁移（4001 除外） |
