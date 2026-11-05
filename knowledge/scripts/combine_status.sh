@@ -24,8 +24,8 @@ procs=$(ps -ef | grep 'skynet/skynet' | grep -E 'GROUP=[0-9]*combine' | grep -v 
 echo "合服工具进程：${procs} 个（合完不会自动退出，不作为完成依据）"
 cd "$log_dir" 2>/dev/null || { echo "日志目录不存在"; echo "COMBINE_STATE=unknown"; exit 0; }
 
-# 只用当次合服的 combine_* 日志判定（nohup.log 跨次追加，可能残留上一次的结束 / 报错）
-files=$(ls -t combine_* 2>/dev/null | head -n 20)
+# 完成标记只写在 nohup.log；exc_server_merge.sh 每次启动前把旧 nohup.log 改名为 nohup.log.prev，保证只含当次合服
+files=$(ls -t combine_* nohup.log 2>/dev/null | head -n 21)
 if [[ -z "$files" ]]; then
     echo "没有合服日志"
     echo "COMBINE_STATE=unknown"
@@ -93,7 +93,7 @@ if [[ -n "$trace" && -s "$trace" ]]; then
     grep -n -iE 'error|traceback|fail|exception' "$trace" | tail -n 20
 fi
 if [[ -f nohup.log ]]; then
-    echo "---- nohup.log 最后 15 行（进程级输出，可能含上一次合服）----"
+    echo "---- nohup.log 最后 15 行（合服流程输出）----"
     tail -n 15 nohup.log
 fi
 echo "COMBINE_STATE=${state}"

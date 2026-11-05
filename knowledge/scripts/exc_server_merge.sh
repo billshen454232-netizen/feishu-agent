@@ -32,6 +32,9 @@ local_file_path="$SCRIPT_DIR/pys_col/combine_config/combine_demo_new.lua"
 target_file_path="/data/app/game-server/etc/combine_tool_cluster_config.lua"
 scp "$local_file_path" root@$valueip:$target_file_path || { echo "上传合服配置失败，已停止：未启动合服工具"; exit 1; }
 
+# 旧 nohup.log 改名为 nohup.log.prev（start_combine_tool.sh 只会追加），让判定只看当次合服的输出
+ssh root@$valueip 'cd "$(readlink -f /data/app/game-server/../log)" 2>/dev/null && [ -f nohup.log ] && mv -f nohup.log nohup.log.prev; true'
+
 # -b 1：后台模式，启动后立即返回（否则 start_combine_tool.sh 末尾 tail -f 会一直挂住 ssh）
 ssh root@$valueip "cd /data/app/game-server/bin;bash start_combine_tool.sh -b 1" >/dev/null || { echo "启动合服工具失败"; exit 1; }
 echo "合服工具已启动，等待合服结果（最多 ${MERGE_WAIT_SECONDS} 秒）"
