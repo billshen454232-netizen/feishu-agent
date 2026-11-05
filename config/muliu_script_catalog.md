@@ -288,6 +288,7 @@
   4. `<scenario>`：合服来源的剧本编号。
 - **边界**：首批只允许一个来源服和一个目标服；脚本虽然支持多个目标服，但本合同不接受额外服号。所有服号必须属于同一受控路由区域；国服与海外服不能混合。缺少任一参数时必须要求补充，不能猜测。
 - **远端影响**：脚本先检查来源服所在机器是否已有合服工具进程（`GROUP=<编号>combine`），**已有则直接停止（exit 2，不生成、不覆盖、不启动）**并提示先确认上一次合服已结束；否则生成配置（生成失败立即停止）、覆盖来源服节点上的 `combine_tool_cluster_config.lua`，再以后台模式（`start_combine_tool.sh -b 1`）启动合服工具后立即返回。脚本返回成功仅表示合服工具已在后台启动，不代表合服完成或数据已验证；必须通过后续状态或日志核验确认。
+- **合服日志位置**（来源服所在机器）：`/data/app/game-server` 是指向 `/data/publish/qa-game-server/code/<构建号>/qa-game-server` 的软链接，合服日志在其上一级的 `log/`，即 `readlink -f /data/app/game-server/../log`（构建号随发布变化，不要写死）。主控 `combine_server_gamemanager_<月日时>.log`、报错堆栈 `combine_trace_server_*.log`、进程输出 `nohup.log`；`bak/` 只保留上一次合服的日志。
 
 ### 模式 N2：关闭目标服合服工具（stop_combine_tool.sh）
 
