@@ -1,8 +1,10 @@
 #!/bin/bash
-# 合服：检查起始服机器 → 生成合服配置 → 上传 → 后台启动合服工具（脚本返回 = 已启动，不代表合服完成）
+# 合服：检查起始服机器 → 生成合服配置 → 上传 → 后台启动合服工具 → 按日志关键字等待结果（≤90 秒）
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 CONFIG_FILE="$SCRIPT_DIR/config.ini"
 PY=python3
+MERGE_WAIT_SECONDS=90
+MERGE_POLL_SECONDS=5
 new_server_name=${@:1:1}
 
 valueip=$(awk -F '=' -v key="$new_server_name"_game '$1 == key {print $2}' "$CONFIG_FILE" | tr -d '\r ')
@@ -31,4 +33,30 @@ target_file_path="/data/app/game-server/etc/combine_tool_cluster_config.lua"
 scp "$local_file_path" root@$valueip:$target_file_path || { echo "上传合服配置失败，已停止：未启动合服工具"; exit 1; }
 
 # -b 1：后台模式，启动后立即返回（否则 start_combine_tool.sh 末尾 tail -f 会一直挂住 ssh）
-ssh root@$valueip "cd /data/app/game-server/bin;bash start_combine_tool.sh -b 1"
+ssh root@$valueip "cd /data/app/game-server/bin;bash start_combine_tool.sh -b 1" >/dev/null || { echo "启动合服工具失败"; exit 1; }
+echo "合服工具已启动，等待合服结果（最多 ${MERGE_WAIT_SECONDS} 秒）"
+
+# 测试服合服通常 20–30 秒；按 combine_status.sh（与 Server Manager 相同的日志关键字）判定结果
+waited=0
+while true; do
+    sleep "$MERGE_POLL_SECONDS"
+    waited=$((waited + MERGE_POLL_SECONDS))
+    status_output=$(bash "$SCRIPT_DIR/combine_status.sh" "$new_server_name" 2>&1)
+    state=$(sed -n 's/^COMBINE_STATE=//p' <<<"$status_output" | tail -n 1)
+    if [[ "$state" == "succeeded" ]]; then
+        echo "合服完成（约 ${waited} 秒）"
+        echo "$status_output"
+        echo "注意：合服工具合完不会自动退出，确认数据后可执行「关闭 ${new_server_name} 服的合服工具」"
+        exit 0
+    fi
+    if [[ "$state" == "failed" ]]; then
+        echo "合服失败（约 ${waited} 秒），日志如下："
+        echo "$status_output"
+        exit 1
+    fi
+    if (( waited >= MERGE_WAIT_SECONDS )); then
+        echo "合服超过 ${MERGE_WAIT_SECONDS} 秒仍未结束，按异常处理（测试服正常 20–30 秒），日志如下："
+        echo "$status_output"
+        exit 3
+    fi
+done
