@@ -11,7 +11,7 @@ import time
 from dataclasses import dataclass
 from http.client import HTTPException
 from http.cookiejar import CookieJar
-from typing import Any, Callable, TypeVar
+from typing import Any, Callable, Optional, TypeVar
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import HTTPCookieProcessor, Request, build_opener
@@ -435,23 +435,52 @@ class MuliuExecutor:
         self._config = config
         self._lock = asyncio.Lock()
 
-    async def execute_plan(self, plan: MuliuPlan) -> MuliuExecutionResult:
+    async def execute_plan(
+        self,
+        plan: MuliuPlan,
+        *,
+        api_steps: Optional[list[Any]] = None,
+        api_runner: Any = None,
+    ) -> MuliuExecutionResult:
+        """``api_steps[i]`` holds the Server Manager task list for step i+1, or None to use Muliu."""
         if not self._config.enabled:
             raise MuliuExecutionError("Muliu 执行功能未启用")
 
         async with self._lock:
-            return await asyncio.to_thread(self._execute_plan_blocking, plan)
+            return await asyncio.to_thread(self._execute_plan_blocking, plan, api_steps, api_runner)
 
-    def _execute_plan_blocking(self, plan: MuliuPlan) -> MuliuExecutionResult:
+    def _execute_plan_blocking(
+        self, plan: MuliuPlan, api_steps: Optional[list[Any]] = None, api_runner: Any = None
+    ) -> MuliuExecutionResult:
         client = MuliuHttpClient(self._config)
-        retry_before_submit(client.login, "登录", delay_seconds=self._config.log_wait_seconds)
+        logged_in = False
         results: list[MuliuStepResult] = []
         total = len(plan.steps)
 
         for step_number, step in enumerate(plan.steps, start=1):
             label = "第 {}/{} 步「{}」".format(step_number, total, step.description)
+            api_tasks = api_steps[step_number - 1] if api_steps and api_runner is not None else None
+            if not api_tasks and not logged_in:
+                # Muliu login happens only once a Muliu step is reached; nothing of this step ran yet.
+                try:
+                    retry_before_submit(client.login, "登录", delay_seconds=self._config.log_wait_seconds)
+                except MuliuExecutionError as exc:
+                    if not results:
+                        raise
+                    return MuliuExecutionResult(
+                        summary=plan.summary,
+                        step_results=results,
+                        failed_step_number=step_number,
+                        failure_reason="{}未执行：木流登录失败：{}".format(label, exc),
+                        resumable_from_step=step_number,
+                        transient_error=True,
+                    )
+                logged_in = True
             try:
-                log = client.execute_step(step)
+                if api_tasks:
+                    log = api_runner.execute_step(step, step_number, api_tasks)
+                else:
+                    log = client.execute_step(step)
             except MuliuSubmittedError as exc:
                 if exc.submitted:
                     logger.warning("muliu step result unknown step=%s/%s error=%s", step_number, total, exc)
@@ -497,7 +526,7 @@ class MuliuExecutor:
                     failure_reason=failure_reason,
                 )
 
-            if step.path == START_SCRIPT_PATH:
+            if step.path == START_SCRIPT_PATH and not api_tasks:
                 time.sleep(self._config.start_verification_wait_seconds)
                 verification_step = _build_start_verification_step(step)
                 try:

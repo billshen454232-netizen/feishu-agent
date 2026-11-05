@@ -19,6 +19,7 @@ from .admin_app import AdminServer, create_admin_app
 from .clear_notifier import ClearNotifier
 from .plan_board import PlanStore
 from .hotfix_thresholds import HotfixPlannerCatalog, ThresholdStore
+from .execution_routes import ExecutionRouteStore
 from .qa_library import QaService, QaStore
 from .event_handler import FeishuEventHandler
 from .execution_report import ExecutionReportStore
@@ -66,6 +67,8 @@ def create_app(config_path: str | Path = "config/config.json") -> FastAPI:
     # The Planner sees hotfix keys from the live registry; executed plans use the static executable contracts.
     script_catalog = HotfixPlannerCatalog(config.muliu.script_catalog_path, threshold_store)
     executable_contracts = MuliuScriptCatalog(config.muliu.script_catalog_path).read_call_contracts()
+    route_store = ExecutionRouteStore(config.job_queue.database_path)
+    route_store.initialize()
     operation_planner = MuliuPlanner(
         ai_client=planning_ai_client,
         script_catalog=script_catalog,
@@ -172,6 +175,8 @@ def create_app(config_path: str | Path = "config/config.json") -> FastAPI:
                     plan_store=plan_store,
                     threshold_store=threshold_store,
                     review_client=create_ai_client(config.ai_for("interpretation")),
+                    route_store=route_store,
+                    route_contracts=executable_contracts,
                 ),
                 port=config.admin.port,
             )
@@ -197,7 +202,7 @@ def create_app(config_path: str | Path = "config/config.json") -> FastAPI:
         return await event_handler.handle(payload)
 
     if config.runtime.role == "gateway":
-        _add_gateway_worker_routes(app, config, job_store, job_processor)
+        _add_gateway_worker_routes(app, config, job_store, job_processor, route_store, executable_contracts)
 
     return app
 
@@ -257,6 +262,8 @@ def _add_gateway_worker_routes(
     config: Any,
     job_store: MessageJobStore,
     job_processor: MessageJobProcessor,
+    route_store: Optional[ExecutionRouteStore] = None,
+    executable_contracts: Any = None,
 ) -> None:
     """Expose a minimal authenticated pull protocol for the intranet worker."""
 
@@ -285,10 +292,21 @@ def _add_gateway_worker_routes(
         job = job_store.claim_next_worker_job(worker_id)
         if job is None:
             return Response(status_code=204)
+        step_routes: list[str] = []
+        try:
+            # Per-step Muliu / Server Manager route from the admin switches at claim time; the Worker re-checks.
+            if route_store is not None and executable_contracts is not None:
+                step_routes = route_store.step_routes(
+                    parse_plan(job.plan_json, max_steps=config.muliu.max_steps), job.route_region, executable_contracts
+                )
+        except Exception:  # noqa: BLE001 - an unreadable plan is rejected by the Worker's own validation
+            logger.warning("step routes unavailable message_id=%s", job.message_id, exc_info=True)
+            step_routes = []
         return {
             "message_id": job.message_id,
             "plan_json": job.plan_json,
             "route_region": job.route_region,
+            "step_routes": step_routes,
         }
 
     @app.post("/internal/worker/jobs/{message_id}/heartbeat", include_in_schema=False)

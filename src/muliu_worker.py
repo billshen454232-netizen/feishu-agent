@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
-from typing import Any
+import time
+from dataclasses import dataclass, field
+from typing import Any, Optional
 
 import httpx
 
@@ -14,6 +15,7 @@ from .muliu_executor import MuliuExecutionError, MuliuExecutionResult, MuliuExec
 from .muliu_firewall import MuliuFirewall
 from .muliu_plan import MuliuPlanError, parse_plan
 from .muliu_routing import MuliuPlanRouteResolver, MuliuRouteSnapshot, MuliuRoutingError
+from .server_manager import ROUTE_API, ROUTES, ServerManagerClient, ServerManagerStepRunner, translate
 from .worker_protocol import serialize_execution_result
 
 logger = logging.getLogger(__name__)
@@ -28,6 +30,8 @@ class ClaimedWorkerJob:
     message_id: str
     plan_json: str
     route_region: str
+    # Gateway's per-step route (muliu / api) from the admin switches; empty = all Muliu.
+    step_routes: tuple[str, ...] = field(default_factory=tuple)
 
 
 class GatewayWorkerClient:
@@ -59,10 +63,14 @@ class GatewayWorkerClient:
             or not isinstance(route_region, str)
         ):
             raise GatewayWorkerClientError("gateway 返回的领取任务格式无效")
+        raw_routes = data.get("step_routes") or []
+        if not isinstance(raw_routes, list) or not all(item in ROUTES for item in raw_routes):
+            raise GatewayWorkerClientError("gateway 返回的执行路线格式无效")
         return ClaimedWorkerJob(
             message_id=message_id,
             plan_json=plan_json,
             route_region=route_region,
+            step_routes=tuple(raw_routes),
         )
 
     async def heartbeat(self, message_id: str) -> bool:
@@ -138,6 +146,8 @@ class MuliuWorker:
         self._route_resolver = route_resolver
         self._call_contracts = call_contracts
         self._stopping = False
+        self._sm_clients: dict[str, ServerManagerClient] = {}
+        self._sm_inventory: dict[str, tuple[float, set[str]]] = {}
 
     async def run_forever(self) -> None:
         self._stopping = False
@@ -193,8 +203,11 @@ class MuliuWorker:
                 logger.error("gateway no longer accepts invalid-plan result message_id=%s", job.message_id)
             return
 
+        api_steps, api_runner = await self._api_route(plan, job, local_snapshot.region)
         routed_executor = MuliuExecutor(routed_config)
-        execution_task = asyncio.create_task(self._execute_with_read_only_retry(routed_executor, plan, job.message_id))
+        execution_task = asyncio.create_task(
+            self._execute_with_read_only_retry(routed_executor, plan, job.message_id, api_steps, api_runner)
+        )
         heartbeat_task = asyncio.create_task(self._heartbeat_until_done(job.message_id, execution_task))
         try:
             result = await execution_task
@@ -234,8 +247,72 @@ class MuliuWorker:
         if not accepted:
             logger.error("gateway no longer accepts result message_id=%s", job.message_id)
 
-    async def _execute_with_read_only_retry(self, executor: MuliuExecutor, plan: Any, message_id: str) -> MuliuExecutionResult:
+    async def _api_route(
+        self, plan: Any, job: ClaimedWorkerJob, region: str
+    ) -> tuple[Optional[list[Any]], Optional[ServerManagerStepRunner]]:
+        """Per-step Server Manager tasks; any doubt keeps the step on Muliu (never an error)."""
+        settings = self._config.server_manager
+        if ROUTE_API not in job.step_routes:
+            return None, None
+        if not settings.enabled or region not in settings.regions or self._call_contracts is None:
+            logger.warning("api route requested but unavailable on this worker message_id=%s region=%s", job.message_id, region)
+            return None, None
+        if len(job.step_routes) != len(plan.steps):
+            logger.warning("step route count mismatch message_id=%s", job.message_id)
+            return None, None
+        client = self._sm_client(region)
+        try:
+            inventory = await self._sm_servers(region, client)
+        except Exception:  # noqa: BLE001 - inventory unknown: stay on Muliu
+            logger.warning("server manager inventory unavailable region=%s; using muliu", region, exc_info=True)
+            return None, None
+        api_steps: list[Any] = []
+        for step, route in zip(plan.steps, job.step_routes):
+            tasks = None
+            if route == ROUTE_API:
+                matching = [contract for contract in self._call_contracts.contracts if contract.matches(step)]
+                tasks = translate(matching[0].name, step) if len(matching) == 1 else None
+                if tasks and not all(target in inventory for task in tasks for target in task.targets):
+                    logger.warning("api route skipped: target not in inventory message_id=%s step=%s", job.message_id, step.args)
+                    tasks = None
+            api_steps.append(tasks)
+        if not any(api_steps):
+            return None, None
+        logger.warning("api route message_id=%s steps=%s", job.message_id, [bool(item) for item in api_steps])
+        return api_steps, ServerManagerStepRunner(client, job.message_id)
+
+    def _sm_client(self, region: str) -> ServerManagerClient:
+        if region not in self._sm_clients:
+            settings = self._config.server_manager
+            self._sm_clients[region] = ServerManagerClient(
+                settings.regions[region],
+                settings.env,
+                poll_interval_seconds=settings.poll_interval_seconds,
+                task_timeout_seconds=settings.task_timeout_seconds,
+                request_timeout_seconds=settings.request_timeout_seconds,
+            )
+        return self._sm_clients[region]
+
+    async def _sm_servers(self, region: str, client: ServerManagerClient) -> set[str]:
+        cached = self._sm_inventory.get(region)
+        if cached and time.monotonic() - cached[0] < self._config.server_manager.inventory_ttl_seconds:
+            return cached[1]
+        servers = await asyncio.to_thread(client.server_ids)
+        self._sm_inventory[region] = (time.monotonic(), servers)
+        return servers
+
+    async def _execute_with_read_only_retry(
+        self,
+        executor: MuliuExecutor,
+        plan: Any,
+        message_id: str,
+        api_steps: Optional[list[Any]] = None,
+        api_runner: Optional[ServerManagerStepRunner] = None,
+    ) -> MuliuExecutionResult:
         """Read-only plans that failed on Muliu transport trouble are re-run once (no side effects)."""
+        if api_steps:
+            # API-routed plans are never re-run here: phase-1 API capabilities are all writes.
+            return await executor.execute_plan(plan, api_steps=api_steps, api_runner=api_runner)
         result = await executor.execute_plan(plan)
         if (
             not result.succeeded

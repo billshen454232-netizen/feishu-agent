@@ -1,7 +1,7 @@
 # 用 Server Manager API 替代木流网页执行
 
-> **状态：设计草案，待用户确认第 7 节问题**
-> **日期：2026-11-04**
+> **状态：方案 C 实施中（2026-11-05 用户选定：混合路线 + 后台逐项开关）**
+> **日期：2026-11-04 初稿；2026-11-05 定稿方案 C**
 > **关联计划：** 项目计划看板 STEP 35
 > **原则：** 能力由注册表驱动（不新增第二套限制规则）；写操作永不自动重跑；脚本成功 ≠ 服务就绪 ≠ 游戏内生效
 
@@ -61,37 +61,65 @@
 | 热更阈值、`cc_patch`、`control_is_pub`、`starttime`、`basic_info`、批量版本查询、`clear_zone` / `cleardb` 等 | 无对应 | 保留木流 |
 | — | `run-debug-code`（任意代码执行） | **不接入** |
 
-## 4. 架构
+## 4. 架构（方案 C：混合路线，逐项开关）
+
+用户 2026-11-05 决定：不要求服务端改接口；API 已覆盖的能力逐项切到 API，其余继续木流。每项能力、每个区域（国服 / 海外）单独开关，一个一个测试上线，避免整体崩溃。
 
 ```text
 飞书 → Gateway（规划 / 校验 / 确认卡片，不变）→ SQLite → Worker
+Worker 领取任务时，Gateway 按「执行路线」开关为每一步标注 muliu / api
 Worker 逐步执行：
-  步骤匹配「已迁移合同」且服号在该区域 API 清单内 → Server Manager 后端
-  否则                                              → 木流后端（现有逻辑不变）
+  标注 api 且 Worker 本地翻译成功、服号在该区域 API 清单内 → Server Manager
+  否则                                                    → 木流（现有逻辑不变）
 ```
 
-- **Planner、catalog、确认卡片都不变**：AI 仍然输出 `path + args`；后端选择是 Worker 上的确定性翻译，不经过 AI；
-- **翻译表放配置**（注册表驱动）：`server_manager.capabilities` 按合同名登记 `task_type`、targets 规则（`game` / `zone+game`）、固定 params；未登记的合同一律走木流；
-- **区域 → 实例**：沿用现有 `route_region`（cn / overseas）选择 base URL；
-- **服号清单**：Worker 启动时与每 N 分钟读 `GET /api/servers?env=qa_test` 缓存；不在清单里的服号走木流（不报错）；
-- **开关**：`server_manager.enabled` 与每项能力单独开关，可随时退回木流。
+- **Planner、catalog、确认卡片都不变**：AI 仍输出 `path + args`；路线选择与翻译都是确定性代码，不经 AI；
+- **开关存 Gateway SQLite**（`execution_routes`：合同名 × 区域 → muliu / api，含修改历史），默认全部木流；
+- **领取时决定**：Gateway 在 `/internal/worker/jobs/claim` 返回 `step_routes`（与步骤一一对应），以领取那一刻的开关为准；
+- **Worker 二次把关**：只有 Worker 本地翻译表认识的合同、且服号在 API 清单里，才真正走 API；否则降级木流并在结果日志注明原因（不报错）；
+- **翻译表在代码里**（`src/server_manager.py`），有测试；开关只决定「用不用」，不决定「怎么翻译」；
+- **Worker 配置**：`server_manager.enabled` 总开关 + 两个区域的 base URL；关掉总开关即全部回到木流。
 
-## 5. 执行与结果
+## 5. 执行与结果（API 路线）
 
-1. 每步生成稳定 `submission_id = fb-<message_id 摘要>-s<步号>`（≤96 字符，满足 `^[A-Za-z0-9][A-Za-z0-9._-]*$`），`reason` 写「飞书机器人：<发起人>：<请求摘要>」（脱敏）；
-2. `POST /api/tasks`（带 `submission_id` → 立即返回 handle）；
-3. 轮询 `GET /api/task-submissions/:id` 拿 `run_id`，再轮询 `GET /api/tasks/:run_id` 直到终态，最后 `GET /api/tasks/:run_id/result`；
-4. **超时 / 连接中断**：只用同一 `submission_id` 查询，**不改 ID 重派**；同 ID 重复 POST 时 API 只返回原任务（文档保证），所以「提交了没有」不再需要日志标记猜测；
-5. 结果映射到现有 `MuliuStepResult`（成功 / 失败 / 结果未知 + summary、stdout/stderr 摘要、`next_actions`），后续的模板库、AI 研读、确认卡片沿用；
-6. `server_state`（如 ready）写进结果摘要；仍遵守「脚本成功 ≠ 服务就绪」——只有 API 明确返回 ready 才写「已就绪」。
+1. 一步可能对应多次 API 提交（如清档 = kill → clear）；每次提交的 `submission_id = fb-<message_id 摘要>-s<步号>-t<序号>`，`reason` 写「飞书机器人 第 N 步：<步骤说明>」；
+2. `POST /api/tasks`（带 `submission_id`，立即返回）→ 轮询 `GET /api/task-submissions/:id` 直到终态 → `GET /api/tasks/:run_id/result` 取摘要；
+3. **提交超时 / 连接中断**：用同一 `submission_id` 查询；返回 404 `submission_not_found` = 确定未提交（可报「未执行」并允许继续剩余步骤），否则按「已提交、结果未知」处理；**不改 ID 重派、不自动重跑写操作**；
+4. 结果拼成与木流相同的日志格式（末尾 `AI_OP_END status=success|failed`），结果卡片、模板库、AI 研读沿用；日志首行注明「API 路线」与 `run_id`，便于对账；
+5. 起服走 API 时以 API 的 `wait_until=ready` 校验代替木流的 `basic_info` 核验（日志注明）；`server_state` 原样写入日志，只有 API 明确返回 ready 才写「已就绪」。
 
-## 6. 分期
+## 6. 功能清单与上线顺序
 
-| 期 | 内容 |
-| --- | --- |
-| 一 | Worker 客户端 + 翻译表 + 服号清单缓存；国服、海外的起服 / 关服 / 清档（§7 确认后）；默认关闭，逐项打开 |
-| 二 | 日志诊断（`log`）、合服工作流评估 |
-| 三 | 已全部迁移的能力去掉木流兼容逻辑（会话重登、运行标记核对仅对木流后端保留） |
+### 6.1 一期：可切 API（后台可开关）
+
+| # | 能力（catalog 合同） | 走 API 时的提交序列 | 不走 API 的情况 |
+| --- | --- | --- | --- |
+| 1 | 起服 `start-server`（`start X`） | `start [zone_X01]` → `start [game_X]` | 4001；服号不在 API 清单 |
+| 2 | 只起 game `start-game-only`（`start X noz`） | `start [game_X]` | 同上 |
+| 3 | 正常关服 `shutdown-normal`（`shutdown X`） | `stop [game_X]` → `stop [zone_X01]` | 同上 |
+| 4 | 指定方式关服 `shutdown-mode`（`shutdown X normal/kill`） | normal 同第 3 项；kill = `kill [game_X, zone_X01]` | `autokill` / `gvgzone` / `gvgdaemon`；4001；不在清单 |
+| 5 | 清档 `clear-server`（`clear X`） | `kill [game_X, zone_X01]` → `clear [game_X, zone_X01]` | 4001（GS-1 有特殊分支）；不在清单 |
+
+建议上线顺序（影响从小到大）：2（只起 game）→ 1（起服）→ 3 / 4（关服）→ 5（清档）。每项先开国服或海外其中一个区域，用测试服跑通再开另一个。
+
+### 6.2 二期：评估中（后台显示为「暂无 API 对应」）
+
+| 能力 | 候选 API | 需要先确认 |
+| --- | --- | --- |
+| 起服失败诊断 `startup-failure-diagnosis` | `task_type=log`（kind=error、since_minutes） | 输出与现有诊断是否等价 |
+| 单服基础信息 `basic-server-info` | `task_type=status` / `server-config` 读取 | 只能覆盖部分字段 |
+| 合服 `merge-single-source-single-target` | `merge_servers` 工作流 | 参数模型不同 |
+| qagvg 起服 / 关服 | `start` / `kill [qa_gvg_zone]` | 机器人尚未登记 gvg 合同 |
+
+### 6.3 无 API 对应（始终木流）
+
+热更阈值（`auto_hotfix_tool.py`）、补丁清单（`cc_patch.py` 6 项）、GM 面板 / 对外开关（`control_is_pub.sh`）、开服时间（`starttime`）、`basic_info.sh` 的剧本 / 赛季 / 积分查询、批量版本查询、`clear X by/noby`、`clear_logic_game` / `clear_zone` / `cleardb`、`modify_game_config.sh`、`stop_combine_tool.sh`。
+
+### 6.4 管理后台 `ops.ttlink.asia/routes`
+
+- 每行一个 catalog 合同：能力说明、API 提交序列（或「暂无 API 对应」）、国服开关、海外开关、最后修改人与时间、修改历史；
+- 只有 6.1 的合同能切换；切换即时生效（下一次 Worker 领取任务）；
+- 同一套 Cloudflare Access + Host 校验；写操作带 `X-Admin-Request: 1`。
 
 ## 7. 待确认（需要用户 / 服务端回答）
 

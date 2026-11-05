@@ -274,6 +274,7 @@ def test_gateway_worker_result_route_persists_and_interprets_patch_query(monkeyp
             "message_id": "om_worker_1",
             "plan_json": _plan_to_json(plan),
             "route_region": "overseas",
+            "step_routes": ["muliu"] * len(plan.steps),
         }
 
         exec_result = MuliuExecutionResult(

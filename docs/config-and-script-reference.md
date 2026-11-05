@@ -154,6 +154,27 @@ worker  = 主动连 Gateway 领任务 + 本地 Muliu 执行（无飞书/AI 凭�
 - 需求分析模型与耗时：规划器记录每次 AI 调用的模型和耗时，存入 `message_jobs.planning_model / planning_ms / planning_calls`。
 - 模板库、研读任务、执行记录与 `message_jobs` 同一个 SQLite 文件；执行记录按 `artifact_retention_days` 清理，模板不清理。
 
+### Server Manager API 执行路线（Worker，可选）
+
+方案 C（设计：`docs/superpowers/specs/2026-11-04-server-manager-executor.md`）：起服、关服、清档等 API 已覆盖的能力，可以在审批台「执行路线」页（`/routes`）按能力 × 区域逐项切到 Server Manager API，其余继续木流。Worker 上的总开关：
+
+```json
+"server_manager": {
+  "enabled": false,
+  "env": "qa_test",
+  "regions": { "cn": "https://<国服 Server Manager 域名>", "overseas": "https://<海外 Server Manager 域名>" },
+  "poll_interval_seconds": 3,
+  "task_timeout_seconds": 900,
+  "request_timeout_seconds": 30,
+  "inventory_ttl_seconds": 600
+}
+```
+
+- `enabled=false`（默认）或区域未配地址时，后台开关不生效、一律木流（Worker 日志 `api route requested but unavailable`）；
+- Gateway 在 Worker 领取任务时按开关给每步标注路线；Worker 再核对翻译表与 API 服号清单（`/api/servers`，按 `inventory_ttl_seconds` 缓存），不通过就留在木流；
+- 每次 API 提交带固定 `submission_id`；超时后按同一 ID 查询，查不到即确认未执行；写操作不自动重跑；
+- 结果日志首行为 `[API 路线]`，含每次提交的 `run_id`，便于在 Server Manager 后台对账。
+
 ### 清档企微推送（可选）
 
 计划里含清档脚本时，阿里云 Gateway 直接向企微群机器人推送两次消息（默认 @所有人），**按区服分群**。是否清档**按计划中的脚本路径判断**，不由 AI 判断。
@@ -237,6 +258,7 @@ worker  = 主动连 Gateway 领任务 + 本地 Muliu 执行（无飞书/AI 凭�
 | [execution_report.py](../src/execution_report.py) | 执行结果展示分流与典型故障模板库：错误特征（匹配键）计算、模板 / 后台研读任务 / 执行记录 / 运行时设置的 SQLite 存储。不改变任何终态。 | `compute_error_signature`, `ExecutionReportStore`, `is_read_only_result` |
 | [plan_board.py](../src/plan_board.py) / [plan_page.py](../src/plan_page.py) | 项目计划看板：SQLite 存储（步骤、元信息、修改历史），首次从 `docs/plan-board.json` 导入；`/plan` 列表页与 `/api/plan` 读写接口（AI 读取入口）。 | `PlanStore`, `PLAN_HTML` |
 | [hotfix_thresholds.py](../src/hotfix_thresholds.py) / [threshold_page.py](../src/threshold_page.py) | 热更阈值注册表：SQLite 存储（首次从 `config/hotfix_thresholds.seed.json` 导入）、确定性校验、已执行保护；`HotfixPlannerCatalog` 给 Planner 实时生成中文路由与 key 白名单，`expand_plan` 把 `-k <key>` 展开成 `-k <字段> --table <表>`；`/thresholds` 页面与 `/api/thresholds` 接口（含 AI 审核建议）。 | `ThresholdStore`, `HotfixPlannerCatalog`, `THRESHOLDS_HTML` |
+| [server_manager.py](../src/server_manager.py) / [execution_routes.py](../src/execution_routes.py) / [routes_page.py](../src/routes_page.py) | Server Manager API 执行路线（方案 C）：合同 → API 任务序列翻译表、同步客户端（`submission_id` 幂等、按提交记录判定是否已执行）、把 API 结果拼成木流日志格式的步骤执行器；Gateway 侧按能力 × 区域的路线开关（SQLite，含历史）与 `/routes` 后台。 | `translate`, `ServerManagerClient`, `ServerManagerStepRunner`, `ExecutionRouteStore`, `ROUTES_HTML` |
 | [qa_library.py](../src/qa_library.py) | 知识问答评审与归档：问答记录、多轮纠正、已审核问答库、资料修改建议的存储；归档检索打分（字符二元组覆盖率 + 脚本 / 类别加分）；问答提示词与 AI 调用（回答、纠正重答、归档草稿）。资料优先级：catalog > 已审核问答 > knowledge/docs。 | `QaStore`, `QaService`, `rank_archive` |
 | [admin_app.py](../src/admin_app.py) | 模板审批页：待审核 / 可用模板两个页签（通过 / 退回 / 删除 / 编辑 / 批量）、只读「最近执行」页签（发起人昵称、需求分析模型与耗时、终态、说明来源、结果研读模型与耗时、AI 说明）、查询成功模式开关。独立服务，**只监听 127.0.0.1**，经 SSH 端口转发访问。 | `create_admin_app`, `AdminServer` |
 | [operation_message.py](../src/operation_message.py) | 计划与结果的飞书文本/卡片格式化，含敏感信息遮罩。 | `format_plan_for_confirmation`, `build_plan_confirmation_card`, `format_execution_result`, `mask_sensitive_operation_data` |
@@ -391,6 +413,7 @@ Gateway SQLite 热更阈值注册表（网页 /thresholds 编辑，src/hotfix_th
 | `test_generate_runner_manifest.py` | 候选 manifest 与 catalog 一致性。 |
 | `test_sync_hotfix_planner_catalog.py` | catalog 环境映射同步产物、执行形态热更合同。 |
 | `test_gs1_inventory.py` | GS-1 盘点脚本（负责人自用）：不泄露 `config.ini` 值与文件内容、只接受 `summary`、不进 catalog / 知识库。 |
+| `test_server_manager.py` | 执行路线：翻译表与例外、客户端提交 / 轮询 / 未执行判定、步骤日志格式、执行器不登录木流、开关存储与后台接口、Worker 二次核对。 |
 | `test_hotfix_thresholds.py` | 热更阈值注册表：种子迁移、确定性校验、已执行保护、key → 字段 / 表展开、Planner 视图、网页接口。 |
 | `test_knowledge_base.py` / `test_script_knowledge_base.py` | 知识检索。 |
 | `test_conversation.py` / `test_conversation_log.py` | 会话历史与对话归档。 |

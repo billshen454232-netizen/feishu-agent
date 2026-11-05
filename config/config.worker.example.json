@@ -42,5 +42,17 @@
     "script_root": "/home/serverGeneralScript",
     "script_catalog_path": "config/muliu_script_catalog.md",
     "max_steps": 10
+  },
+  "server_manager": {
+    "enabled": false,
+    "env": "qa_test",
+    "regions": {
+      "cn": "https://cn-server-manager.example.com",
+      "overseas": "https://overseas-server-manager.example.com"
+    },
+    "poll_interval_seconds": 3,
+    "task_timeout_seconds": 900,
+    "request_timeout_seconds": 30,
+    "inventory_ttl_seconds": 600
   }
 }

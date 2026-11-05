@@ -21,6 +21,8 @@ from .hotfix_thresholds import ThresholdError, ThresholdStore, review_threshold
 from .plan_board import PlanError, PlanStore
 from .plan_page import PLAN_HTML
 from .threshold_page import THRESHOLDS_HTML
+from .routes_page import ROUTES_HTML
+from .execution_routes import ExecutionRouteStore, RouteError
 from .qa_library import (
     ARCHIVE_ACTIVE,
     ARCHIVE_STATUSES,
@@ -66,6 +68,8 @@ def create_admin_app(
     plan_store: PlanStore | None = None,
     threshold_store: ThresholdStore | None = None,
     review_client: Any | None = None,
+    route_store: ExecutionRouteStore | None = None,
+    route_contracts: Any | None = None,
 ) -> FastAPI:
     app = FastAPI(title="执行结果模板审批", docs_url=None, redoc_url=None, openapi_url=None)
 
@@ -101,6 +105,12 @@ def create_admin_app(
         if plan_store is None:
             return HTMLResponse("项目计划未启用", status_code=404)
         return HTMLResponse(PLAN_HTML, headers={"Cache-Control": "no-cache"})
+
+    @app.get("/routes", response_class=HTMLResponse)
+    async def routes_page() -> HTMLResponse:
+        if route_store is None or route_contracts is None:
+            return HTMLResponse("执行路线未启用", status_code=404)
+        return HTMLResponse(ROUTES_HTML, headers={"Cache-Control": "no-cache"})
 
     @app.get("/thresholds", response_class=HTMLResponse)
     async def thresholds_page() -> HTMLResponse:
@@ -200,8 +210,34 @@ def create_admin_app(
         _add_plan_routes(app, plan_store)
     if threshold_store is not None:
         _add_threshold_routes(app, threshold_store, review_client)
+    if route_store is not None and route_contracts is not None:
+        _add_execution_route_routes(app, route_store, route_contracts)
 
     return app
+
+
+def _add_execution_route_routes(app: FastAPI, routes: ExecutionRouteStore, contracts: Any) -> None:
+    """Per capability × region: Muliu or Server Manager API (takes effect at the next Worker claim)."""
+
+    @app.get("/api/routes")
+    async def list_routes() -> dict[str, Any]:
+        return {"items": routes.overview(contracts)}
+
+    @app.put("/api/routes/{contract}")
+    async def set_route(contract: str, payload: dict[str, Any], request: Request) -> dict[str, Any]:
+        try:
+            item = routes.set_backend(
+                contract, str(payload.get("region", "")), str(payload.get("backend", "")), operator=request.state.operator
+            )
+        except RouteError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        logger.warning("execution route changed contract=%s region=%s backend=%s operator=%s",
+                       contract, item["region"], item["backend"], request.state.operator)
+        return item
+
+    @app.get("/api/routes/events")
+    async def route_events(contract: Optional[str] = None, limit: int = 50) -> dict[str, Any]:
+        return {"events": routes.list_events(contract, max(1, min(limit, 200)))}
 
 
 def _add_threshold_routes(app: FastAPI, thresholds: ThresholdStore, review_client: Any | None) -> None:
@@ -732,7 +768,7 @@ _INDEX_HTML = r"""<!doctype html>
 <header class="masthead">
   <div class="masthead-inner">
     <div>
-      <h1>执行结果审批台 <a class="plan-link" href="/plan" target="_blank" rel="noopener">项目计划</a><a class="plan-link" href="/thresholds" target="_blank" rel="noopener">热更阈值</a></h1>
+      <h1>执行结果审批台 <a class="plan-link" href="/plan" target="_blank" rel="noopener">项目计划</a><a class="plan-link" href="/thresholds" target="_blank" rel="noopener">热更阈值</a><a class="plan-link" href="/routes" target="_blank" rel="noopener">执行路线</a></h1>
       <p class="lede">失败经 AI 分析后会收进「待审核」。通过的模板会被同类错误直接复用，不再调用 AI；改错了可以退回或删除。</p>
     </div>
     <fieldset class="mode" id="mode">

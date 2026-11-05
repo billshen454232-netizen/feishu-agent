@@ -266,6 +266,23 @@ class AdminConfig:
 
 
 @dataclass(frozen=True)
+class ServerManagerConfig:
+    """Worker-side Server Manager API route (design: docs/superpowers/specs/2026-11-04-server-manager-executor.md).
+
+    Master switch only; which capability uses the API is switched per region on the Gateway admin page.
+    """
+
+    enabled: bool = False
+    env: str = "qa_test"
+    # Region (cn / overseas) -> instance base URL, e.g. https://example.com (``/server_manager/api`` is appended).
+    regions: dict[str, str] = field(default_factory=dict)
+    poll_interval_seconds: float = 3.0
+    task_timeout_seconds: float = 900.0
+    request_timeout_seconds: float = 30.0
+    inventory_ttl_seconds: float = 600.0
+
+
+@dataclass(frozen=True)
 class AppConfig:
     server: ServerConfig
     feishu: FeishuConfig
@@ -281,6 +298,7 @@ class AppConfig:
     execution_interpretation: ExecutionInterpretationConfig = field(default_factory=ExecutionInterpretationConfig)
     admin: AdminConfig = field(default_factory=AdminConfig)
     clear_notification: ClearNotificationConfig = field(default_factory=ClearNotificationConfig)
+    server_manager: ServerManagerConfig = field(default_factory=ServerManagerConfig)
     # 按用途选择的模型池；未配置 ai.pools 时为空，所有用途共用 ``ai``。
     ai_routes: dict[str, AIPoolConfig] = field(default_factory=dict)
 
@@ -458,6 +476,32 @@ def _load_clear_notification(raw: Any) -> ClearNotificationConfig:
             float(raw.get("timeout_seconds", 5)), "clear_notification.timeout_seconds"
         ),
         trigger_paths=tuple(trigger_paths),
+    )
+
+
+def _load_server_manager(raw: Any) -> ServerManagerConfig:
+    if not isinstance(raw, dict):
+        raise ConfigError("server_manager section must be a JSON object")
+    regions_raw = raw.get("regions", {})
+    if not isinstance(regions_raw, dict) or not all(
+        key in ("cn", "overseas") and isinstance(value, str) for key, value in regions_raw.items()
+    ):
+        raise ConfigError("server_manager.regions 必须是 {cn|overseas: 地址} 对象")
+    regions = {key: value.strip().rstrip("/") for key, value in regions_raw.items() if value.strip()}
+    for key, value in regions.items():
+        if not value.startswith(("http://", "https://")):
+            raise ConfigError("server_manager.regions.{} 必须以 http:// 或 https:// 开头".format(key))
+    enabled = bool(raw.get("enabled", False))
+    if enabled and not regions:
+        raise ConfigError("server_manager.enabled 为 true 时必须填写 regions")
+    return ServerManagerConfig(
+        enabled=enabled,
+        env=str(raw.get("env", "qa_test")).strip() or "qa_test",
+        regions=regions,
+        poll_interval_seconds=_require_positive_number(float(raw.get("poll_interval_seconds", 3)), "server_manager.poll_interval_seconds"),
+        task_timeout_seconds=_require_positive_number(float(raw.get("task_timeout_seconds", 900)), "server_manager.task_timeout_seconds"),
+        request_timeout_seconds=_require_positive_number(float(raw.get("request_timeout_seconds", 30)), "server_manager.request_timeout_seconds"),
+        inventory_ttl_seconds=_require_positive_number(float(raw.get("inventory_ttl_seconds", 600)), "server_manager.inventory_ttl_seconds"),
     )
 
 
@@ -739,5 +783,6 @@ def load_config(path: str | Path = "config/config.json") -> AppConfig:
         admin=_load_admin(admin_raw),
         ai_routes=ai_routes,
         clear_notification=clear_notification,
+        server_manager=_load_server_manager(raw.get("server_manager", {})),
     )
     return config
