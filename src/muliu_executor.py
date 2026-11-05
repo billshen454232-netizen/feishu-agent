@@ -526,7 +526,21 @@ class MuliuExecutor:
                     failure_reason=failure_reason,
                 )
 
-            if step.path == START_SCRIPT_PATH and not api_tasks:
+            if step.path == START_SCRIPT_PATH and api_tasks:
+                # The Gateway protocol expects the fixed verification entry after every start step;
+                # on the API route the readiness check is the API's own wait_until=ready.
+                verification_step = _build_start_verification_step(step)
+                results.append(
+                    MuliuStepResult(
+                        step_number=step_number,
+                        description="核验 {} 服是否起服成功".format(step.args[0]),
+                        path=verification_step.path,
+                        args=verification_step.args,
+                        succeeded=True,
+                        log="[API 路线] 起服任务已由 Server Manager 按 wait_until=ready 校验进程状态\n开服成功",
+                    )
+                )
+            elif step.path == START_SCRIPT_PATH:
                 time.sleep(self._config.start_verification_wait_seconds)
                 verification_step = _build_start_verification_step(step)
                 try:

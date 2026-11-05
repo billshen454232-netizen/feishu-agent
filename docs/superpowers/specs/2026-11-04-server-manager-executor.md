@@ -86,7 +86,7 @@ Worker 逐步执行：
 2. `POST /api/tasks`（带 `submission_id`，立即返回）→ 轮询 `GET /api/task-submissions/:id` 直到终态 → `GET /api/tasks/:run_id/result` 取摘要；
 3. **提交超时 / 连接中断**：用同一 `submission_id` 查询；返回 404 `submission_not_found` = 确定未提交（可报「未执行」并允许继续剩余步骤），否则按「已提交、结果未知」处理；**不改 ID 重派、不自动重跑写操作**；
 4. 结果拼成与木流相同的日志格式（末尾 `AI_OP_END status=success|failed`），结果卡片、模板库、AI 研读沿用；日志首行注明「API 路线」与 `run_id`，便于对账；
-5. 起服走 API 时以 API 的 `wait_until=ready` 校验代替木流的 `basic_info` 核验（日志注明）；`server_state` 原样写入日志，只有 API 明确返回 ready 才写「已就绪」。
+5. 起服走 API 时以 API 的 `wait_until=ready` 校验代替木流的 `basic_info` 核验；为保持 Gateway 结果协议不变（起服步骤后必须紧跟固定的核验条目），执行器补一条同身份的核验结果，日志注明来自 API；`server_state` 原样写入日志，只有 API 明确返回 ready 才写「已就绪」。
 
 ## 6. 功能清单与上线顺序
 
@@ -94,13 +94,14 @@ Worker 逐步执行：
 
 | # | 能力（catalog 合同） | 走 API 时的提交序列 | 不走 API 的情况 |
 | --- | --- | --- | --- |
+| 0 | 单服信息查询 `basic-server-info`（`basic_info.sh X`，只读） | 读 `server-config`（剧本 / 赛季 / 开服时间 / 对外 / 启动模式）+ `servers`（代码版本 `release_version`）+ `status [game_X, zone_X01]`（进程状态） | 4001；不在清单；API 不提供 supervisor / bglog 异常日志 |
 | 1 | 起服 `start-server`（`start X`） | `start [zone_X01]` → `start [game_X]` | 4001；服号不在 API 清单 |
 | 2 | 只起 game `start-game-only`（`start X noz`） | `start [game_X]` | 同上 |
 | 3 | 正常关服 `shutdown-normal`（`shutdown X`） | `stop [game_X]` → `stop [zone_X01]` | 同上 |
 | 4 | 指定方式关服 `shutdown-mode`（`shutdown X normal/kill`） | normal 同第 3 项；kill = `kill [game_X, zone_X01]` | `autokill` / `gvgzone` / `gvgdaemon`；4001；不在清单 |
 | 5 | 清档 `clear-server`（`clear X`） | `kill [game_X, zone_X01]` → `clear [game_X, zone_X01]` | 4001（GS-1 有特殊分支）；不在清单 |
 
-建议上线顺序（影响从小到大）：2（只起 game）→ 1（起服）→ 3 / 4（关服）→ 5（清档）。每项先开国服或海外其中一个区域，用测试服跑通再开另一个。
+建议上线顺序（影响从小到大）：0（信息查询，只读）→ 2（只起 game）→ 1（起服）→ 3 / 4（关服）→ 5（清档）。每项先开国服或海外其中一个区域，用测试服跑通再开另一个。
 
 ### 6.2 二期：评估中（后台显示为「暂无 API 对应」）
 
@@ -108,12 +109,25 @@ Worker 逐步执行：
 | --- | --- | --- |
 | 起服失败诊断 `startup-failure-diagnosis` | `task_type=log`（kind=error、since_minutes） | 输出与现有诊断是否等价 |
 | 单服基础信息 `basic-server-info` | `task_type=status` / `server-config` 读取 | 只能覆盖部分字段 |
-| 合服 `merge-single-source-single-target` | `merge_servers` 工作流 | 参数模型不同 |
+| 合服 `merge-single-source-single-target` | `POST /api/merge/tasks`（`source_games` / `source_zone` / `next_game`） | 见 6.5 |
 | qagvg 起服 / 关服 | `start` / `kill [qa_gvg_zone]` | 机器人尚未登记 gvg 合同 |
 
 ### 6.3 无 API 对应（始终木流）
 
 热更阈值（`auto_hotfix_tool.py`）、补丁清单（`cc_patch.py` 6 项）、GM 面板 / 对外开关（`control_is_pub.sh`）、开服时间（`starttime`）、`basic_info.sh` 的剧本 / 赛季 / 积分查询、批量版本查询、`clear X by/noby`、`clear_logic_game` / `clear_zone` / `cleardb`、`modify_game_config.sh`、`stop_combine_tool.sh`。
+
+### 6.5 合服（用户 2026-11-05 列为高频，待确认后接入）
+
+API 合服是完整编排，步骤（来自运行记录）：`precheck-dbs` → `resolve` → **`kill-next-game` → `clear-next-game`** → `stop-source-games` → `stop-source-zone` → `write-combine-config`（服务端：在战区服所在机器生成）→ `prepare-zone-data` → `start-combine` → `wait-combine`（默认最长 7200 秒）。
+
+与现有 `exc_server_merge.sh`（只写配置并启动合服工具）的差异：
+
+- **会先 kill 并清空目标服**；
+- 没有赛季 / 剧本参数（从服务器配置读取）；
+- 不支持 `submission_id`：提交超时无法判定是否已提交，只能按「结果未知」处理；
+- 截至 2026-11-05 只跑过 2 次，均失败（一次在 `stop-source-games`，一次在 `wait-combine`）。
+
+接入前需要用户确认：语义（「5000 合到 5001」= `source_games=[game_5000]`、`source_zone=zone_500001`、`next_game=game_5001`，目标服会被清空）；赛季 / 剧本不再需要；先用两台可清空的测试服通过 Server Manager 后台手工跑通一次。
 
 ### 6.4 管理后台 `ops.ttlink.asia/routes`
 

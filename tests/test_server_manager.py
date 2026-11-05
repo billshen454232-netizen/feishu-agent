@@ -22,6 +22,7 @@ from src.server_manager import (
     submission_id,
     translate,
 )
+from src.worker_protocol import validate_execution_result_matches_plan
 from tests.test_muliu_worker import make_config
 
 CATALOG = Path(__file__).parents[1] / "config" / "muliu_script_catalog.md"
@@ -72,8 +73,9 @@ def test_submission_id_is_stable_and_valid():
 class FakeApi:
     """Programmable Server Manager: records requests, scripted responses."""
 
-    def __init__(self, *, post="ok", statuses=("queued", "succeeded"), registered=True, final="succeeded"):
+    def __init__(self, *, post="ok", statuses=("queued", "succeeded"), registered=True, final="succeeded", config_error=False):
         self.post, self.statuses, self.registered, self.final = post, list(statuses), registered, final
+        self.config_error = config_error
         self.requests = []
         self.queries = []
 
@@ -99,7 +101,15 @@ class FakeApi:
                 "items": [{"game_id": "game_2006", "machine_id": "gs-5", "status": self.final}],
             })
         if path.endswith("/servers"):
-            return httpx.Response(200, json={"servers": [{"id": "game_2006"}, {"id": "zone_200601"}]})
+            return httpx.Response(200, json={"servers": [
+                {"id": "game_2006", "release_version": {"value": "ob_release_261103"}}, {"id": "zone_200601"}]})
+        if path.endswith("/server-config"):
+            if self.config_error:
+                return httpx.Response(500, json={"detail": "boom"})
+            return httpx.Response(200, json={"items": [{"primary": True, "scenario": 3001, "config": {
+                "scenario": 3001, "season": 1, "is_publish": False, "nslg_mode": "qa_gs",
+                "open_server_time": "2026-01-01/10:00:00", "debug_server_start_time": 1794016800,
+                "nslg_game": {"password": "must-not-leak"}}}]})
         return httpx.Response(500)
 
 
@@ -191,8 +201,12 @@ def test_executor_runs_api_steps_without_logging_into_muliu():
     result = MuliuExecutor(config)._execute_plan_blocking(plan, [translate("start-server", plan.steps[0])], runner)
 
     assert result.failed_step_number is None and not result.result_unknown_reason
-    assert len(result.step_results) == 1 and result.step_results[0].succeeded  # no basic_info verification step
+    assert [step.succeeded for step in result.step_results] == [True, True]
     assert "wait_until=ready" in result.step_results[0].log
+    verification = result.step_results[1]
+    assert verification.path.endswith("/basic_info.sh") and verification.args == ["2006"]
+    assert "开服成功" in verification.log
+    validate_execution_result_matches_plan(result, plan)  # the Gateway accepts it unchanged
 
 
 def test_route_store_defaults_switches_and_step_routes(tmp_path):
@@ -211,9 +225,9 @@ def test_route_store_defaults_switches_and_step_routes(tmp_path):
         store.set_backend("start-server", "mars", "api", operator="owner")
 
     overview = store.overview(contracts)
-    assert [item["contract"] for item in overview[:5]] == [
-        "start-game-only", "start-server", "shutdown-normal", "shutdown-mode", "clear-server"]
-    assert overview[1]["regions"]["cn"]["backend"] == "api" and not overview[5]["switchable"]
+    assert [item["contract"] for item in overview[:6]] == [
+        "basic-server-info", "start-game-only", "start-server", "shutdown-normal", "shutdown-mode", "clear-server"]
+    assert overview[2]["regions"]["cn"]["backend"] == "api" and not overview[6]["switchable"]
     assert store.list_events()[0]["new_backend"] == "api"
 
 
@@ -279,3 +293,23 @@ async def test_worker_client_parses_step_routes(routes, ok):
     else:
         with pytest.raises(GatewayWorkerClientError):
             await client.claim()
+
+
+def test_server_info_route_reads_config_version_and_status():
+    step = _step("basic_info.sh", "2006")
+    tasks = translate("basic-server-info", step)
+    assert [(task.task_type, task.targets) for task in tasks] == [("info", ("game_2006",))]
+
+    fake = FakeApi()
+    log = ServerManagerStepRunner(_client(fake), "om_9").execute_step(step, 1, tasks)
+
+    assert log.splitlines()[0] == "[API 路线] Server Manager 只读查询"
+    assert "当前代码版本:\nob_release_261103" in log
+    assert "1794016800 -> 2026-11-" in log and "剧本 3001，赛季 1，对外 False，启动模式 qa_gs" in log
+    assert "服务器已就绪（ready）" in log and log.splitlines()[-1] == "AI_OP_END status=success"
+    assert "must-not-leak" not in log
+    status_post = next(body for method, path, body in fake.requests if method == "POST")
+    assert status_post["task_type"] == "status" and status_post["targets"] == ["game_2006", "zone_200601"]
+
+    failed = ServerManagerStepRunner(_client(FakeApi(config_error=True)), "om_9").execute_step(step, 1, tasks)
+    assert failed.splitlines()[-1].startswith("AI_OP_END status=failed error=API 查询失败")

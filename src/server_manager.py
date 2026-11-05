@@ -10,6 +10,7 @@ templates and AI readings keep working unchanged.
 
 from __future__ import annotations
 
+import datetime
 import hashlib
 import logging
 import time
@@ -49,6 +50,11 @@ class RouteSpec:
 
 
 ROUTE_SPECS = {
+    "basic-server-info": RouteSpec(
+        "basic-server-info", "单服信息查询（basic_info X，只读）",
+        "读 server-config（剧本 / 赛季 / 开服时间 / 对外）+ servers（代码版本）+ status [game_X, zone_X01]（进程状态）",
+        "4001；服号不在 API 清单；API 不提供 supervisor / bglog 异常日志（排查起服失败请用木流）",
+    ),
     "start-game-only": RouteSpec("start-game-only", "只起 game（start X noz）", "start [game_X]", "4001；服号不在 API 清单"),
     "start-server": RouteSpec("start-server", "起服（start X）", "start [zone_X01] → start [game_X]", "4001；服号不在 API 清单"),
     "shutdown-normal": RouteSpec("shutdown-normal", "正常关服（shutdown X）", "stop [game_X] → stop [zone_X01]", "4001；服号不在 API 清单"),
@@ -73,6 +79,8 @@ def translate(contract_name: str, step: MuliuStep) -> Optional[list[ApiTask]]:
         return None
     game, zone = "game_{}".format(server_id), "zone_{}01".format(server_id)
     mode = step.args[1] if len(step.args) > 1 else ""
+    if contract_name == "basic-server-info":
+        return [ApiTask("info", (game,))]
     if contract_name == "start-game-only":
         return [ApiTask("start", (game,))]
     if contract_name == "start-server":
@@ -131,6 +139,37 @@ class ServerManagerClient:
         response = self._http.get(self._base + "/servers", params={"env": self._env} if self._env else None)
         response.raise_for_status()
         return {str(item.get("id")) for item in response.json().get("servers", []) if item.get("id")}
+
+    def server_info(self, server_id: str, submission: str, reason: str) -> list[str]:
+        """basic_info-like lines from read-only API data (config, release version, process status)."""
+        game, zone = "game_{}".format(server_id), "zone_{}01".format(server_id)
+        params = {"target": game, **({"env": self._env} if self._env else {})}
+        response = self._http.get(self._base + "/server-config", params=params)
+        response.raise_for_status()
+        items = response.json().get("items") or [{}]
+        item = next((entry for entry in items if entry.get("primary")), items[0])
+        config = item.get("config") or {}
+        servers = self._http.get(self._base + "/servers", params={"env": self._env} if self._env else None)
+        servers.raise_for_status()
+        listed = {str(entry.get("id")): entry for entry in servers.json().get("servers", [])}
+        version = ((listed.get(game) or {}).get("release_version") or {}).get("value") or "未知"
+        targets = (game, zone) if zone in listed else (game,)
+        status = self.run(ApiTask("status", targets), submission, reason)
+        lines = ["当前代码版本:", str(version)]
+        start_ts = config.get("debug_server_start_time")
+        if start_ts:
+            lines.append("开服时间 时间戳/时间如下：")
+            lines.append("{} -> {}".format(start_ts, _beijing(start_ts)))
+        lines.append("开服时间配置（open_server_time）：{}".format(config.get("open_server_time") or "未配置"))
+        lines.append("剧本 {}，赛季 {}，对外 {}，启动模式 {}".format(
+            config.get("scenario", item.get("scenario", "未知")), config.get("season", "未知"),
+            config.get("is_publish", "未知"), config.get("nslg_mode", "未知")))
+        states = ", ".join("{}={}".format(key, value) for key, value in status.server_states.items()) or "未知"
+        lines.append("进程状态（status 任务 run_id={}）：{}".format(status.run_id or "无", states))
+        if status.server_states and all(value == "ready" for value in status.server_states.values()):
+            lines.append("服务器已就绪（ready）")
+        lines.append("说明：API 不提供 supervisor / bglog 异常日志；排查起服失败请用起服失败诊断或切回木流")
+        return lines
 
     def run(self, task: ApiTask, submission: str, reason: str) -> ApiOutcome:
         body = {
@@ -216,6 +255,16 @@ class ServerManagerStepRunner:
         self._message_id = message_id
 
     def execute_step(self, step: MuliuStep, step_number: int, tasks: list[ApiTask]) -> str:
+        if tasks and tasks[0].task_type == "info":
+            reason = "飞书机器人 第{}步：{}".format(step_number, step.description)
+            try:
+                info = self._client.server_info(step.args[0], submission_id(self._message_id, step_number, 1), reason)
+            except MuliuSubmittedError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - read-only: report and let the requester retry
+                return "[API 路线] 只读查询失败：{}\nAI_OP_END status=failed error=API 查询失败：{}".format(
+                    type(exc).__name__, type(exc).__name__)
+            return "\n".join(["[API 路线] Server Manager 只读查询", *info, "AI_OP_END status=success"])
         lines = ["[API 路线] Server Manager，共 {} 次提交".format(len(tasks))]
         for index, task in enumerate(tasks, start=1):
             submission = submission_id(self._message_id, step_number, index)
@@ -245,6 +294,14 @@ class ServerManagerStepRunner:
             lines.append("起服已由 API 按 wait_until=ready 校验进程状态（替代木流 basic_info 核验）")
         lines.append("AI_OP_END status=success")
         return "\n".join(lines)
+
+
+def _beijing(timestamp: Any) -> str:
+    try:
+        moment = datetime.datetime.fromtimestamp(int(timestamp), datetime.timezone(datetime.timedelta(hours=8)))
+    except (TypeError, ValueError, OverflowError, OSError):
+        return "无法换算"
+    return moment.strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _error_text(response: httpx.Response) -> str:
