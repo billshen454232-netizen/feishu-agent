@@ -424,6 +424,8 @@ def _create_default_app() -> FastAPI:
         return create_app()
     except ConfigError as exc:
         detail = str(exc)
+        # Loud on purpose: the fallback app starts "successfully" but serves no Feishu / Worker traffic.
+        logger.error("CONFIG ERROR — service is NOT running (only /health is served): %s", detail)
         fallback = FastAPI(title="Feishu Muliu Server Operations Bot")
 
         @fallback.get("/health")

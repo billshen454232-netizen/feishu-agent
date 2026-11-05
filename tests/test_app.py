@@ -443,3 +443,18 @@ def test_role_ai_clients_share_clients_for_shared_pools(monkeypatch, tmp_path):
 
     assert (chat, planning, interpretation) == ("luna", "luna", "terra")
     assert built == ["luna", "terra"]
+
+
+def test_config_error_is_logged_loudly(tmp_path, monkeypatch, caplog):
+    import src.app as app_module
+
+    def broken(*_args, **_kwargs):
+        raise app_module.ConfigError("server_manager.regions.cn 必须以 http:// 或 https:// 开头")
+
+    monkeypatch.setattr(app_module, "create_app", broken)
+    with caplog.at_level("ERROR"):
+        fallback = app_module._create_default_app()
+
+    assert "CONFIG ERROR" in caplog.text and "server_manager.regions.cn" in caplog.text
+    from fastapi.testclient import TestClient
+    assert TestClient(fallback).get("/health").json()["status"] == "missing_config"
