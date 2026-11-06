@@ -24,7 +24,8 @@ procs=$(ps -ef | grep 'skynet/skynet' | grep -E 'GROUP=[0-9]*combine' | grep -v 
 echo "合服工具进程：${procs} 个（合完不会自动退出，不作为完成依据）"
 cd "$log_dir" 2>/dev/null || { echo "日志目录不存在"; echo "COMBINE_STATE=unknown"; exit 0; }
 
-# 完成标记只写在 nohup.log；exc_server_merge.sh 每次启动前把旧 nohup.log 改名为 nohup.log.prev，保证只含当次合服
+# 完成标记只写在 nohup.log；它可能累积多次合服，判定时只取最后一个「开始流程【1/…】」之后的部分
+# （exc_server_merge.sh 启动前也会把旧 nohup.log 改名为 nohup.log.prev）
 files=$(ls -t combine_* nohup.log 2>/dev/null | head -n 21)
 if [[ -z "$files" ]]; then
     echo "没有合服日志"
@@ -66,7 +67,12 @@ PATTERNS
 
 failed=""; succeeded=""
 for f in $files; do
-    tail_text=$(tail -c 524288 "$f")
+    if [[ "$f" == nohup.log ]] && start=$(grep -n '开始流程【1/' nohup.log | tail -n 1 | cut -d: -f1) && [[ -n "$start" ]]; then
+        # nohup.log 可能累积多次合服（未经本脚本启动时不会归档）：只看最后一次合服那一段
+        tail_text=$(tail -n +"$start" nohup.log | tail -c 524288)
+    else
+        tail_text=$(tail -c 524288 "$f")
+    fi
     while IFS= read -r p; do
         [[ -n "$p" ]] && grep -qF -- "$p" <<<"$tail_text" && failed+="  ${f}: ${p}"$'\n'
     done <<<"$failure_patterns"
