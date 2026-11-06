@@ -407,3 +407,21 @@ def test_checked_in_runner_manifest_matches_production_catalog():
 def test_contract_rejects_missing_contract_block():
     with pytest.raises(MuliuCallContractError, match="MULIU_CALL_CONTRACTS"):
         parse_call_contracts("# 只有说明，没有机器合同")
+
+
+def test_merge_then_stop_combine_on_source_then_start_target_is_one_valid_plan():
+    """The combine tool runs on the merge source machine, so it is stopped with the source server ID."""
+    from pathlib import Path
+
+    contracts = parse_call_contracts((Path(__file__).parents[1] / "config" / "muliu_script_catalog.md").read_text(encoding="utf-8"))
+    plan = MuliuPlan(
+        summary="越南 7001 合服到 7002，合服后关闭 7001 合服进程并起 7002",
+        steps=[
+            MuliuStep("/home/serverGeneralScript/exc_server_merge.sh", ["7001", "7002", "1", "4001"], "合服"),
+            MuliuStep("/home/serverGeneralScript/stop_combine_tool.sh", ["7001"], "关闭 7001 合服工具"),
+            MuliuStep("/home/serverGeneralScript/start", ["7002"], "7002 起服"),
+        ],
+    )
+
+    contracts.validate(plan)
+    assert contracts.extract_server_ids(plan) == ("7001", "7002", "7001", "7002")

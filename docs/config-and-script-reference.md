@@ -359,7 +359,7 @@ Gateway SQLite 热更阈值注册表（网页 /thresholds 编辑，src/hotfix_th
 | `cleardb.py` | `/home/serverGeneralScript/cleardb.py` | 底层数据库单项重置与集合清理。 | `write` |
 | `control_is_pub.sh` | `/home/serverGeneralScript/control_is_pub.sh` | 控制发布模式、GM 面板或外部体验开服；只允许 `k`、`re`、`op` 三种精确参数形态。 | `write` |
 | `auto_hotfix_tool.py` | `/home/serverGeneralScript/auto_hotfix_tool.py` | 阈值免重启热更。 | `write` |
-| `stop_combine_tool.sh` | `/home/serverGeneralScript/stop_combine_tool.sh` | 在**合服目标服**执行 `kill_combine.sh` 关闭合服进程。 | `write` |
+| `stop_combine_tool.sh` | `/home/serverGeneralScript/stop_combine_tool.sh` | 在**合服起始服**所在机器执行 `kill_combine.sh` 关闭合服进程（合服工具在起始服启动，合完不会自动退出）。 | `write` |
 | `exc_server_merge.sh` | `/home/serverGeneralScript/exc_server_merge.sh` | 启动单源单目标合服。 | `write` |
 
 ### 4.2 仅作阅读/参考的脚本

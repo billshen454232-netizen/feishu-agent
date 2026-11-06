@@ -22,7 +22,7 @@
 |`starttime`|检查或修改 Debug 开服时间配置和时间戳文件|开服时间、启动时间、时间戳、Debug|[starttime.md](docs/starttime.md)|
 |`control_is_pub.sh`|独立控制调试 / GM 面板、发布模式或外部体验开服|GM面板、调试面板、发布模式、外部开服、对外脚本、对外开服、外部体验、public_game|[control_is_pub.md](docs/control_is_pub.md)|
 |`exc_server_merge.sh`|生成合服配置并启动合服工具|合服、服务器合并、合到、合服工具|[exc_server_merge.md](docs/exc_server_merge.md)|
-|`stop_combine_tool.sh`|仅关闭目标服合服工具拉起的 combine 进程|关闭合服进程、停止合服工具、关闭 combine|[stop_combine_tool.md](docs/stop_combine_tool.md)|
+|`stop_combine_tool.sh`|关闭合服起始服上合服工具拉起的 combine 进程（合完不会自动退出）|关闭合服进程、停止合服工具、关闭 combine|[stop_combine_tool.md](docs/stop_combine_tool.md)|
 
 所有变更、清理、停止、启动、配置、Patch 与合服操作都可能产生高影响；即使 catalog 已登记，仍须精确合同校验、路由校验、防火墙与原请求人确认。脚本成功不自动代表业务效果已验证。
 

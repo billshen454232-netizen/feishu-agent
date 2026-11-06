@@ -288,16 +288,17 @@
   4. `<scenario>`：合服来源的剧本编号。
 - **边界**：首批只允许一个来源服和一个目标服；脚本虽然支持多个目标服，但本合同不接受额外服号。所有服号必须属于同一受控路由区域；国服与海外服不能混合。缺少任一参数时必须要求补充，不能猜测。
 - **远端影响**：脚本先检查来源服所在机器是否已有合服工具进程（`GROUP=<编号>combine`），**已有则直接停止（exit 2，不生成、不覆盖、不启动）**并提示先确认上一次合服已结束；否则生成配置（生成失败立即停止）、覆盖来源服节点上的 `combine_tool_cluster_config.lua`，再以后台模式（`start_combine_tool.sh -b 1`）启动合服工具，随后每 5 秒用 `combine_status.sh`（与 Server Manager 相同的日志关键字）判定结果，最多等 90 秒（测试服合服通常 20–30 秒）：命中完成关键字返回成功（exit 0），命中失败关键字返回失败（exit 1），超时按异常返回（exit 3）；失败与超时会附带命中的关键字、主控日志结尾、trace 报错行与 nohup 输出，供解读。合服工具合完**不会自动退出**，下一次合服前需先「关闭 X 服的合服工具」（否则合服前检查会拦下）。脚本成功表示合服日志出现了完成标记，数据正确性仍需人工核对。
+- **组合请求**：`越南合服，起始服 7001，剧本 4001，赛季 1，目标服 7002，合服结束后关闭 7001 合服进程，7002 起服` 生成按顺序的三步：`exc_server_merge.sh ["7001","7002","1","4001"]` → `stop_combine_tool.sh ["7001"]`（模式 N2，起始服）→ `start ["7002"]`。合服步骤失败（含超时）时后续步骤不会执行。
 - **合服日志位置**（来源服所在机器）：`/data/app/game-server` 是指向 `/data/publish/qa-game-server/code/<构建号>/qa-game-server` 的软链接，合服日志在其上一级的 `log/`，即 `readlink -f /data/app/game-server/../log`（构建号随发布变化，不要写死）。主控 `combine_server_gamemanager_<月日时>.log`、报错堆栈 `combine_trace_server_*.log`、进程输出 `nohup.log`；`bak/` 只保留上一次合服的日志。
 
-### 模式 N2：关闭目标服合服工具（stop_combine_tool.sh）
+### 模式 N2：关闭合服工具进程（stop_combine_tool.sh）
 
-- **用途**：仅关闭一个明确目标服上、由合服工具拉起的 `GROUP=combine` 进程。
-- **匹配的自然语言**：`关闭 2018 的合服进程`、`停止 2018 服合服工具`、`关闭目标服 2018 的 combine`。
+- **用途**：仅关闭由合服工具拉起的 `GROUP=combine` 进程。合服工具由模式 N 在**合服起始服（来源服）所在机器**上启动，所以参数是**起始服**编号；合服工具合完不会自动退出，合服结束后需要用本模式关闭。
+- **匹配的自然语言**：`关闭 7001 的合服进程`、`停止 7001 服合服工具`、`关闭 7001 的 combine`、`合服结束后关闭 7001 合服进程`（7001 为合服起始服）。
 - **精确脚本路径**：`/home/serverGeneralScript/stop_combine_tool.sh`
-- **精确参数数组模板**：`["<target_server_id>"]`。
-- **参数边界**：`<target_server_id>` 必须是 3 至 8 位数字的合服目标服编号。不得提供 PID、主机、进程名、`kill` / `autokill` 模式或任何额外参数。
-- **远端影响**：脚本从受控 `config.ini` 精确定位 `<target_server_id>_game`，仅在该目标服执行固定的 `cd /data/app/game-server && bash bin/kill_combine.sh`。它不会关闭普通 `game`、`zone` 或 GVG 进程。属于高影响写操作，必须群内确认；脚本成功仅证明 `kill_combine.sh` 已以成功状态结束，不代表合服数据已经完成或验证。
+- **精确参数数组模板**：`["<source_server_id>"]`。
+- **参数边界**：`<source_server_id>` 必须是 3 至 8 位数字的**合服起始服**编号（即模式 N 的第 1 个参数；用户说“关闭 X 的合服进程 / 合服工具”时 X 即此参数，不要求是合服目标服）。不得提供 PID、主机、进程名、`kill` / `autokill` 模式或任何额外参数。
+- **远端影响**：脚本从受控 `config.ini` 精确定位 `<source_server_id>_game`，仅在该服所在机器执行固定的 `cd /data/app/game-server && bash bin/kill_combine.sh`。它不会关闭普通 `game`、`zone` 或 GVG 进程。属于高影响写操作，必须群内确认；脚本成功仅证明 `kill_combine.sh` 已以成功状态结束，不代表合服数据已经完成或验证。
 
 ### 模式 O：免重启热更服务器阈值配置（auto_hotfix_tool.py）
 
@@ -604,13 +605,13 @@
       "risk": "write"
     },
     {
-      "name": "stop-combine-tool-on-target",
+      "name": "stop-combine-tool",
       "path": "/home/serverGeneralScript/stop_combine_tool.sh",
       "args": [
-        "{target_server_id}"
+        "{source_server_id}"
       ],
       "variables": {
-        "target_server_id": "[0-9]{3,8}"
+        "source_server_id": "[0-9]{3,8}"
       },
       "runner": "bash",
       "risk": "write"
