@@ -326,3 +326,31 @@ def test_plan_board_page_and_api(tmp_path):
     assert client.get("/api/plan", headers={"X-Admin-Proxy": "cloudflare-access"}).status_code == 403
     assert TestClient(create_admin_app(_store(tmp_path)), base_url="http://127.0.0.1:8901").get("/plan").status_code == 404
     assert 'href="/plan"' in client.get("/").text
+
+
+def test_rewrite_diagnosis_returns_a_draft_around_reviewer_notes(tmp_path):
+    store = _store(tmp_path)
+    pattern = _add(store, "ERROR src_zone_id对应的服未配置name", "om_rw")
+
+    class FakeAI:
+        prompts = []
+
+        async def generate(self, history, prompt):
+            self.prompts.append(prompt)
+            return "现象：合服报 src_zone_id 未配置 name。\n原因：GMT 系统未注册对应战区服信息。\n处理办法：在 GMT 服务器列表与开服系统中加上 zone。"
+
+    ai = FakeAI()
+    client = TestClient(create_admin_app(store, review_client=ai), base_url="http://127.0.0.1:8901")
+    notes = "旧推测\n服务端恢复报错原因是GMT系统未注册对应战区服信息\n开服系统 导入逻辑服 手动注册基础信息注册到ServerInfo中 加上zone"
+
+    response = client.post(f"/api/patterns/{pattern.pattern_id}/rewrite", headers=HEADERS, json={"diagnosis": notes})
+
+    assert response.status_code == 200 and "GMT 系统未注册" in response.json()["diagnosis"]
+    assert "已确认事实" in ai.prompts[0] and "GMT系统未注册对应战区服信息" in ai.prompts[0]
+    assert "src_zone_id对应的服未配置name" in ai.prompts[0]  # key error lines are part of the context
+    assert store.get_pattern(pattern.pattern_id).diagnosis == "诊断 ERROR src_zone_id对应的服未配置name"  # not saved
+    assert client.post("/api/patterns/999/rewrite", headers=HEADERS, json={"diagnosis": "x"}).status_code == 404
+    assert client.post(f"/api/patterns/{pattern.pattern_id}/rewrite", headers=HEADERS, json={"diagnosis": " "}).status_code == 400
+    no_ai = TestClient(create_admin_app(store), base_url="http://127.0.0.1:8901")
+    assert no_ai.post(f"/api/patterns/{pattern.pattern_id}/rewrite", headers=HEADERS, json={"diagnosis": notes}).status_code == 503
+    assert "AI 按人工说明重写" in client.get("/").text

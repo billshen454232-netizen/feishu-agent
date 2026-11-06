@@ -227,6 +227,43 @@ def result_scope(result: MuliuExecutionResult, route_region: str = "") -> str:
     return mask_sensitive_operation_data(scope)[:200]
 
 
+REWRITE_TIMEOUT_SECONDS = 90
+
+
+async def rewrite_diagnosis(client: Any, pattern: ErrorPattern, draft: str) -> dict[str, str]:
+    """Rewrite a template diagnosis around the reviewer's own notes, which are treated as confirmed facts.
+
+    Returns a draft for the reviewer to edit and save; it is never stored here.
+    """
+    import asyncio
+
+    from .ai_client import generate_with_provenance
+
+    verdict = "执行成功，服务器状态存疑" if pattern.outcome == OUTCOME_WARNING else "执行失败"
+    prompt = (
+        "你在整理测试服运维机器人的【典型故障模板】：以后同类错误（可能是其他服号、其他参数）会直接把这段诊断展示给组员。"
+        "审核人在现有诊断里补充了自己确认的原因与处理办法。请据此重写诊断。"
+        "\n\n【结果判定】{verdict}"
+        "\n\n【失败原因】\n{reason}"
+        "\n\n【关键错误行】\n{lines}"
+        "\n\n【现有诊断（含审核人补充）】\n{draft}"
+        "\n\n【要求】\n"
+        "1. 审核人补充的原因与处理办法是**已确认事实**，必须完整保留其含义与具体步骤（系统名、菜单路径、要改的项不要省略或改写成笼统说法）；"
+        "原诊断中与之冲突或已被它否定的推测要删掉，不要再写“可能是……”。\n"
+        "2. 按「现象」「原因」「处理办法」三段输出；现象用一两句话说明组员会看到什么。\n"
+        "3. 写成同类错误通用的说明：不要写具体服号、赛季、剧本号等本次参数。\n"
+        "4. 严禁输出私网 IP、主机地址、账号、凭据、Token、数据库连接、工作目录或执行命令。\n"
+        "5. 简洁中文，不超过 300 字；不要客套话和多余标题。"
+    ).format(
+        verdict=verdict,
+        reason=mask_sensitive_operation_data(pattern.normalized_reason or "（无）"),
+        lines=mask_sensitive_operation_data("\n".join(pattern.key_error_lines) or "（无）"),
+        draft=mask_sensitive_operation_data(draft),
+    )
+    generation = await asyncio.wait_for(generate_with_provenance(client, [], prompt), timeout=REWRITE_TIMEOUT_SECONDS)
+    return {"diagnosis": mask_sensitive_operation_data(str(generation.text).strip()), "model": str(generation.model or "")}
+
+
 def is_read_only_result(result: MuliuExecutionResult, contracts: Any | None) -> bool:
     """True only when every executed step matches exactly one ``risk=read`` contract."""
     if contracts is None or not result.step_results:

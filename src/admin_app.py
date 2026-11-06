@@ -44,6 +44,7 @@ from .execution_report import (
     PATTERN_VERIFIED,
     READ_SUCCESS_MODES,
     ExecutionReportStore,
+    rewrite_diagnosis,
 )
 
 logger = logging.getLogger(__name__)
@@ -167,6 +168,25 @@ def create_admin_app(
             raise HTTPException(status_code=404, detail="not found")
         logger.info("template review edit pattern=%s operator=%s", pattern_id, request.state.operator)
         return {"status": "ok"}
+
+    @app.post("/api/patterns/{pattern_id}/rewrite")
+    async def rewrite(pattern_id: int, payload: dict[str, Any], request: Request) -> dict[str, str]:
+        """AI rewrite around the reviewer's notes; returns a draft only (the reviewer saves it)."""
+        if review_client is None:
+            raise HTTPException(status_code=503, detail="AI 未配置")
+        pattern = store.get_pattern(pattern_id)
+        if pattern is None:
+            raise HTTPException(status_code=404, detail="not found")
+        draft = payload.get("diagnosis")
+        if not isinstance(draft, str) or not draft.strip() or len(draft) > _MAX_DIAGNOSIS_CHARS:
+            raise HTTPException(status_code=400, detail="diagnosis must be 1-{} chars".format(_MAX_DIAGNOSIS_CHARS))
+        try:
+            result = await rewrite_diagnosis(review_client, pattern, draft.strip())
+        except Exception as exc:  # noqa: BLE001 - surface the reason on the page, nothing was changed
+            logger.warning("template diagnosis rewrite failed pattern=%s", pattern_id, exc_info=True)
+            raise HTTPException(status_code=502, detail="AI 重写失败：{}".format(type(exc).__name__)) from exc
+        logger.info("template diagnosis rewritten pattern=%s operator=%s", pattern_id, request.state.operator)
+        return result
 
     @app.put("/api/patterns/{pattern_id}/outcome")
     async def set_outcome(pattern_id: int, payload: dict[str, Any], request: Request) -> dict[str, str]:
@@ -1276,6 +1296,7 @@ function renderTemplates(patterns) {
           <span class="verdict-note">仅查询类脚本、模板通过后生效</span>
         </div>
         <div class="actions">
+          <button class="btn" data-act="rewrite" title="把你在诊断里补充的原因当作已确认事实，让 AI 重写成统一格式；结果填回编辑框，需你确认后保存">AI 按人工说明重写</button>
           <button class="btn" data-act="save" disabled>保存诊断</button>
           ${review}
           <button class="btn danger" data-act="delete">删除</button>
@@ -1357,6 +1378,19 @@ $("#content").addEventListener("click", async (e) => {
       invalidateTemplates();
       toast("诊断已保存");
     } catch (err) { toast(`保存失败：${err.message}`, true); }
+    return;
+  }
+  if (action === "rewrite") {
+    const area = item.querySelector(".diagnosis");
+    const label = button.textContent;
+    button.disabled = true; button.textContent = "AI 重写中…";
+    try {
+      const r = await api("POST", `/api/patterns/${id}/rewrite`, { diagnosis: area.value });
+      area.value = r.diagnosis;
+      area.dispatchEvent(new Event("input", { bubbles: true }));  // marks unsaved, enables 保存诊断
+      toast(`已按你的说明重写（${r.model || "AI"}），确认无误后点「保存诊断」`);
+    } catch (err) { toast(`重写失败：${err.message}`, true); }
+    finally { button.disabled = false; button.textContent = label; }
     return;
   }
   if (dirty.has(id) && action !== "delete" && !confirm("这条诊断还没保存，确定继续？")) return;
