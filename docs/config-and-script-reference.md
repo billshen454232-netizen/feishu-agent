@@ -356,7 +356,7 @@ Gateway SQLite 热更阈值注册表（网页 /thresholds 编辑，src/hotfix_th
 | `batch_server_query.py` | `/home/serverGeneralScript/batch_server_query.py` | 批量查询多服代码版本。 | `read` |
 | `clear_logic_game.py` | `/home/serverGeneralScript/clear_logic_game.py` | 单独清理逻辑服数据库。 | `write` |
 | `clear_zone.py` | `/home/serverGeneralScript/clear_zone.py` | 单独清理 Zone 战区数据库。 | `write` |
-| `cleardb.py` | `/home/serverGeneralScript/cleardb.py` | 底层数据库单项重置与集合清理。 | `write` |
+| `cleardb.py` | `/home/serverGeneralScript/cleardb.py` | 清理合服来源服留下的合服数据（`Combine` / `AvatarToTargetServer` 记录与账号角色关联），不是清档。 | `write` |
 | `control_is_pub.sh` | `/home/serverGeneralScript/control_is_pub.sh` | 控制发布模式、GM 面板或外部体验开服；只允许 `k`、`re`、`op` 三种精确参数形态。 | `write` |
 | `auto_hotfix_tool.py` | `/home/serverGeneralScript/auto_hotfix_tool.py` | 阈值免重启热更。 | `write` |
 | `stop_combine_tool.sh` | `/home/serverGeneralScript/stop_combine_tool.sh` | 在**合服起始服**所在机器执行 `kill_combine.sh` 关闭合服进程（合服工具在起始服启动，合完不会自动退出）。 | `write` |

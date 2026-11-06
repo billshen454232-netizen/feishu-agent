@@ -15,7 +15,7 @@
 |`clear`|清服：停止服务、清理逻辑与 Zone 数据，并可调整开服时间|清服、清档、清理数据、开服时间|[clear.md](docs/clear.md)|
 |`clear_logic_game.py`|清理逻辑游戏数据|清档、逻辑服、游戏数据|[clear_logic_game.md](docs/clear_logic_game.md)|
 |`clear_zone.py`|清理分区 / Zone 数据|清档、分区、Zone、游戏数据|[clear_zone.md](docs/clear_zone.md)|
-|`cleardb.py`|合服相关公共数据清理意图|清库、数据库、清档、合服|[cleardb.md](docs/cleardb.md)|
+|`cleardb.py`|清理合服来源服留下的合服数据（不是清档）|清除合服数据、清理合服数据、合服残留|[cleardb.md](docs/cleardb.md)|
 |`modify_game_config.sh`|修改目标服的赛季和剧本配置|改配置、游戏配置、赛季、剧本|[modify_game_config.md](docs/modify_game_config.md)|
 |`start`|启动游戏服务；默认会启动 Zone 与游戏逻辑服务|启动、开服、启动服务、Zone|[start.md](docs/start.md)|
 |`shutdown`|常规或强制关闭游戏、Zone 或 GVG 相关进程|关闭、停服、关服、kill、GVG|[shutdown.md](docs/shutdown.md)|
