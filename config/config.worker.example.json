@@ -44,7 +44,7 @@
     "max_steps": 10
   },
   "server_manager": {
-    "enabled": false,
+    "enabled": true,
     "env": "qa_test",
     "regions": {
       "cn": "https://cn-server-manager.example.com",
@@ -54,5 +54,15 @@
     "task_timeout_seconds": 900,
     "request_timeout_seconds": 30,
     "inventory_ttl_seconds": 600
+  },
+  "baye_check": {
+    "enabled": false,
+    "base_url": "http://ui-automation-executor.example.com:8899",
+    "default_serial": "",
+    "accounts_path": "config/baye_accounts.xlsx",
+    "state_path": "data/baye_checks_pending.json",
+    "poll_interval_seconds": 3,
+    "timeout_seconds": 3600,
+    "request_timeout_seconds": 30
   }
 }

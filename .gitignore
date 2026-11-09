@@ -21,3 +21,7 @@ config/hotfix_thresholds.json
 docs/hotfix_thresholds_excel_export.json
 knowledge/season_process.lua
 tools/hotfix_threshold_registry.py
+
+# 新服开服配置检查账号表（含密码，只放在 Worker 本地）
+config/baye_accounts.*
+!config/baye_accounts.example.csv

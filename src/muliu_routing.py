@@ -49,6 +49,12 @@ class MuliuPlanRouteResolver:
     def resolve(self, plan: MuliuPlan) -> MuliuRouteSnapshot:
         try:
             self._call_contracts.validate(plan)
+            backends = {self._call_contracts.backend_for(step) for step in plan.steps}
+            if backends != {""}:
+                if len(plan.steps) != 1:
+                    raise ValueError("开服配置检查需要单独发起，不能和其他操作放在同一个计划里")
+                # Executed by the intranet Worker itself (UI-automation API), not by a regional Muliu task.
+                return MuliuRouteSnapshot.from_region("cn")
             if plan.route_scope is not None:
                 return MuliuRouteSnapshot.from_region(plan.route_scope)
 

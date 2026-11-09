@@ -59,6 +59,21 @@ class FeishuClient:
         if data.get("code") != 0:
             raise FeishuAPIError(f"Failed to update card message: {data}")
 
+    async def upload_image(self, image: bytes, filename: str = "image.png") -> str:
+        """Upload an image for use in messages / cards and return its ``image_key`` (needs im:resource)."""
+        token = await self.get_tenant_access_token()
+        response = await self._client.post(
+            f"{self._config.base_url}/open-apis/im/v1/images",
+            headers={"Authorization": f"Bearer {token}"},
+            data={"image_type": "message"},
+            files={"image": (filename, image, "image/png")},
+        )
+        response.raise_for_status()
+        data = response.json()
+        if data.get("code") != 0:
+            raise FeishuAPIError(f"Failed to upload image: code={data.get('code')} msg={data.get('msg')}")
+        return str(data["data"]["image_key"])
+
     async def list_chat_member_names(self, chat_id: str) -> dict[str, str]:
         """Return ``open_id -> display name`` of a chat's members (needs im:chat.members:read)."""
         token = await self.get_tenant_access_token()

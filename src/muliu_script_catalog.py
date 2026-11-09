@@ -17,6 +17,9 @@ _CONTRACT_BLOCK_PATTERN = re.compile(
 _VARIABLE_TEMPLATE_PATTERN = re.compile(r"^\{([A-Za-z_][A-Za-z0-9_]*)\}$")
 _RUNNER_VALUES = frozenset({"bash", "python3.7"})
 _RISK_VALUES = frozenset({"read", "write"})
+# Non-Muliu executors on the Worker. Such contracts are never part of the GS-1 runner manifest.
+BACKEND_BAYE_CHECK = "baye_check"
+_BACKEND_VALUES = frozenset({BACKEND_BAYE_CHECK})
 
 
 class MuliuScriptCatalogError(RuntimeError):
@@ -47,6 +50,8 @@ class MuliuCallContract:
     # Gateway/Worker-only routing metadata. It is intentionally not emitted to
     # the GS-1 argv manifest because it must never become a script argument.
     route_scopes: frozenset[str] = frozenset()
+    # Non-empty: executed by a Worker-side backend (e.g. the UI-automation API), not by Muliu / GS-1.
+    backend: str = ""
 
     def matches(self, step: MuliuStep) -> bool:
         if step.path != self.path or len(step.args) != len(self.args):
@@ -151,6 +156,11 @@ class MuliuCallContracts:
                 return False
         return True
 
+    def backend_for(self, step: MuliuStep) -> str:
+        """Backend of the single contract matching ``step`` ("" for Muliu / unmatched)."""
+        matching = [contract for contract in self.contracts if contract.matches(step)]
+        return matching[0].backend if len(matching) == 1 else ""
+
     def runner_manifest(self) -> MuliuRunnerManifest:
         runners_by_path: dict[str, str] = {}
         for contract in self.contracts:
@@ -159,7 +169,7 @@ class MuliuCallContracts:
                 raise MuliuCallContractError(
                     "同一路径不能登记不同 runner：{}".format(contract.path)
                 )
-        return MuliuRunnerManifest(contracts=self.contracts)
+        return MuliuRunnerManifest(contracts=tuple(contract for contract in self.contracts if not contract.backend))
 
     def extract_server_ids(self, plan: MuliuPlan) -> tuple[str, ...]:
         """Extract only contract-declared target-server values from an exact plan.
@@ -336,7 +346,7 @@ def _parse_contract(raw_contract: object, index: int) -> MuliuCallContract:
         raise MuliuCallContractError("{} 必须是 JSON 对象".format(label))
     _reject_unknown_fields(
         raw_contract,
-        {"name", "path", "args", "variables", "runner", "risk", "route_scopes"},
+        {"name", "path", "args", "variables", "runner", "risk", "route_scopes", "backend"},
         label,
     )
 
@@ -355,6 +365,9 @@ def _parse_contract(raw_contract: object, index: int) -> MuliuCallContract:
             "{}.risk 必须是以下值之一：{}".format(label, ", ".join(sorted(_RISK_VALUES)))
         )
     route_scopes = _parse_route_scopes(raw_contract.get("route_scopes"), label)
+    backend = raw_contract.get("backend", "")
+    if backend and backend not in _BACKEND_VALUES:
+        raise MuliuCallContractError("{}.backend 必须是以下值之一：{}".format(label, ", ".join(sorted(_BACKEND_VALUES))))
     if route_scopes and risk != "read":
         raise MuliuCallContractError("{}.route_scopes 仅允许用于 read 合同".format(label))
 
@@ -392,6 +405,7 @@ def _parse_contract(raw_contract: object, index: int) -> MuliuCallContract:
         runner=runner,
         risk=risk,
         route_scopes=route_scopes,
+        backend=backend,
     )
 
 

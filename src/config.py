@@ -284,6 +284,21 @@ class ServerManagerConfig:
 
 
 @dataclass(frozen=True)
+class BayeCheckConfig:
+    """Worker-side 新服开服配置检查 via the UI-automation API (design: docs/superpowers/specs/2026-11-06-baye-open-time-check.md)."""
+
+    enabled: bool = False
+    base_url: str = ""
+    default_serial: str = ""
+    # 服号 → 完整服务器名 / 账号 / 密码 / 设备；stays on the Worker (gitignored), never sent to the Gateway or AI.
+    accounts_path: str = "config/baye_accounts.xlsx"
+    state_path: str = "data/baye_checks_pending.json"
+    poll_interval_seconds: float = 3.0
+    timeout_seconds: float = 3600.0
+    request_timeout_seconds: float = 30.0
+
+
+@dataclass(frozen=True)
 class AppConfig:
     server: ServerConfig
     feishu: FeishuConfig
@@ -300,6 +315,7 @@ class AppConfig:
     admin: AdminConfig = field(default_factory=AdminConfig)
     clear_notification: ClearNotificationConfig = field(default_factory=ClearNotificationConfig)
     server_manager: ServerManagerConfig = field(default_factory=ServerManagerConfig)
+    baye_check: BayeCheckConfig = field(default_factory=BayeCheckConfig)
     # 按用途选择的模型池；未配置 ai.pools 时为空，所有用途共用 ``ai``。
     ai_routes: dict[str, AIPoolConfig] = field(default_factory=dict)
 
@@ -503,6 +519,25 @@ def _load_server_manager(raw: Any) -> ServerManagerConfig:
         task_timeout_seconds=_require_positive_number(float(raw.get("task_timeout_seconds", 900)), "server_manager.task_timeout_seconds"),
         request_timeout_seconds=_require_positive_number(float(raw.get("request_timeout_seconds", 30)), "server_manager.request_timeout_seconds"),
         inventory_ttl_seconds=_require_positive_number(float(raw.get("inventory_ttl_seconds", 600)), "server_manager.inventory_ttl_seconds"),
+    )
+
+
+def _load_baye_check(raw: Any) -> BayeCheckConfig:
+    if not isinstance(raw, dict):
+        raise ConfigError("baye_check section must be a JSON object")
+    enabled = bool(raw.get("enabled", False))
+    base_url = str(raw.get("base_url", "")).strip().rstrip("/")
+    if enabled and not base_url.startswith(("http://", "https://")):
+        raise ConfigError("baye_check.base_url 必须以 http:// 或 https:// 开头")
+    return BayeCheckConfig(
+        enabled=enabled,
+        base_url=base_url,
+        default_serial=str(raw.get("default_serial", "")).strip(),
+        accounts_path=str(raw.get("accounts_path", "config/baye_accounts.xlsx")).strip(),
+        state_path=str(raw.get("state_path", "data/baye_checks_pending.json")).strip(),
+        poll_interval_seconds=_require_positive_number(float(raw.get("poll_interval_seconds", 3)), "baye_check.poll_interval_seconds"),
+        timeout_seconds=_require_positive_number(float(raw.get("timeout_seconds", 3600)), "baye_check.timeout_seconds"),
+        request_timeout_seconds=_require_positive_number(float(raw.get("request_timeout_seconds", 30)), "baye_check.request_timeout_seconds"),
     )
 
 
@@ -785,5 +820,6 @@ def load_config(path: str | Path = "config/config.json") -> AppConfig:
         ai_routes=ai_routes,
         clear_notification=clear_notification,
         server_manager=_load_server_manager(raw.get("server_manager", {})),
+        baye_check=_load_baye_check(raw.get("baye_check", {})),
     )
     return config

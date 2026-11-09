@@ -20,6 +20,7 @@ from .clear_notifier import ClearNotifier
 from .plan_board import PlanStore
 from .hotfix_thresholds import HotfixPlannerCatalog, ThresholdStore
 from .execution_routes import ExecutionRouteStore
+from .baye_check import BayeCheckCoordinator, build_followup_card, parse_followup
 from .qa_library import QaService, QaStore
 from .event_handler import FeishuEventHandler
 from .execution_report import ExecutionReportStore
@@ -32,7 +33,7 @@ from .muliu_intent import MuliuIntentRouter
 from .muliu_plan import MuliuPlanError, parse_plan
 from .muliu_routing import MuliuPlanRouteResolver
 from .muliu_planner import MuliuPlanner
-from .muliu_script_catalog import MuliuScriptCatalog
+from .muliu_script_catalog import BACKEND_BAYE_CHECK, MuliuScriptCatalog
 from .muliu_worker import GatewayWorkerClient, MuliuWorker
 from .operation_message import build_execution_status_card, format_execution_result
 from .script_knowledge_base import ScriptKnowledgeBase
@@ -202,7 +203,9 @@ def create_app(config_path: str | Path = "config/config.json") -> FastAPI:
         return await event_handler.handle(payload)
 
     if config.runtime.role == "gateway":
-        _add_gateway_worker_routes(app, config, job_store, job_processor, route_store, executable_contracts)
+        _add_gateway_worker_routes(
+            app, config, job_store, job_processor, route_store, executable_contracts, feishu_client=feishu_client
+        )
 
     return app
 
@@ -225,15 +228,20 @@ def _create_worker_app(config: Any) -> FastAPI:
     script_catalog = MuliuScriptCatalog(config.muliu.script_catalog_path)
     call_contracts = script_catalog.read_call_contracts()
     firewall = MuliuFirewall(config.muliu, call_contracts=call_contracts)
+    gateway_client = GatewayWorkerClient(config)
+    baye_checks = (
+        BayeCheckCoordinator(config.baye_check, gateway_client.submit_followup) if config.baye_check.enabled else None
+    )
     worker = MuliuWorker(
         config=config,
         firewall=firewall,
-        gateway_client=GatewayWorkerClient(config),
+        gateway_client=gateway_client,
         route_resolver=MuliuPlanRouteResolver(
             config.execution_interpretation.server_environments_path,
             call_contracts,
         ),
         call_contracts=call_contracts,
+        baye_checks=baye_checks,
     )
 
     @asynccontextmanager
@@ -241,12 +249,18 @@ def _create_worker_app(config: Any) -> FastAPI:
         if install_stack_dump_signals():
             logger.warning("stack dumps enabled: kill -USR1 (threads) / -USR2 (asyncio tasks) pid")
         task = asyncio.create_task(worker.run_forever())
+        if baye_checks is not None:
+            resumed = baye_checks.resume()
+            if resumed:
+                logger.warning("baye checks resumed after restart: %s", resumed)
         try:
             yield
         finally:
             worker.stop()
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+            if baye_checks is not None:
+                await baye_checks.stop()
 
     app = FastAPI(title="Feishu Muliu Intranet Worker", lifespan=lifespan)
 
@@ -264,8 +278,11 @@ def _add_gateway_worker_routes(
     job_processor: MessageJobProcessor,
     route_store: Optional[ExecutionRouteStore] = None,
     executable_contracts: Any = None,
+    *,
+    feishu_client: Any = None,
 ) -> None:
     """Expose a minimal authenticated pull protocol for the intranet worker."""
+    delivered_followups: set[str] = set()
 
     def require_worker(
         authorization: str | None,
@@ -362,6 +379,44 @@ def _add_gateway_worker_routes(
             pending_job,
             result,
             pending_job.confirmation_message_id,
+        )
+        return {"status": "accepted"}
+
+    @app.post("/internal/worker/jobs/{message_id}/followup", include_in_schema=False)
+    async def worker_job_followup(
+        message_id: str,
+        payload: dict[str, Any],
+        authorization: Optional[str] = Header(default=None),
+        x_feishu_worker_id: Optional[str] = Header(default=None),
+    ) -> dict[str, str]:
+        """A background result (开服配置检查 screenshots) for a job the same Worker already finished."""
+        worker_id = require_worker(authorization, x_feishu_worker_id)
+        job = job_store.get(message_id)
+        if job is None or job.worker_id != worker_id:
+            raise HTTPException(status_code=404, detail="worker job not found")
+        try:
+            plan = parse_plan(job.plan_json, max_steps=config.muliu.max_steps)
+            followup = parse_followup(payload)
+        except (MuliuPlanError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if executable_contracts is None or executable_contracts.backend_for(plan.steps[0]) != BACKEND_BAYE_CHECK:
+            raise HTTPException(status_code=422, detail="job does not accept follow-ups")
+        if followup["check_id"] in delivered_followups:
+            return {"status": "duplicate"}
+        if feishu_client is None:
+            raise HTTPException(status_code=503, detail="feishu client unavailable")
+        image_keys: list[tuple[str, str]] = []
+        for image in followup["images"]:
+            try:
+                key = await feishu_client.upload_image(image["data"], "{}.png".format(image["name"] or "screenshot"))
+                image_keys.append((image["label"], key))
+            except Exception:  # noqa: BLE001 - still deliver the text result
+                logger.warning("baye follow-up image upload failed message_id=%s", message_id, exc_info=True)
+        await feishu_client.reply_card(message_id, build_followup_card(followup, image_keys))
+        delivered_followups.add(followup["check_id"])
+        logger.warning(
+            "baye follow-up delivered message_id=%s check_id=%s status=%s images=%s",
+            message_id, followup["check_id"], followup["status"], len(image_keys),
         )
         return {"status": "accepted"}
 

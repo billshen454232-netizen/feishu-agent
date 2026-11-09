@@ -16,6 +16,9 @@ from .muliu_firewall import MuliuFirewall
 from .muliu_plan import MuliuPlanError, parse_plan
 from .muliu_routing import MuliuPlanRouteResolver, MuliuRouteSnapshot, MuliuRoutingError
 from .server_manager import ROUTE_API, ROUTES, ServerManagerClient, ServerManagerStepRunner, translate
+from .baye_check import BayeCheckCoordinator, BayeCheckError, BayeCheckSubmitUnknown
+from .muliu_executor import MuliuStepResult
+from .muliu_script_catalog import BACKEND_BAYE_CHECK
 from .worker_protocol import serialize_execution_result
 
 logger = logging.getLogger(__name__)
@@ -95,6 +98,18 @@ class GatewayWorkerClient:
         self._response_json(response)
         return True
 
+    async def submit_followup(self, message_id: str, payload: dict[str, object]) -> bool:
+        """Post a later result for an already finished job (e.g. a background 开服配置检查)."""
+        response = await self._request(
+            "POST",
+            "/internal/worker/jobs/{}/followup".format(message_id),
+            payload,
+        )
+        if response.status_code == 404:
+            return True  # job unknown to the Gateway: nothing to deliver to, do not retry forever
+        self._response_json(response)
+        return True
+
     async def _request(self, method: str, path: str, payload: dict[str, object]) -> httpx.Response:
         try:
             response = await self._client.request(
@@ -137,6 +152,7 @@ class MuliuWorker:
         gateway_client: GatewayWorkerClient,
         route_resolver: MuliuPlanRouteResolver,
         call_contracts: Any | None = None,
+        baye_checks: Optional[BayeCheckCoordinator] = None,
     ) -> None:
         if config.runtime.role != "worker":
             raise ValueError("MuliuWorker 只能在 runtime.role=worker 时运行")
@@ -145,6 +161,7 @@ class MuliuWorker:
         self._gateway_client = gateway_client
         self._route_resolver = route_resolver
         self._call_contracts = call_contracts
+        self._baye_checks = baye_checks
         self._stopping = False
         self._sm_clients: dict[str, ServerManagerClient] = {}
         self._sm_inventory: dict[str, tuple[float, set[str]]] = {}
@@ -203,6 +220,10 @@ class MuliuWorker:
                 logger.error("gateway no longer accepts invalid-plan result message_id=%s", job.message_id)
             return
 
+        if self._call_contracts is not None and self._call_contracts.backend_for(plan.steps[0]) == BACKEND_BAYE_CHECK:
+            await self._submit_baye_check(job, plan)
+            return
+
         api_steps, api_runner = await self._api_route(plan, job, local_snapshot.region)
         routed_executor = MuliuExecutor(routed_config)
         execution_task = asyncio.create_task(
@@ -245,6 +266,36 @@ class MuliuWorker:
 
         accepted = await self._gateway_client.submit_result(job.message_id, result)
         if not accepted:
+            logger.error("gateway no longer accepts result message_id=%s", job.message_id)
+
+    async def _submit_baye_check(self, job: ClaimedWorkerJob, plan: Any) -> None:
+        """Submit the UI-automation check and report "submitted" at once; the result follows in the same thread."""
+        step = plan.steps[0]
+        try:
+            if self._baye_checks is None:
+                raise BayeCheckError("这台 Worker 未启用开服配置检查（config.json 的 baye_check）")
+            check_id = await self._baye_checks.submit(job.message_id, step.args[0])
+            result = MuliuExecutionResult(
+                summary=plan.summary,
+                step_results=[MuliuStepResult(
+                    step_number=1, description=step.description, path=step.path, args=list(step.args), succeeded=True,
+                    log="[开服配置检查] 已提交到真机自动化（任务 {}），通常 3–10 分钟完成；完成后会在本话题追加结果和两张截图。\n"
+                        "AI_OP_END status=success".format(check_id),
+                )],
+            )
+        except BayeCheckSubmitUnknown as exc:
+            result = MuliuExecutionResult(
+                summary=plan.summary, step_results=[],
+                result_unknown_reason="{}；是否已开始检查未知。接口没有防重复机制，请勿重复确认，先在执行机控制台查看最近记录".format(exc),
+            )
+        except BayeCheckError as exc:
+            result = MuliuExecutionResult(summary=plan.summary, step_results=[], failed_step_number=1,
+                                          failure_reason="开服配置检查未开始：{}".format(exc))
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("baye check submit crashed message_id=%s", job.message_id)
+            result = MuliuExecutionResult(summary=plan.summary, step_results=[],
+                                          result_unknown_reason="提交开服配置检查时发生异常：{}；请勿重复确认".format(type(exc).__name__))
+        if not await self._gateway_client.submit_result(job.message_id, result):
             logger.error("gateway no longer accepts result message_id=%s", job.message_id)
 
     async def _api_route(
