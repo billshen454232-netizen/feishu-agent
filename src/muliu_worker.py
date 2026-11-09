@@ -274,7 +274,8 @@ class MuliuWorker:
         try:
             if self._baye_checks is None:
                 raise BayeCheckError("这台 Worker 未启用开服配置检查（config.json 的 baye_check）")
-            check_id = await self._baye_checks.submit(job.message_id, step.args[0])
+            expected_open_time = int(step.args[1]) if len(step.args) > 1 else 0  # {timestamp}, checked by the contract
+            check_id = await self._baye_checks.submit(job.message_id, step.args[0], expected_open_time)
             result = MuliuExecutionResult(
                 summary=plan.summary,
                 step_results=[MuliuStepResult(

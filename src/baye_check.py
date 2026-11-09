@@ -20,10 +20,13 @@ import logging
 import re
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 
 import httpx
+
+from .utils.time_text import BEIJING, TimeTextError, parse_time_text
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +40,7 @@ _HEADERS = {
     "serial": ("设备", "设备serial", "设备 serial", "serial"),
 }
 _MAX_IMAGE_BYTES = 8 * 1024 * 1024
+MAX_OCR_CHARS = 4000
 
 
 class BayeCheckError(RuntimeError):
@@ -151,6 +155,31 @@ class BayeCheckSubmitUnknown(BayeCheckError):
     """The submit request may have reached the executor; the API has no idempotency key, so never resend."""
 
 
+def ocr_texts(job: dict[str, Any]) -> dict[str, str]:
+    """OCR text per screenshot from the executor result, tolerant of a few shapes.
+
+    Accepted: ``job["ocr"] = {name: "text" | {"text": ...} | {"lines": [...]}}`` or ``screenshot["ocr_text"]``.
+    """
+    texts: dict[str, str] = {}
+
+    def text_of(value: Any) -> str:
+        if isinstance(value, dict):
+            value = value.get("text") if value.get("text") is not None else value.get("lines")
+        if isinstance(value, list):
+            value = "\n".join(str(item.get("text") if isinstance(item, dict) else item) for item in value)
+        return str(value or "").strip()
+
+    raw = job.get("ocr")
+    if isinstance(raw, dict):
+        for name, value in raw.items():
+            if text_of(value):
+                texts[str(name)[:40]] = text_of(value)[:MAX_OCR_CHARS]
+    for shot in job.get("screenshots") or []:
+        if isinstance(shot, dict) and text_of(shot.get("ocr_text")) and str(shot.get("name")) not in texts:
+            texts[str(shot.get("name"))[:40]] = text_of(shot.get("ocr_text"))[:MAX_OCR_CHARS]
+    return texts
+
+
 def _detail(response: httpx.Response) -> str:
     try:
         return str(response.json().get("detail") or "")[:200]
@@ -173,8 +202,12 @@ class BayeCheckCoordinator:
         self._clock = clock
         self._tasks: dict[str, asyncio.Task[None]] = {}
 
-    async def submit(self, message_id: str, server_id: str) -> str:
-        """Submit and start watching; returns the check id. Raises BayeCheckError when nothing was started."""
+    async def submit(self, message_id: str, server_id: str, expected_open_time: int = 0) -> str:
+        """Submit and start watching; returns the check id. Raises BayeCheckError when nothing was started.
+
+        ``expected_open_time`` (Unix seconds, 0 = not given) comes from the user's message and is only
+        carried along to the result so the Gateway can judge the screenshots' OCR text against it.
+        """
         accounts = load_accounts(self._settings.accounts_path)
         account = accounts.get(server_id)
         if account is None:
@@ -189,7 +222,8 @@ class BayeCheckCoordinator:
         if not check_id:
             raise BayeCheckSubmitUnknown("执行机没有返回任务 ID")
         entry = {"message_id": message_id, "check_id": check_id, "server_id": server_id,
-                 "server_name": account.server_name, "serial": serial, "submitted_at": int(self._clock())}
+                 "server_name": account.server_name, "serial": serial, "submitted_at": int(self._clock()),
+                 "expected_open_time": int(expected_open_time or 0)}
         self._save(self._load() + [entry])
         self._start(entry)
         logger.warning("baye check submitted message_id=%s check_id=%s server=%s", message_id, check_id, server_id)
@@ -238,6 +272,7 @@ class BayeCheckCoordinator:
             "status": str(job.get("status") or "unknown"), "step": str(job.get("step") or ""), "error": str(job.get("error") or ""),
             "note": str(job.get("note") or ""), "created_at": str(job.get("created_at") or ""),
             "finished_at": str(job.get("finished_at") or ""), "images": images,
+            "expected_open_time": int(entry.get("expected_open_time") or 0), "ocr": ocr_texts(job),
         }
         for attempt in range(1, 61):  # Gateway restarts / network blips: retry for ~30 minutes
             try:
@@ -276,7 +311,10 @@ _STATUS_TITLES = {
     "interrupted": ("开服配置检查被中断", "orange"),
 }
 MAX_FOLLOWUP_IMAGES = 2
-REVIEW_NOTE = "自动判定尚未接入，请人工核对：① 选服列表里的开服时间；② 霸业剩余时间应约为 开服时间 + 4 小时 − 截图时间。"
+FIRST_STAGE_SECONDS = 4 * 3600  # 第一个霸业阶段持续 4 小时
+TOLERANCE_SECONDS = 5 * 60
+REVIEW_NOTE = "未在消息里给出开服时间，未做自动判定，请人工核对：① 选服列表里的开服时间；② 霸业第一阶段结束时间应为 开服时间 + 4 小时。"
+VERDICT_OK, VERDICT_WRONG, VERDICT_UNKNOWN = "正确", "不正确", "无法判定"
 
 
 def parse_followup(payload: Any) -> dict[str, Any]:
@@ -300,12 +338,93 @@ def parse_followup(payload: Any) -> dict[str, Any]:
         if not data or len(data) > _MAX_IMAGE_BYTES:
             raise ValueError("invalid image size")
         images.append({"name": str(item.get("name") or "")[:40], "label": str(item.get("label") or "")[:60], "data": data})
+    raw_ocr = payload.get("ocr") or {}
+    if not isinstance(raw_ocr, dict) or len(raw_ocr) > MAX_FOLLOWUP_IMAGES:
+        raise ValueError("invalid ocr")
+    ocr = {str(name)[:40]: str(text or "")[:MAX_OCR_CHARS] for name, text in raw_ocr.items() if str(text or "").strip()}
+    try:
+        expected_open_time = int(payload.get("expected_open_time") or 0)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("invalid expected_open_time") from exc
+    if expected_open_time < 0:
+        raise ValueError("invalid expected_open_time")
     fields = {key: str(payload.get(key) or "")[:300] for key in
               ("server_id", "server_name", "status", "step", "error", "note", "created_at", "finished_at")}
-    return {**fields, "check_id": check_id, "images": images}
+    return {**fields, "check_id": check_id, "images": images, "ocr": ocr, "expected_open_time": expected_open_time}
 
 
-def build_followup_card(followup: dict[str, Any], image_keys: list[tuple[str, str]]) -> dict[str, object]:
+def should_judge(followup: dict[str, Any]) -> bool:
+    """AI reads the OCR text only when the user gave an open time and the executor returned text."""
+    return followup["status"] == "pass" and followup["expected_open_time"] > 0 and bool(followup["ocr"])
+
+
+def _beijing(timestamp: int) -> str:
+    return datetime.fromtimestamp(timestamp, BEIJING).strftime("%Y-%m-%d %H:%M")
+
+
+def build_judge_prompt(followup: dict[str, Any]) -> str:
+    """Ask the AI to *read* values from OCR text; the verdict is computed by :func:`decide`."""
+    ocr_blocks = "\n\n".join("【{}】\n{}".format(name, text) for name, text in followup["ocr"].items())
+    return (
+        "你在核对游戏新服的开服配置。下面是真机截图的 OCR 识别文字（可能有错字、断行、顺序错乱）。\n"
+        "只做读取，不要判断对错。\n\n"
+        "目标服务器：{server}\n截图时间（北京时间，检查结束时间，可作为“现在”）：{shot}\n\n"
+        "{ocr}\n\n"
+        "请读出：\n"
+        "1. open_time_seen：选服列表里目标服务器的开服时间（通常在“本服开启时间”之后）。\n"
+        "2. baye_end_time：霸业页面第一个阶段的结束时间。若显示“已于 X 完成”，就是 X；"
+        "若显示剩余时间 / 倒计时 R，则为 截图时间 + R（这一步可以由你计算）。\n"
+        "3. baye_text：霸业页面中你依据的原文片段。\n"
+        "时间一律写成 YYYY-MM-DDTHH:MM（缺年份用截图时间的年份）；读不出来就写空字符串，不要猜。\n"
+        "只输出一个 JSON 对象："
+        '{{"open_time_seen": "...", "baye_end_time": "...", "baye_text": "...", "explanation": "一两句说明依据"}}'
+    ).format(server=followup["server_name"] or followup["server_id"],
+             shot=followup["finished_at"] or "未知", ocr=ocr_blocks)
+
+
+def parse_judgement(text: str) -> dict[str, str]:
+    match = re.search(r"\{.*\}", text or "", re.S)
+    if not match:
+        raise ValueError("AI 没有返回 JSON")
+    data = json.loads(match.group(0))
+    if not isinstance(data, dict):
+        raise ValueError("AI 返回的不是 JSON 对象")
+    return {key: str(data.get(key) or "").strip()[:300] for key in ("open_time_seen", "baye_end_time", "baye_text", "explanation")}
+
+
+def decide(followup: dict[str, Any], judgement: dict[str, str]) -> tuple[str, list[str]]:
+    """Deterministic verdict from the values the AI read; returns (verdict, reasons)."""
+    expected_open = followup["expected_open_time"]
+    expected_end = expected_open + FIRST_STAGE_SECONDS
+    reasons: list[str] = []
+    verdicts: list[str] = []
+    for label, key, expected in (("开服时间", "open_time_seen", expected_open), ("霸业第一阶段结束", "baye_end_time", expected_end)):
+        seen_text = judgement.get(key, "")
+        try:
+            seen = parse_time_text(seen_text).timestamp if seen_text else None
+        except TimeTextError:
+            seen = None
+        if seen is None:
+            verdicts.append(VERDICT_UNKNOWN)
+            reasons.append("{}：未能从截图文字读出（期望 {}）".format(label, _beijing(expected)))
+        elif abs(seen - expected) <= TOLERANCE_SECONDS:
+            verdicts.append(VERDICT_OK)
+            reasons.append("{}：{} ✓".format(label, _beijing(seen)))
+        else:
+            verdicts.append(VERDICT_WRONG)
+            reasons.append("{}：截图为 {}，期望 {} ✗".format(label, _beijing(seen), _beijing(expected)))
+    if VERDICT_WRONG in verdicts:
+        return VERDICT_WRONG, reasons
+    if VERDICT_UNKNOWN in verdicts:
+        return VERDICT_UNKNOWN, reasons
+    return VERDICT_OK, reasons
+
+
+_VERDICT_TEMPLATES = {VERDICT_OK: "green", VERDICT_WRONG: "red", VERDICT_UNKNOWN: "yellow"}
+
+
+def build_followup_card(followup: dict[str, Any], image_keys: list[tuple[str, str]], *,
+                        judgement: Optional[dict[str, str]] = None, judge_error: str = "") -> dict[str, object]:
     """Result card for a finished check; ``image_keys`` is [(label, img_key)]. Text is plain_text (no markdown injection)."""
     title, template = _STATUS_TITLES.get(followup["status"], ("开服配置检查结果未知", "yellow"))
     lines = ["服务器：{}".format(followup["server_name"] or followup["server_id"]), "任务 ID：{}".format(followup["check_id"])]
@@ -317,14 +436,33 @@ def build_followup_card(followup: dict[str, Any], image_keys: list[tuple[str, st
         lines.append("备注：{}".format(followup["note"]))
     if followup["created_at"] or followup["finished_at"]:
         lines.append("开始 / 结束：{} / {}".format(followup["created_at"] or "-", followup["finished_at"] or "-"))
+    expected_open = followup["expected_open_time"]
+    if expected_open:
+        lines.append("期望开服时间：{}；期望霸业第一阶段结束：{}".format(
+            _beijing(expected_open), _beijing(expected_open + FIRST_STAGE_SECONDS)))
     elements: list[dict[str, object]] = [{"tag": "div", "text": {"tag": "plain_text", "content": "\n".join(lines)}}]
+    if judgement is not None:
+        verdict, reasons = decide(followup, judgement)
+        title, template = "开服配置检查：{}".format(verdict), _VERDICT_TEMPLATES[verdict]
+        detail = reasons + ([("AI 说明：" + judgement["explanation"])] if judgement.get("explanation") else [])
+        elements.append({"tag": "hr"})
+        elements.append({"tag": "div", "text": {"tag": "plain_text", "content": "\n".join(detail)}})
     for label, key in image_keys:
         elements.append({"tag": "img", "img_key": key, "alt": {"tag": "plain_text", "content": label or "截图"}})
     if followup["images"] and not image_keys:
         elements.append({"tag": "div", "text": {"tag": "plain_text", "content": "截图上传飞书失败，请在执行机控制台查看该任务。"}})
     elif not followup["images"]:
         elements.append({"tag": "div", "text": {"tag": "plain_text", "content": "没有取得截图。"}})
-    if followup["status"] == "pass":
-        elements.append({"tag": "note", "elements": [{"tag": "plain_text", "content": REVIEW_NOTE}]})
+    if followup["status"] == "pass" and judgement is None:
+        if judge_error:
+            note = "自动判定未完成（{}），请人工核对截图。".format(judge_error)
+        elif expected_open and not followup["ocr"]:
+            note = "执行机没有返回截图识别文字，未做自动判定，请人工核对截图。"
+        else:
+            note = REVIEW_NOTE
+        elements.append({"tag": "note", "elements": [{"tag": "plain_text", "content": note}]})
+    elif judgement is not None:
+        elements.append({"tag": "note", "elements": [{"tag": "plain_text", "content":
+                         "AI 只负责从截图文字中读取时间，对错由程序比较（误差 ±5 分钟）；如有疑问以截图为准。"}]})
     return {"config": {"wide_screen_mode": True}, "header": {"template": template, "title": {"tag": "plain_text", "content": title}},
             "elements": elements}

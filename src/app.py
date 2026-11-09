@@ -20,7 +20,14 @@ from .clear_notifier import ClearNotifier
 from .plan_board import PlanStore
 from .hotfix_thresholds import HotfixPlannerCatalog, ThresholdStore
 from .execution_routes import ExecutionRouteStore
-from .baye_check import BayeCheckCoordinator, build_followup_card, parse_followup
+from .baye_check import (
+    BayeCheckCoordinator,
+    build_followup_card,
+    build_judge_prompt,
+    parse_followup,
+    parse_judgement,
+    should_judge,
+)
 from .qa_library import QaService, QaStore
 from .event_handler import FeishuEventHandler
 from .execution_report import ExecutionReportStore
@@ -204,7 +211,8 @@ def create_app(config_path: str | Path = "config/config.json") -> FastAPI:
 
     if config.runtime.role == "gateway":
         _add_gateway_worker_routes(
-            app, config, job_store, job_processor, route_store, executable_contracts, feishu_client=feishu_client
+            app, config, job_store, job_processor, route_store, executable_contracts,
+            feishu_client=feishu_client, judge_ai_client=interpretation_ai_client,
         )
 
     return app
@@ -280,9 +288,11 @@ def _add_gateway_worker_routes(
     executable_contracts: Any = None,
     *,
     feishu_client: Any = None,
+    judge_ai_client: Any = None,
 ) -> None:
     """Expose a minimal authenticated pull protocol for the intranet worker."""
     delivered_followups: set[str] = set()
+    judge_tasks: set[asyncio.Task[None]] = set()
 
     def require_worker(
         authorization: str | None,
@@ -382,6 +392,30 @@ def _add_gateway_worker_routes(
         )
         return {"status": "accepted"}
 
+    async def judge_and_reply(message_id: str, followup: dict[str, Any], image_keys: list[tuple[str, str]]) -> None:
+        judgement = None
+        judge_error = ""
+        try:
+            text = await asyncio.wait_for(
+                judge_ai_client.generate([], build_judge_prompt(followup)),
+                timeout=config.execution_interpretation.background_timeout_seconds,
+            )
+            judgement = parse_judgement(text)
+        except asyncio.TimeoutError:
+            judge_error = "AI 超时"
+        except Exception as exc:  # noqa: BLE001 - the screenshots still go out
+            logger.warning("baye judge failed message_id=%s", message_id, exc_info=True)
+            judge_error = "AI 读取失败：{}".format(type(exc).__name__)
+        try:
+            card = build_followup_card(followup, image_keys, judgement=judgement, judge_error=judge_error)
+            await feishu_client.reply_card(message_id, card)
+            logger.warning(
+                "baye follow-up delivered message_id=%s check_id=%s status=%s judged=%s",
+                message_id, followup["check_id"], followup["status"], judgement is not None,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("baye follow-up reply failed message_id=%s check_id=%s", message_id, followup["check_id"])
+
     @app.post("/internal/worker/jobs/{message_id}/followup", include_in_schema=False)
     async def worker_job_followup(
         message_id: str,
@@ -412,8 +446,18 @@ def _add_gateway_worker_routes(
                 image_keys.append((image["label"], key))
             except Exception:  # noqa: BLE001 - still deliver the text result
                 logger.warning("baye follow-up image upload failed message_id=%s", message_id, exc_info=True)
-        await feishu_client.reply_card(message_id, build_followup_card(followup, image_keys))
         delivered_followups.add(followup["check_id"])
+        if judge_ai_client is not None and should_judge(followup):
+            # AI may outlast the Worker's 30 s request timeout: accept now, judge and reply in the background.
+            task = asyncio.create_task(judge_and_reply(message_id, followup, image_keys))
+            judge_tasks.add(task)
+            task.add_done_callback(judge_tasks.discard)
+            return {"status": "accepted"}
+        try:
+            await feishu_client.reply_card(message_id, build_followup_card(followup, image_keys))
+        except Exception:
+            delivered_followups.discard(followup["check_id"])  # let the Worker retry
+            raise
         logger.warning(
             "baye follow-up delivered message_id=%s check_id=%s status=%s images=%s",
             message_id, followup["check_id"], followup["status"], len(image_keys),
