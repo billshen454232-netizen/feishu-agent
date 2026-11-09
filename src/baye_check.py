@@ -14,8 +14,10 @@ from __future__ import annotations
 import asyncio
 import base64
 import csv
+import io
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -84,14 +86,23 @@ def load_accounts(path: str | Path) -> dict[str, BayeAccount]:
         server_id = cell("server_id")
         if not server_id:
             continue
-        accounts[server_id] = BayeAccount(server_id, cell("server_name"), cell("account"), cell("password"), cell("serial"))
+        account = BayeAccount(server_id, cell("server_name"), cell("account"), cell("password"), cell("serial"))
+        accounts[server_id] = account
+        # "检查 1800 服" carries only digits; the table may use ids like S11800, so also index "1800服 鼎业千秋" by 1800.
+        number = re.match(r"\s*([0-9]{3,8})\s*服", account.server_name)
+        if number:
+            accounts.setdefault(number.group(1), account)
     return accounts
 
 
 def _read_rows(path: Path) -> list[list[Any]]:
     if path.suffix.lower() == ".csv":
-        with path.open(encoding="utf-8-sig", newline="") as handle:
-            return [list(row) for row in csv.reader(handle)]
+        raw = path.read_bytes()
+        try:
+            text = raw.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            text = raw.decode("gb18030")  # Excel on Chinese Windows saves CSV as GBK
+        return [list(row) for row in csv.reader(io.StringIO(text, newline=""))]
     import openpyxl  # Worker-only dependency
 
     workbook = openpyxl.load_workbook(path, read_only=True, data_only=True)

@@ -83,6 +83,16 @@ def test_load_accounts_matches_header_aliases_and_hides_password(tmp_path):
     assert "p@ss" not in repr(accounts["1800"]) and "qa01" not in repr(accounts["1800"])
 
 
+def test_load_accounts_reads_excel_gbk_csv_and_indexes_by_server_number(tmp_path):
+    path = tmp_path / "accounts.csv"
+    path.write_bytes("服号,完整服务器名,账号,密码,服号,设备\nS11800,1800服 鼎业千秋,qa01,secret,S11800,\n".encode("gbk"))
+
+    accounts = load_accounts(path)
+
+    assert accounts["1800"] is accounts["S11800"]
+    assert accounts["1800"].server_name == "1800服 鼎业千秋"
+
+
 def test_load_accounts_reports_missing_columns(tmp_path):
     path = tmp_path / "accounts.csv"
     path.write_text("服号,账号\n1800,qa01\n", encoding="utf-8")
