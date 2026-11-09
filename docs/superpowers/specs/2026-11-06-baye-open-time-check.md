@@ -52,11 +52,13 @@ MVP 不做 OCR、不做自动判定，卡片附人工核对提示。期望规则
   "enabled": true,
   "base_url": "http://<执行机IP>:8899",
   "default_serial": "<设备 serial>",
-  "accounts_path": "config/baye_accounts.xlsx"
+  "accounts_path": "/var/lib/feishu-baye/baye_accounts.csv"
 }
 ```
 
-依赖：`openpyxl`（读 xlsx；用 csv 可不装）。
+依赖：`openpyxl`（读 xlsx；用 csv 可不装）。CSV 可以是 UTF-8 或 Excel 默认的 GBK；服号列可写 `S11800`，按「完整服务器名」开头的数字（`1800服 …`）也能查到。
+
+**账号表更新（Jenkins）**：Worker 机 Jenkins 任务 `feishu_baye_accounts_upload`，「Build with Parameters」上传 CSV → `deployment/worker/install_baye_accounts.py`（系统 python3，只用标准库）校验列与必填项 → 原子写入 `/var/lib/feishu-baye/baye_accounts.csv`（jenkins 所有，600）。校验失败不覆盖旧表；构建日志只打印服号；构建目录里 Jenkins 自带的上传副本会被删除。Worker 每次检查都重新读表，更新无需重启。
 
 ## 6. 后续
 
