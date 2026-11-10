@@ -281,7 +281,7 @@
 - **用途**：在一个明确指定的来源服节点上生成合服配置，覆盖该节点的合服工具配置，并启动合服工具。
 - **匹配的自然语言**：`将 5000 服合到 5001 服，赛季 4、剧本 9`、`5000 合服到 5001，赛季 4 剧本 9`；两个起始服：`5010（赛季 4 剧本 9）和 5011（赛季 5 剧本 10）合到 5012`。
 - **精确脚本路径**：`/home/serverGeneralScript/exc_server_merge.sh`
-- **精确参数数组模板**：单起始服 `["<source_server_id>", "<target_server_id>", "<season>", "<scenario>"]`；同一战区的两个起始服 `["<source_server_id>", "<target_server_id>", "<season>", "<scenario>", "--also", "<second_source_server_id>", "<second_season>", "<second_scenario>"]`（第一个起始服决定执行节点与战区 `<第一个起始服>01`，第二个起始服必须与它同属一个战区；两个起始服的赛季、剧本可以不同，也可以相同，都要原样写出）。
+- **精确参数数组模板**：单起始服 `["<source_server_id>", "<target_server_id>", "<season>", "<scenario>"]`；同一战区的两个起始服 `["<source_server_id>", "<target_server_id>", "<season>", "<scenario>", "--also", "<second_source_server_id>", "<second_season>", "<second_scenario>"]`（第一个起始服 = 用户先说的那个，它决定执行节点与战区 `<第一个起始服>01`；两个起始服的赛季、剧本可以不同，也可以相同，都要原样写出）。**不要自行判断两个起始服是否属于同一战区**——你没有战区数据，战区归属由合服工具第 1 步按 ServerInfo 子服列表校验，不一致会以失败返回；不要因此拒绝或要求澄清。
 - **参数顺序**：
   1. `<source_server_id>`：来源服，也是脚本定位执行节点和生成配置中的来源服；
   2. `<target_server_id>`：合服目标服；
