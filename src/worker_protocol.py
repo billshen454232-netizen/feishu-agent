@@ -21,8 +21,28 @@ _MAX_RESULT_LOG_CHARS = 100_000
 _MAX_ERROR_CHARS = 4_000
 
 
+def _clip_log(log: str) -> str:
+    """Keep the tail (AI_OP_END and the errors live there) so an oversized log cannot void the result."""
+    if len(log) <= _MAX_RESULT_LOG_CHARS:
+        return log
+    marker = "[日志过长，已截断，仅保留末尾部分]\n"
+    return marker + log[-(_MAX_RESULT_LOG_CHARS - len(marker)):]
+
+
+def _clip_reason(reason: str) -> str:
+    if len(reason) <= _MAX_ERROR_CHARS:
+        return reason
+    marker = "…（原因过长，已截断）"
+    return reason[:_MAX_ERROR_CHARS - len(marker)] + marker
+
+
 def serialize_execution_result(result: MuliuExecutionResult) -> dict[str, object]:
-    """Convert an execution outcome into the worker's fixed JSON response shape."""
+    """Convert an execution outcome into the worker's fixed JSON response shape.
+
+    Free-text fields are clipped to the limits :func:`parse_execution_result` enforces: an
+    over-long Muliu log or error must not make the Gateway reject the whole result (HTTP 422),
+    which would turn a finished operation into 「结果未知」.
+    """
     payload: dict[str, object] = {
         "summary": result.summary,
         "step_results": [
@@ -32,13 +52,13 @@ def serialize_execution_result(result: MuliuExecutionResult) -> dict[str, object
                 "path": step.path,
                 "args": step.args,
                 "succeeded": step.succeeded,
-                "log": step.log,
+                "log": _clip_log(step.log),
             }
             for step in result.step_results
         ],
         "failed_step_number": result.failed_step_number,
-        "failure_reason": result.failure_reason,
-        "result_unknown_reason": result.result_unknown_reason,
+        "failure_reason": _clip_reason(result.failure_reason),
+        "result_unknown_reason": _clip_reason(result.result_unknown_reason),
     }
     # Sent only when set, so results without it stay readable by older gateways.
     if result.resumable_from_step is not None:

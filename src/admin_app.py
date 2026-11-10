@@ -981,7 +981,7 @@ async function load({ force = false } = {}) {
     $("#stamp").textContent = `数据更新于 ${entry.at}`;
   } catch (err) {
     $("#content").innerHTML = `<div class="state-box error"><p>加载失败：${esc(err.message)}</p>
-      <p class="hint">检查 SSH 隧道是否仍然连接，然后重试。</p><p><button class="btn" id="retry">重试</button></p></div>`;
+      <p class="hint">登录可能已过期：请刷新整个页面（Ctrl+F5）重新登录后再试。</p><p><button class="btn" id="retry">重试</button></p></div>`;
     $("#retry").onclick = () => load({ force: true });
     $("#pager").hidden = true;
   } finally {

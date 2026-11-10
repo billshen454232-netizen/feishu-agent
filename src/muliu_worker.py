@@ -132,7 +132,13 @@ class GatewayWorkerClient:
     @staticmethod
     def _response_json(response: httpx.Response) -> dict[str, Any]:
         if not 200 <= response.status_code < 300:
-            raise GatewayWorkerClientError("gateway 返回 HTTP {}".format(response.status_code))
+            try:
+                detail = str(response.json().get("detail") or "")[:300]
+            except (ValueError, AttributeError):
+                detail = ""
+            raise GatewayWorkerClientError(
+                "gateway 返回 HTTP {}{}".format(response.status_code, "：" + detail if detail else "")
+            )
         try:
             value = response.json()
         except ValueError as exc:

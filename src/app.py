@@ -367,6 +367,7 @@ def _add_gateway_worker_routes(
             plan = parse_plan(leased_job.plan_json, max_steps=config.muliu.max_steps)
             validate_execution_result_matches_plan(result, plan)
         except (MuliuPlanError, WorkerProtocolError) as exc:
+            logger.warning("worker result rejected message_id=%s worker_id=%s reason=%s", message_id, worker_id, exc)
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         if result.succeeded:
             status = "done"

@@ -23,9 +23,10 @@ from src.muliu_executor import MuliuExecutionResult, MuliuStepResult
 from src.muliu_plan import MuliuPlan, MuliuPlanKind, MuliuStep
 from src.muliu_routing import MuliuPlanRouteResolver
 from src.muliu_script_catalog import MuliuCallContract, MuliuCallContracts
-from src.muliu_worker import ClaimedWorkerJob, GatewayWorkerClient, MuliuWorker
+from src.muliu_worker import ClaimedWorkerJob, GatewayWorkerClient, GatewayWorkerClientError, MuliuWorker
 from src.worker_protocol import (
     WorkerProtocolError,
+    parse_execution_result,
     serialize_execution_result,
     validate_execution_result_matches_plan,
 )
@@ -532,6 +533,32 @@ def test_serialized_result_round_trip_is_bounded_to_protocol_shape():
 
     assert payload["summary"] == plan.summary
     assert payload["step_results"][0]["args"] == ["6001"]
+
+
+def test_oversized_log_and_reason_are_clipped_so_the_gateway_still_accepts_the_result():
+    plan = make_plan()
+    step = plan.steps[0]
+    huge_log = "x" * 150_000 + "\nAI_OP_END status=success\nEND"
+    result = MuliuExecutionResult(
+        summary=plan.summary,
+        step_results=[MuliuStepResult(1, step.description, step.path, step.args, True, log=huge_log)],
+    )
+    unknown = MuliuExecutionResult(summary=plan.summary, step_results=[], result_unknown_reason="超时" * 5_000)
+
+    for outcome in (result, unknown):
+        parsed = parse_execution_result(serialize_execution_result(outcome), max_steps=10)
+        validate_execution_result_matches_plan(parsed, plan)
+
+    clipped = serialize_execution_result(result)["step_results"][0]["log"]
+    assert clipped.startswith("[日志过长") and clipped.endswith("AI_OP_END status=success\nEND")
+    assert len(clipped) == 100_000
+    assert len(serialize_execution_result(unknown)["result_unknown_reason"]) == 4_000
+
+
+def test_gateway_rejection_reason_is_kept_in_the_worker_error():
+    response = httpx.Response(422, json={"detail": "step_results[1].log 必须是长度不超过 100000 的字符串"})
+    with pytest.raises(GatewayWorkerClientError, match="422：step_results"):
+        GatewayWorkerClient._response_json(response)
 
 
 def _claimed(plan):
