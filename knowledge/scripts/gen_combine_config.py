@@ -34,10 +34,12 @@ def get_db_host(server_name, db_name=""):
         例如: {'host1': '3ns56e409f0c49441', 'host2': '3ns56e409f0c49442'}
     """
     get_db_host_script=os.path.join(os.path.dirname(os.path.dirname(__file__)),"script_helper","get_db_host.py")
+    # 不用 capture_output / text（3.7+）：港服 GS-1 经木流执行时 python3 是 pyenv 3.6.7
     result = subprocess.run(
         ["bash", get_db_host_script, str(server_name), str(db_name)],
-        capture_output=True,
-        text=True
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        universal_newlines=True
     )
     lines = result.stdout.strip().split('\n')
     if len(lines) >= 2:

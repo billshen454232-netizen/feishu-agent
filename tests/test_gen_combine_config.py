@@ -1,4 +1,5 @@
 import importlib.util
+import shutil
 import re
 import sys
 from pathlib import Path
@@ -79,3 +80,14 @@ def test_repository_catalog_accepts_a_two_source_merge_and_routes_by_both_source
     )])
     MuliuFirewall(MuliuConfig(script_root="/home/serverGeneralScript"), call_contracts=contracts).validate(plan)
     assert set(contracts.extract_server_ids(plan)) == {"5010", "5012", "5011"}
+
+
+@pytest.mark.skipif(shutil.which("bash") is None or sys.platform == "win32", reason="needs bash with POSIX paths")
+def test_get_db_host_runs_the_helper_without_37_only_arguments(monkeypatch, tmp_path):
+    # GS-1 (HK) runs this with pyenv Python 3.6 under Muliu: no capture_output / text
+    monkeypatch.undo()  # use the real get_db_host, not the autouse stub
+    helper = tmp_path / "script_helper"
+    helper.mkdir()
+    (helper / "get_db_host.py").write_text("echo host-a-$1$2\necho host-b-$1$2\n", encoding="utf-8")
+    monkeypatch.setattr(gen, "__file__", str(tmp_path / "pys_col" / "gen_combine_config.py"))
+    assert gen.get_db_host("5011", "zone") == {"host1": "host-a-5011zone", "host2": "host-b-5011zone"}
