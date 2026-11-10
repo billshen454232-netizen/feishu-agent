@@ -62,6 +62,7 @@ ENVGAME is not exist
 init service failed
 FAILED
 Traceback
+没有对应的serverInfo
 PATTERNS
 )
 
@@ -104,17 +105,13 @@ if [[ -f nohup.log ]]; then
     fi
     progress=$(grep -E '剩余未修改完成角色数量' <<<"$segment" | tail -n 1)
     [[ -n "$progress" ]] && echo "最新进度：${progress}"
-    blocking=$(grep -E '失败|错误|ERROR' <<<"$segment" | grep -v '不阻塞' | tail -n 20)
+    blocking=$(grep -E '失败|错误|ERROR|没有对应' <<<"$segment" | grep -v '不阻塞' | tail -n 20)
     if [[ -n "$blocking" ]]; then
         echo "本次合服的失败记录（不含「不阻塞流程」的，最多 20 行）："
         printf '%s\n' "$blocking"
     fi
 fi
 
-if [[ -n "$latest" ]]; then
-    echo "---- 主控日志最后 30 行（已过滤心跳）----"
-    grep -v -E 'RpcHeartBeat|STATICTIMER|RPCUpdateDBQueueSize|DispatchTransMessage|RPCTransferMessage' "$latest" | tail -n 30
-fi
 trace=$(ls -t combine_trace_server_*.log 2>/dev/null | head -n 1)
 if [[ -n "$trace" && -s "$trace" ]]; then
     echo "---- trace 日志中的报错行（最多 20 行）----"
@@ -123,6 +120,11 @@ fi
 if [[ -f nohup.log ]]; then
     echo "---- nohup.log 最后 15 行（合服流程输出）----"
     tail -n 15 nohup.log
+fi
+# 主控日志行很长（会带整张 serverList），放最后并截断每行，避免把上面的关键信息挤出机器人保留的日志长度
+if [[ -n "$latest" ]]; then
+    echo "---- 主控日志最后 20 行（已过滤心跳，每行最多 300 字符）----"
+    grep -v -E 'RpcHeartBeat|STATICTIMER|RPCUpdateDBQueueSize|DispatchTransMessage|RPCTransferMessage' "$latest" | tail -n 20 | cut -c1-300
 fi
 echo "COMBINE_STATE=${state}"
 REMOTE

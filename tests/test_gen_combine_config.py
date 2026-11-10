@@ -36,7 +36,9 @@ def test_two_sources_with_different_scenarios_go_per_process():
     assert "scenario = 9, season = 4" in _game_block(lua, 1)
     assert "scenario = 10, season = 5" in _game_block(lua, 2)
     assert "season_scenario_info" not in _game_block(lua, 3)
-    assert "season_scenario_info = {  scenario = 9, season = 4,}, -- 合服来源" not in lua
+    # common must stay (game_3 falls back to it); commented out, the tool waits forever at step 3
+    # with 「1_1_HMT没有对应的serverInfo」
+    assert "\n    season_scenario_info = {  scenario = 9, season = 4,}, -- 合服来源" in lua
     assert "[5011] = {" in lua and "authdb = 'nslg_game_5011'" in lua
     assert 'connectDbList = {"nslg_common", "nslg_game_common", "nslg_combine", 5010, 501001, 5011, 5012}' in lua
 
@@ -91,3 +93,25 @@ def test_get_db_host_runs_the_helper_without_37_only_arguments(monkeypatch, tmp_
     (helper / "get_db_host.py").write_text("echo host-a-$1$2\necho host-b-$1$2\n", encoding="utf-8")
     monkeypatch.setattr(gen, "__file__", str(tmp_path / "pys_col" / "gen_combine_config.py"))
     assert gen.get_db_host("5011", "zone") == {"host1": "host-a-5011zone", "host2": "host-b-5011zone"}
+
+
+_CN_SPEC = importlib.util.spec_from_file_location(
+    "gen_combine_config_cn", Path(__file__).resolve().parents[1] / "knowledge/scripts/gen_combine_config.cn.py"
+)
+gen_cn = importlib.util.module_from_spec(_CN_SPEC)
+_CN_SPEC.loader.exec_module(gen_cn)
+
+
+def test_cn_version_reads_hosts_from_config_host_ini_for_every_source(monkeypatch):
+    # CN GS-1 has no get_db_host.py: hosts are <server>_game_host / _game_host2 in config_host.ini
+    monkeypatch.setattr(gen_cn, "read_config_value", lambda path, key: "10.0.0.1" if key.endswith("_game") else "h-" + key)
+    lua = gen_cn.generate_lua_config("2110", ["2212"], "1", "3001", extra_sources=[("2111", "2", "3002")])
+    assert "src_server_id = {2110, 2111}," in lua and "src_zone_id = 211001," in lua
+    assert "\n    season_scenario_info = {  scenario = 3001, season = 1,}, -- 合服来源" in lua
+    assert "scenario = 3002, season = 2" in _game_block(lua, 2)
+    assert 'host = "dds-h-2111_game_host.mongodb.rds.aliyuncs.com"' in lua
+    assert 'connectDbList = {"nslg_common", "nslg_game_common", "nslg_combine", 2110, 211001, 2111, 2212}' in lua
+
+
+def test_cn_and_hk_versions_share_the_combine_logic():
+    assert gen_cn.season_scenario_lines([("1", "3001"), ("2", "3002")]) == gen.season_scenario_lines([("1", "3001"), ("2", "3002")])

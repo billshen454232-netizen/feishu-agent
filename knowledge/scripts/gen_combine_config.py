@@ -74,8 +74,10 @@ COMBINE_TOOL_PROCESSES = 3  # game_1 / game_2 / game_3
 
 
 def season_scenario_lines(season_scenarios):
-    """赛季剧本写在哪里：全部起始服相同 → 只写 common（与原单起始服配置一致）；
-    不同 → 按出现顺序写到 game_1、game_2…（服务端确认：各起始服的赛季剧本被覆盖即可，顺序无要求），common 注释掉。
+    """赛季剧本写在哪里：common 始终写第一个起始服的（与原单起始服配置一致，**不能注释**）；
+    起始服赛季剧本不同时，再按出现顺序写到 game_1、game_2…（服务端确认：各起始服的赛季剧本被覆盖即可，顺序无要求）。
+    没单独写的进程沿用 common；common 被注释时这些进程会用默认 赛季1_剧本1 找服，卡在流程【3/23】
+    （「slave对应的特征字符串(赛季_剧本_地区)1_1_HMT没有对应的serverInfo」）。
 
     Returns: (common 行, {进程序号: 行})
     """
@@ -85,14 +87,15 @@ def season_scenario_lines(season_scenarios):
             distinct.append(pair)
     if len(distinct) > COMBINE_TOOL_PROCESSES:
         raise ValueError(f"起始服共有 {len(distinct)} 种赛季剧本，超过合服工具进程数 {COMBINE_TOOL_PROCESSES}")
+    season, scenario = distinct[0]
+    common = f"    season_scenario_info = {{  scenario = {scenario}, season = {season},}}, -- 合服来源的赛季、剧本信息"
     if len(distinct) == 1:
-        season, scenario = distinct[0]
-        return (f"    season_scenario_info = {{  scenario = {scenario}, season = {season},}}, -- 合服来源的赛季、剧本信息", {})
+        return common, {}
     per_process = {
         order: f"    season_scenario_info = {{  scenario = {scenario}, season = {season},}}"
         for order, (season, scenario) in enumerate(distinct, 1)
     }
-    return ("    -- season_scenario_info 按起始服的赛季剧本分别写在 game_1… 中", per_process)
+    return common, per_process
 
 
 def generate_lua_config(new_server, end_servers, season_num, scenario_num, extra_sources=()):
