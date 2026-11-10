@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>组内项目知识库</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <link rel="stylesheet" href="_assets/vue.css">
+  <style>
+    .markdown-section { max-width: 1400px; }
+    .markdown-section table { display: table; width: 100%; font-size: 13px; }
+    .markdown-section td, .markdown-section th { vertical-align: top; }
+  </style>
+</head>
+<body>
+  <div id="app">加载中…</div>
+  <script>
+    window.$docsify = {
+      name: '组内项目知识库',
+      loadSidebar: true,
+      subMaxLevel: 0,
+      auto2top: true,
+      search: { paths: 'auto', depth: 3, placeholder: '搜索功能、模块、用例', noData: '没有找到', maxAge: 600000 }
+    };
+  </script>
+  <!-- docsify 4.13.1 (MIT), vendored under _assets: works without internet access from the browser -->
+  <script src="_assets/docsify.min.js"></script>
+  <script src="_assets/search.min.js"></script>
+</body>
+</html>
