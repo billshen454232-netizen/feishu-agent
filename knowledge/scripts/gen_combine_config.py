@@ -68,9 +68,48 @@ def get_game_area(server_id):
     raise ValueError(f"未配置服务器 {server_id} 对应的游戏地区")
 
 
-def generate_lua_config(new_server, end_servers, season_num, scenario_num):
-    """动态生成Lua配置内容"""
+COMBINE_TOOL_PROCESSES = 3  # game_1 / game_2 / game_3
+
+
+def season_scenario_lines(season_scenarios):
+    """赛季剧本写在哪里：全部起始服相同 → 只写 common（与原单起始服配置一致）；
+    不同 → 按出现顺序写到 game_1、game_2…（服务端确认：各起始服的赛季剧本被覆盖即可，顺序无要求），common 注释掉。
+
+    Returns: (common 行, {进程序号: 行})
+    """
+    distinct = []
+    for pair in season_scenarios:
+        if pair not in distinct:
+            distinct.append(pair)
+    if len(distinct) > COMBINE_TOOL_PROCESSES:
+        raise ValueError(f"起始服共有 {len(distinct)} 种赛季剧本，超过合服工具进程数 {COMBINE_TOOL_PROCESSES}")
+    if len(distinct) == 1:
+        season, scenario = distinct[0]
+        return (f"    season_scenario_info = {{  scenario = {scenario}, season = {season},}}, -- 合服来源的赛季、剧本信息", {})
+    per_process = {
+        order: f"    season_scenario_info = {{  scenario = {scenario}, season = {season},}}"
+        for order, (season, scenario) in enumerate(distinct, 1)
+    }
+    return ("    -- season_scenario_info 按起始服的赛季剧本分别写在 game_1… 中", per_process)
+
+
+def generate_lua_config(new_server, end_servers, season_num, scenario_num, extra_sources=()):
+    """动态生成Lua配置内容
+
+    extra_sources: 同战区的其他起始服 [(服号, 赛季, 剧本)]；战区仍按第一个起始服（new_server + 01）。
+    """
     game_area = get_game_area(new_server)
+    extra_source_ids = [str(server) for server, _, _ in extra_sources]
+    all_sources = [str(new_server)] + extra_source_ids
+    if len(set(all_sources)) != len(all_sources) or set(all_sources) & {str(s) for s in end_servers}:
+        raise ValueError("起始服不能重复，也不能同时是目标服")
+    common_season_line, process_season_lines = season_scenario_lines(
+        [(str(season_num), str(scenario_num))] + [(str(season), str(scenario)) for _, season, scenario in extra_sources]
+    )
+
+    def process_season(order):
+        line = process_season_lines.get(order)
+        return f"\n{line}" if line else ""
 
     # 读取新服务器的配置
     start_hosts_game = get_db_host(new_server)
@@ -84,13 +123,14 @@ def generate_lua_config(new_server, end_servers, season_num, scenario_num):
     local_addr=read_config_value(config_ini_path, f"{new_server}_game")
 
     # 读取所有目标服务器的配置（存储为字典，key=服务器名，value=host1和host2）
+    # 其他起始服与目标服一样只需要自己的 game 库（战区库只有一个：第一个起始服 + 01）
     end_servers_config = {}
-    for end_server in end_servers:
+    for end_server in extra_source_ids + list(end_servers):
         end_servers_config[end_server] = get_db_host(end_server)
 
     # 生成MongoDB中目标服务器的配置块（动态追加所有目标服务器）
     mongo_end_servers = ""
-    for i, end_server in enumerate(end_servers, 1):
+    for i, end_server in enumerate(extra_source_ids + list(end_servers), 1):
         cfg = end_servers_config[end_server]
         # 第一个目标服务器用end_server_host_one，第二个及以后用end_serverX_host_one
         mongo_end_servers += f'''
@@ -114,7 +154,7 @@ def generate_lua_config(new_server, end_servers, season_num, scenario_num):
     }},'''
 
     # 生成dbmanager的connectDbList（包含所有目标服务器）
-    connect_db_list = ["nslg_common", "nslg_game_common", "nslg_combine", new_server, start_server_zone] + end_servers
+    connect_db_list = ["nslg_common", "nslg_game_common", "nslg_combine", new_server, start_server_zone] + extra_source_ids + list(end_servers)
     # connect_db_str = ", ".join([f'"{db}"' for db in connect_db_list])
     # 遍历列表，根据元素类型决定是否添加引号
     formatted_items = []
@@ -135,7 +175,7 @@ NSLG_GROUP = "combine"
 config['common'] = {{
     log_level = "DEBUG", -- INFO, DEBUG
     -- common_ip = ""
-    src_server_id = {{{new_server}}}, --这个战区所包含的服务器
+    src_server_id = {{{", ".join(all_sources)}}}, --这个战区所包含的服务器
     des_server_id = {{{", ".join(end_servers)}}}, --这个战区匹配到下赛季的目标服
     all_des_server_id = {{{", ".join(end_servers)}}}, -- 同批次下赛季的所有目标服
     src_zone_id = {start_server_zone},   -- 从哪个战区合，src_server_id需要和ServerInfo中的sub_server_list一致
@@ -146,7 +186,7 @@ config['common'] = {{
     -- force_target_server_id = 11023, -- 强制合到某目标服
     -- combine_is_revert_account = false, -- 是否是回滚Account表
     -- revert_db_col = "Account20240720_1520", -- 回滚Account表的来源数据库
-    season_scenario_info = {{  scenario = {scenario_num}, season = {season_num},}}, -- 合服来源的赛季、剧本信息
+{common_season_line}
 }}
 
 config['gamemanager'] = {{
@@ -164,7 +204,7 @@ config['game_1'] = {{
     logic_service_num = 2,
     need_load_tool = true,
     need_load_map = true,
-    dbmanager = "dbmanager_1",
+    dbmanager = "dbmanager_1",{process_season(1)}
 }}
 
 config['game_2'] = {{
@@ -175,7 +215,7 @@ config['game_2'] = {{
     logic_service_num = 5,
     need_load_tool = true,
     need_load_map = true,
-    dbmanager = "dbmanager_1",
+    dbmanager = "dbmanager_1",{process_season(2)}
 }}
 
 config['game_3'] = {{
@@ -186,7 +226,7 @@ config['game_3'] = {{
     logic_service_num = 5,
     need_load_tool = true,
     need_load_map = true,
-    dbmanager = "dbmanager_1",
+    dbmanager = "dbmanager_1",{process_season(3)}
 }}
 
 config['mongo'] = {{
@@ -311,15 +351,22 @@ def main():
     parser.add_argument('end_servers', nargs='+', help='一个或多个目标服务器名称（支持无限追加）')
     parser.add_argument('season_num', help='赛季编号')
     parser.add_argument('scenario_num', help='场景编号')
+    parser.add_argument('--also', nargs=3, action='append', default=[], metavar=('服号', '赛季', '剧本'),
+                        help='同战区的其他起始服，可重复，如 --also 5011 5 10')
     args = parser.parse_args()
 
     # 生成Lua配置内容
-    lua_content = generate_lua_config(
-        new_server=args.new_server,
-        end_servers=args.end_servers,
-        season_num=args.season_num,
-        scenario_num=args.scenario_num
-    )
+    try:
+        lua_content = generate_lua_config(
+            new_server=args.new_server,
+            end_servers=args.end_servers,
+            season_num=args.season_num,
+            scenario_num=args.scenario_num,
+            extra_sources=[tuple(item) for item in args.also],
+        )
+    except ValueError as exc:
+        print(f"错误：{exc}")
+        sys.exit(1)
 
     # 写入文件
     output_file = os.path.join(os.path.dirname(__file__),"combine_config","combine_demo_new.lua")
