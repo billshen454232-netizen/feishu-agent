@@ -58,7 +58,12 @@ while true; do
         exit 1
     fi
     if (( waited >= MERGE_WAIT_SECONDS )); then
-        echo "合服超过 ${MERGE_WAIT_SECONDS} 秒仍未结束，按异常处理（测试服正常 20–30 秒），日志如下："
+        if grep -q '本次合服的失败记录' <<<"$status_output"; then
+            # 合服工具遇到失败通常不退出、也不打失败关键字，而是停在当前流程一直等待
+            echo "合服卡住：合服工具报告了失败，${MERGE_WAIT_SECONDS} 秒内没有继续（多为数据问题，需人工处理，见下方「失败记录」），日志如下："
+        else
+            echo "合服超过 ${MERGE_WAIT_SECONDS} 秒仍未结束，按异常处理（测试服正常 20–30 秒），日志如下："
+        fi
         echo "$status_output"
         exit 3
     fi

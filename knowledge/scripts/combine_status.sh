@@ -89,9 +89,31 @@ else
     state=running; echo "未命中完成或失败关键字（合服进行中，或已中断）"
 fi
 
+# 摘要放最前：卡在哪一步、本次合服的失败记录（工具遇到失败常常不退出，只会一直等，日志末尾全是心跳）
+if [[ -f nohup.log ]]; then
+    seg_start=$(grep -n '开始流程【1/' nohup.log | tail -n 1 | cut -d: -f1)
+    segment=$(tail -n +"${seg_start:-1}" nohup.log)
+    last_begin=$(grep -o '开始流程【[0-9]*/[0-9]*】' <<<"$segment" | tail -n 1)
+    last_end=$(grep -o '结束流程【[0-9]*/[0-9]*】' <<<"$segment" | tail -n 1)
+    echo "---- 合服进度摘要 ----"
+    if [[ -n "$last_begin" && "${last_begin#开始}" != "${last_end#结束}" ]]; then
+        step_title=$(grep -F -A1 -- "$last_begin" <<<"$segment" | tail -n 1 | sed -E 's/^<<[^>]*>>[- ]*//; s/[- ]*$//')
+        echo "当前停在：${last_begin#开始} ${step_title}（该流程尚未结束）"
+    elif [[ -n "$last_end" ]]; then
+        echo "最后完成：${last_end}"
+    fi
+    progress=$(grep -E '剩余未修改完成角色数量' <<<"$segment" | tail -n 1)
+    [[ -n "$progress" ]] && echo "最新进度：${progress}"
+    blocking=$(grep -E '失败|错误|ERROR' <<<"$segment" | grep -v '不阻塞' | tail -n 20)
+    if [[ -n "$blocking" ]]; then
+        echo "本次合服的失败记录（不含「不阻塞流程」的，最多 20 行）："
+        printf '%s\n' "$blocking"
+    fi
+fi
+
 if [[ -n "$latest" ]]; then
-    echo "---- 主控日志最后 40 行 ----"
-    tail -n 40 "$latest"
+    echo "---- 主控日志最后 30 行（已过滤心跳）----"
+    grep -v -E 'RpcHeartBeat|STATICTIMER|RPCUpdateDBQueueSize|DispatchTransMessage|RPCTransferMessage' "$latest" | tail -n 30
 fi
 trace=$(ls -t combine_trace_server_*.log 2>/dev/null | head -n 1)
 if [[ -n "$trace" && -s "$trace" ]]; then
