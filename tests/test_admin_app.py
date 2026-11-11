@@ -377,3 +377,8 @@ def test_team_kb_record_archives_into_its_own_domain(tmp_path):
         "canonical_question": "浮桥由谁测试", "answer": "唐黎艳", "category": "知识库", "keywords": "浮桥", "scripts": "浮桥 用例集"}).json()
     entry = qa_store.get_archive(archived["archive_id"])
     assert entry["domain"] == "team_kb" and entry["catalog_digest"] == "" and qa_store.active_archive() == []
+
+
+def test_index_page_is_not_cached_by_the_browser(tmp_path):
+    response = _client_with(create_admin_app(_store(tmp_path))).get("/")
+    assert response.status_code == 200 and response.headers["cache-control"] == "no-cache"

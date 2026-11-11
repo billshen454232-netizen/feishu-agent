@@ -103,8 +103,9 @@ def create_admin_app(
         return await call_next(request)
 
     @app.get("/", response_class=HTMLResponse)
-    async def index() -> str:
-        return _INDEX_HTML
+    async def index() -> HTMLResponse:
+        # no-cache: after a Gateway update the browser must not keep the old page script (2026-11-11 stale-tab issue).
+        return HTMLResponse(_INDEX_HTML, headers={"Cache-Control": "no-cache"})
 
     @app.get("/plan", response_class=HTMLResponse)
     async def plan_board() -> HTMLResponse:
