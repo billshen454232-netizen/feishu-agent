@@ -28,6 +28,8 @@ from .qa_library import (
     ARCHIVE_ACTIVE,
     ARCHIVE_STATUSES,
     CATEGORIES,
+    DOMAIN_SCRIPT,
+    DOMAIN_TEAM_KB,
     FIX_ACCEPTED,
     FIX_IGNORED,
     FIX_PENDING,
@@ -460,6 +462,7 @@ def _add_qa_routes(app: FastAPI, qa: QaService) -> None:
             raise HTTPException(status_code=400, detail="标准问法与答案不能为空")
         if category not in CATEGORIES:
             raise HTTPException(status_code=400, detail="unknown category")
+        team_kb = record.get("domain") == DOMAIN_TEAM_KB
         archive_id = qa_store.add_archive(
             source_message_id=message_id,
             canonical_question=question,
@@ -467,8 +470,9 @@ def _add_qa_routes(app: FastAPI, qa: QaService) -> None:
             category=category,
             keywords=str(payload.get("keywords", ""))[:500],
             scripts=str(payload.get("scripts", ""))[:300],
-            catalog_digest=qa.catalog_digest(),
+            catalog_digest="" if team_kb else qa.catalog_digest(),
             operator=request.state.operator,
+            domain=DOMAIN_TEAM_KB if team_kb else DOMAIN_SCRIPT,
         )
         cited = set(record.get("sources", {}).get("docs", []))
         fixes = 0
@@ -875,7 +879,7 @@ const EMPTY = {
   candidate: ["没有待审核的模板。", "新的失败经 AI 分析后会自动出现在这里。"],
   verified: ["还没有可用模板。", "在「待审核」里通过的模板会出现在这里。"],
   executions: ["还没有执行记录。", "在飞书群里执行一次操作后，这里会出现记录。"],
-  "qa:pending": ["没有待评审的问答。", "组员在群里问脚本、能力相关的问题后，回答会出现在这里。"],
+  "qa:pending": ["没有待评审的问答。", "组员问脚本、能力相关的问题，或问组内知识库（游戏功能、测试用例）后，回答会出现在这里。"],
   "qa:correcting": ["没有纠正中的问答。", "在「待评审」里标记回答错误后会进入这里。"],
   "qa:archive": ["归档库还是空的。", "评审确认或纠正后的问答会归档到这里，之后类似问题会参考它们回答。"],
   "qa:retired": ["没有已下线的归档。", "下线的归档不再参与回答，可以随时恢复。"],
@@ -892,7 +896,7 @@ const EMPTY = {
 const QA_FILTERS = [["pending", "待评审"], ["correcting", "纠正中"], ["archive", "归档库"], ["retired", "已下线"], ["dismissed", "不归档"], ["reused", "直接复用"]];
 const FIX_FILTERS = [["pending", "待处理"], ["accepted", "已采纳"], ["applied", "已回写"], ["ignored", "已忽略"]];
 const KB_FILTERS = [["pending", "待审核"], ["approved", "已通过"], ["rejected", "已拒绝"]];
-const CATEGORIES = ["开服", "关服", "清档", "合服", "热更", "配置", "查询", "通用"];
+const CATEGORIES = ["开服", "关服", "清档", "合服", "热更", "配置", "查询", "通用", "知识库"];
 const TABS = ["candidate", "verified", "executions", "qa", "docfix", "teamkb"];
 const DEFAULT_FILTER = { qa: "pending", docfix: "pending", teamkb: "pending" };
 const filtersFor = (tab) => tab === "qa" ? QA_FILTERS : tab === "docfix" ? FIX_FILTERS : tab === "teamkb" ? KB_FILTERS : null;
@@ -1063,9 +1067,11 @@ const secs = (ms) => ms ? `${(ms / 1000).toFixed(1)} 秒` : "";
 function renderQa(items) {
   if (!items.length) { $("#content").innerHTML = emptyFor(`qa:${state.filter}`); return; }
   $("#content").innerHTML = items.map((r) => {
+    const teamKb = r.domain === "team_kb";
     const sources = [
       ...(r.sources.archives || []).map((id) => `已审核问答 #${id}`),
       ...(r.sources.docs || []).map((path) => path.replace("knowledge/", "")),
+      ...(r.sources.team_kb || []).map((f) => `${f.title}（${f.group} · ${f.owner || "—"}）`),
     ];
     const revisions = (r.revisions || []).map((v) => `
       <div class="rev">
@@ -1090,6 +1096,7 @@ function renderQa(items) {
     <article class="tpl qa" data-mid="${esc(r.message_id)}">
       <div class="tpl-head">
         <span class="script">${esc(r.user_name || r.user_id) || "未知成员"}</span>
+        <span class="tag">${teamKb ? "组内知识库" : "脚本资料"}</span>
         <dl class="facts">
           <div><dt>时间</dt><dd>${fmt(r.created_at)}</dd></div>
           ${r.planning_model ? `<div><dt>需求分析</dt><dd>${esc(r.planning_model)}，${secs(r.planning_ms)}</dd></div>` : ""}
@@ -1103,7 +1110,7 @@ function renderQa(items) {
       ${revisions}
       ${actions ? `<div class="row-actions">${actions}</div>` : ""}
       <div class="panel-box correct-box" hidden>
-        <div class="label">哪里错了？写清楚正确的说法即可，AI 会据此重新回答（新答案只在这里显示，不发回群里）</div>
+        <div class="label">哪里错了？写清楚正确的说法即可，AI 会据此重新回答（新答案只在这里显示，不发回群里；归档后同样的问题直接用归档答案）</div>
         <textarea class="correction" maxlength="2000"></textarea>
         <div class="actions"><button class="btn primary" data-qa="correct">让 AI 重新回答</button><button class="btn" data-qa="close-correct">取消</button></div>
       </div>
@@ -1127,7 +1134,7 @@ function renderArchiveForm(box, d) {
       <label>标准问法</label><input class="a-question" value="${esc(d.canonical_question)}" maxlength="300">
       <label>类别</label><select class="a-category">${CATEGORIES.map((c) => `<option ${c === d.category ? "selected" : ""}>${c}</option>`).join("")}</select>
       <label>关键词与同义词</label><input class="a-keywords" value="${esc(d.keywords)}" placeholder="用逗号分隔">
-      <label>涉及脚本</label><input class="a-scripts" value="${esc(d.scripts)}" placeholder="如 start, control_is_pub.sh">
+      <label>${d.category === "知识库" ? "涉及功能" : "涉及脚本"}</label><input class="a-scripts" value="${esc(d.scripts)}" placeholder="${d.category === "知识库" ? "如 浮桥 用例集" : "如 start, control_is_pub.sh"}">
       <label>答案</label><textarea class="a-answer">${esc(d.answer)}</textarea>
     </div>
     ${fixes ? `<div class="label" style="margin-top:14px">资料修改建议（勾选的会进入「文档修正」等待你采纳）</div>${fixes}` : ""}
@@ -1141,6 +1148,7 @@ function renderArchive(items) {
     <article class="tpl arch" data-aid="${a.archive_id}">
       <div class="tpl-head">
         <span class="script">问答 #${a.archive_id}</span>
+        <span class="tag">${a.domain === "team_kb" ? "组内知识库" : "脚本资料"}</span>
         <span class="tag">${esc(a.category)}</span>
         <dl class="facts">
           <div><dt>被引用</dt><dd>${a.hit_count} 次</dd></div>
@@ -1155,7 +1163,7 @@ function renderArchive(items) {
         <label>标准问法</label><input class="a-question" value="${esc(a.canonical_question)}" maxlength="300">
         <label>类别</label><select class="a-category">${CATEGORIES.map((c) => `<option ${c === a.category ? "selected" : ""}>${c}</option>`).join("")}</select>
         <label>关键词与同义词</label><input class="a-keywords" value="${esc(a.keywords)}">
-        <label>涉及脚本</label><input class="a-scripts" value="${esc(a.scripts)}">
+        <label>${a.domain === "team_kb" ? "涉及功能" : "涉及脚本"}</label><input class="a-scripts" value="${esc(a.scripts)}">
         <label>答案</label><textarea class="a-answer">${esc(a.answer)}</textarea>
       </div>
       <div class="row-actions">

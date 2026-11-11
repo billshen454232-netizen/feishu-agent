@@ -24,6 +24,7 @@ ANSWER_TIMEOUT_SECONDS = 120
 MAX_QUESTION_CHARS = 500
 MAX_ANSWER_CHARS = 3000
 MAX_SOURCES = 5
+MAX_REFERENCES = 3
 
 # 「问题 浮桥谁测的」「问题：…」; a separator is required so 「问题是 5000 服起不来」 still goes to the planner.
 PREFIX = re.compile(r"^\s*问题(?:\s*[:：,，]\s*|\s+|$)")
@@ -56,8 +57,12 @@ def parse_answer(raw: Any) -> dict[str, Any]:
     for item in (raw.get("sources") or [])[:MAX_SOURCES]:
         if isinstance(item, dict):
             sources.append({key: str(item.get(key) or "")[:200] for key in ("title", "group", "owner", "path")})
+    try:
+        elapsed_ms = max(0, int(raw.get("elapsed_ms") or 0))
+    except (TypeError, ValueError):
+        elapsed_ms = 0
     return {"ok": ok, "text": text, "sources": sources, "model": str(raw.get("model") or "")[:100],
-            "error": str(raw.get("error") or raw.get("reason") or "")[:300]}
+            "error": str(raw.get("error") or raw.get("reason") or "")[:300], "elapsed_ms": elapsed_ms}
 
 
 def format_reply(answer: dict[str, Any]) -> str:
@@ -95,15 +100,26 @@ class TeamKbQuestionStore:
                 CREATE INDEX IF NOT EXISTS idx_team_kb_questions_status ON team_kb_questions (status, asked_at);
                 """
             )
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(team_kb_questions)")}
+            if "references_json" not in columns:  # reviewed answers sent along with the question (§5.8)
+                conn.execute("ALTER TABLE team_kb_questions ADD COLUMN references_json TEXT NOT NULL DEFAULT '[]'")
             conn.commit()
 
-    def ask(self, question_id: str, chat_id: str, text: str, now: Optional[int] = None) -> bool:
-        """Queue a question (keyed by the Feishu message id, so a re-processed message is not asked twice)."""
+    def ask(self, question_id: str, chat_id: str, text: str, now: Optional[int] = None, *,
+            references: Optional[list[dict[str, Any]]] = None) -> bool:
+        """Queue a question (keyed by the Feishu message id, so a re-processed message is not asked twice).
+
+        ``references`` are reviewed answers (``{id, question, answer}``) the team-kb answer must prefer.
+        """
         timestamp = int(time.time()) if now is None else now
+        refs = [{"id": int(r["id"]), "question": str(r["question"])[:300], "answer": str(r["answer"])[:2000]}
+                for r in (references or [])[:MAX_REFERENCES]]
         with self._connect() as conn:
             cursor = conn.execute(
-                "INSERT OR IGNORE INTO team_kb_questions (question_id, chat_id, text, status, asked_at) VALUES (?, ?, ?, ?, ?)",
-                (question_id, chat_id, text[:MAX_QUESTION_CHARS], QUESTION_PENDING, timestamp),
+                "INSERT OR IGNORE INTO team_kb_questions (question_id, chat_id, text, status, asked_at, references_json) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (question_id, chat_id, text[:MAX_QUESTION_CHARS], QUESTION_PENDING, timestamp,
+                 json.dumps(refs, ensure_ascii=False)),
             )
             conn.commit()
             return cursor.rowcount > 0
@@ -112,7 +128,8 @@ class TeamKbQuestionStore:
         timestamp = int(time.time()) if now is None else now
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT question_id, text, asked_at FROM team_kb_questions WHERE status = ? ORDER BY asked_at LIMIT ?",
+                "SELECT question_id, text, asked_at, references_json FROM team_kb_questions WHERE status = ? "
+                "ORDER BY asked_at LIMIT ?",
                 (QUESTION_PENDING, limit),
             ).fetchall()
             claimed = []
@@ -122,7 +139,8 @@ class TeamKbQuestionStore:
                     (QUESTION_CLAIMED, timestamp, row["question_id"], QUESTION_PENDING),
                 )
                 if cursor.rowcount:
-                    claimed.append({"id": row["question_id"], "text": row["text"], "asked_at": row["asked_at"]})
+                    claimed.append({"id": row["question_id"], "text": row["text"], "asked_at": row["asked_at"],
+                                    "references": json.loads(row["references_json"] or "[]")})
             conn.commit()
         return claimed
 
@@ -171,6 +189,7 @@ class TeamKbQuestionStore:
             return None
         item = dict(row)
         item["sources"] = json.loads(item.pop("sources_json") or "[]")
+        item["references"] = json.loads(item.pop("references_json", None) or "[]")
         return item
 
     def _connect(self) -> sqlite3.Connection:

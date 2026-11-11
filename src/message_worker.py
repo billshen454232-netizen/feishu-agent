@@ -41,7 +41,7 @@ from .execution_report import (
     is_read_only_result,
     result_scope,
 )
-from .qa_library import QA_PENDING, QA_REUSED, QaService
+from .qa_library import DOMAIN_TEAM_KB, QA_PENDING, QA_REUSED, QaService
 from .server_environments import ServerEnvironments, ServerEnvironmentsError
 from .team_kb_questions import strip_prefix as strip_team_kb_prefix
 from .worker_protocol import parse_execution_result, serialize_execution_result
@@ -1008,15 +1008,43 @@ class MessageJobProcessor:
             await self._reply_and_finish(message_id, reply)
             self._append_conversation_log(job, "team_kb_unavailable", reply, generation=generation)
             return
-        self._team_kb_questions.ask(message_id, job.chat_id, question.strip())
+        question = question.strip()
+        exact, similar = self._qa_service.team_kb_lookup(question)
+        if exact is not None:  # the reviewer's archived answer for exactly this question: no AI, no Worker round trip
+            reply = "📒 组内知识库（已审核答案，问答 #{}）\n\n{}".format(exact["archive_id"], exact["answer"])
+            await self._reply_and_finish(message_id, reply)
+            self._conversations.append(job.chat_id, "user", job.text)
+            self._conversations.append(job.chat_id, "assistant", reply)
+            self._record_team_kb_qa(job.message_id, question, exact["answer"], sources={"archives": [exact["archive_id"]]},
+                                    model="", elapsed_ms=0, status=QA_REUSED)
+            self._append_conversation_log(job, "team_kb", reply, generation=generation)
+            return
+        references = [{"id": item["archive_id"], "question": item["canonical_question"], "answer": item["answer"]}
+                      for item in similar]
+        self._team_kb_questions.ask(message_id, job.chat_id, question, references=references)
         # The Gateway queue's part is done; a restart must not ask again (the answer is delivered by message id).
         self._store.mark_done(message_id)
-        logger.warning("team kb question queued message_id=%s chars=%s", message_id, len(question))
+        logger.warning("team kb question queued message_id=%s chars=%s references=%s",
+                       message_id, len(question), [r["id"] for r in references])
 
-    async def deliver_team_kb_answer(self, question: dict[str, Any], reply: str, *, kind: str = "team_kb") -> None:
-        """Reply under the asker's message with the team-kb answer (or the timeout notice) and log it."""
+    async def deliver_team_kb_answer(
+        self,
+        question: dict[str, Any],
+        reply: str,
+        *,
+        kind: str = "team_kb",
+        answer: dict[str, Any] | None = None,
+    ) -> None:
+        """Reply under the asker's message with the team-kb answer (or the timeout notice), log it and queue it for review."""
         message_id = question["question_id"]
         await self._feishu_client.reply_text(message_id, reply)
+        if answer is not None and answer.get("ok"):
+            asked, answered = int(question.get("asked_at") or 0), int(question.get("answered_at") or 0)
+            self._record_team_kb_qa(
+                message_id, question["text"], answer["text"],
+                sources={"team_kb": answer["sources"], "archives": [r["id"] for r in question.get("references") or []]},
+                model=answer.get("model", ""), elapsed_ms=max(0, answered - asked) * 1000 if asked else 0,
+            )
         job = self._store.get(message_id)
         if job is None:
             return
@@ -1025,6 +1053,18 @@ class MessageJobProcessor:
         self._append_conversation_log(
             job, kind, reply, source_paths=tuple(s.get("path", "") for s in question.get("sources") or []),
         )
+
+    def _record_team_kb_qa(self, message_id: str, question: str, answer: str, *, sources: dict[str, Any], model: str,
+                           elapsed_ms: int, status: str = QA_PENDING) -> None:
+        """Put a team-kb answer on the review page (问答) so a wrong one can be corrected and archived."""
+        store = self._qa_service.store
+        if store is None:
+            return
+        try:
+            store.record(message_id, question, answer, sources=sources, model=model, elapsed_ms=elapsed_ms,
+                         status=status, domain=DOMAIN_TEAM_KB)
+        except Exception:  # noqa: BLE001 - review bookkeeping must never affect the reply
+            logger.warning("team kb qa record not stored message_id=%s", message_id, exc_info=True)
 
     def _record_qa(self, job: Any, answer: Any) -> None:
         store = self._qa_service.store

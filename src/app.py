@@ -521,7 +521,7 @@ def _add_gateway_worker_routes(
         logger.warning("team kb answer received id=%s ok=%s model=%s sources=%s error=%s", question_id, answer["ok"],
                        answer["model"], [s["title"] for s in answer["sources"]], answer["error"])
         try:
-            await job_processor.deliver_team_kb_answer(question, format_reply(answer))
+            await job_processor.deliver_team_kb_answer(question, format_reply(answer), answer=answer)
         except Exception:  # noqa: BLE001 - the answer is stored; only the Feishu reply failed
             logger.exception("team kb answer reply failed id=%s", question_id)
         return {"status": "ok"}

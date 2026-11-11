@@ -200,3 +200,67 @@ async def test_draft_archive_without_correction_sends_no_documents(tmp_path):
 
     assert draft["category"] == "通用" and draft["doc_fixes"] == []
     assert "未提供文档" in ai.prompts[0]
+
+
+# ---------------------------------------------------------------- team knowledge base domain (§5.8 of the team-kb design)
+
+
+def test_old_databases_get_the_domain_column_and_archives_stay_separate(tmp_path):
+    import sqlite3
+
+    db = tmp_path / "db.sqlite3"
+    with sqlite3.connect(db) as conn:  # a database from before the team-kb domain existed
+        conn.execute("CREATE TABLE qa_records (message_id TEXT PRIMARY KEY, question TEXT NOT NULL, answer TEXT NOT NULL, "
+                     "sources_json TEXT NOT NULL DEFAULT '{}', answer_model TEXT NOT NULL DEFAULT '', "
+                     "answer_ms INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL, created_at INTEGER NOT NULL, reviewed_at INTEGER)")
+        conn.execute("INSERT INTO qa_records (message_id, question, answer, status, created_at) VALUES ('om_old', 'q', 'a', 'pending', 1)")
+    store = QaStore(db)
+    store.initialize()
+    assert store.get_record("om_old")["domain"] == "script"
+
+    store.record("om_kb", "浮桥谁测的", "金阳", sources={"team_kb": [{"title": "浮桥"}]}, model="m", elapsed_ms=5, domain="team_kb")
+    assert store.get_record("om_kb")["domain"] == "team_kb"
+    script_id = _seed_archive(store)
+    kb_id = store.add_archive(source_message_id="om_kb", canonical_question="浮桥之前是谁测的", answer="金阳", category="知识库",
+                              keywords="浮桥", scripts="浮桥 用例集", catalog_digest="", operator="me", domain="team_kb")
+    assert [a["archive_id"] for a in store.active_archive()] == [script_id]
+    assert [a["archive_id"] for a in store.active_archive("team_kb")] == [kb_id]
+
+
+@pytest.mark.asyncio
+async def test_script_answers_never_see_team_kb_archives(tmp_path):
+    store = _store(tmp_path)
+    store.add_archive(source_message_id="om_kb", canonical_question="对外开服脚本和普通开服脚本有什么区别？", answer="知识库答案",
+                      category="知识库", keywords="", scripts="", catalog_digest="", operator="me", domain="team_kb")
+    ai = FakeAI()
+    answer = await _service(tmp_path, ai, store=store).answer("对外开服脚本和普通开服脚本有什么区别？")
+    assert answer.reused_archive_id is None and "知识库答案" not in ai.prompts[0]
+
+
+def test_team_kb_lookup_returns_the_identical_question_or_similar_references(tmp_path):
+    store = _store(tmp_path)
+    kb_id = store.add_archive(source_message_id="om_kb", canonical_question="浮桥之前是谁测的", answer="金阳测的", category="知识库",
+                              keywords="浮桥, 测试人, 谁测", scripts="", catalog_digest="", operator="me", domain="team_kb")
+    _seed_archive(store)
+    service = _service(tmp_path, FakeAI(), store=store)
+    exact, similar = service.team_kb_lookup("浮桥之前是谁测的？")
+    assert exact["archive_id"] == kb_id and similar == []
+    exact, similar = service.team_kb_lookup("浮桥是谁测的")
+    assert exact is None and [item["archive_id"] for item in similar] == [kb_id]
+    assert service.team_kb_lookup("对外开服脚本和普通开服脚本有什么区别？") == (None, [])  # script archive is not used
+    assert store.get_archive(kb_id)["hit_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_team_kb_correction_and_archive_draft_use_their_own_prompts(tmp_path):
+    ai = FakeAI(["修正后：浮桥是唐黎艳测的", '{"canonical_question": "浮桥由谁测试", "keywords": ["浮桥", "测试人"]}'])
+    record = {"question": "浮桥谁测的", "answer": "金阳", "domain": "team_kb", "revisions": [],
+              "sources": {"team_kb": [{"title": "浮桥 用例集", "group": "赛季组", "owner": "金阳"}]}}
+    service = _service(tmp_path, ai)
+    result = await service.reanswer(record, ["是唐黎艳测的"])
+    assert result.text == "修正后：浮桥是唐黎艳测的"
+    assert "组内知识库助手" in ai.prompts[0] and "1. 是唐黎艳测的" in ai.prompts[0] and "浮桥 用例集（赛季组 · 金阳）" in ai.prompts[0]
+    assert "注册表摘要" not in ai.prompts[0]
+    draft = await service.draft_archive(record, result.text, corrected=True)
+    assert draft == {"canonical_question": "浮桥由谁测试", "answer": result.text, "category": "知识库",
+                     "keywords": "浮桥, 测试人", "scripts": "浮桥 用例集", "doc_fixes": []}

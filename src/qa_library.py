@@ -5,6 +5,10 @@ Design: docs/superpowers/specs/2026-11-04-qa-review-archive.md
 Source priority when answering: execution catalog > archived Q&A > knowledge/docs MD.
 Archived answers only *explain* registered capabilities; nothing here plans or
 executes operations.
+
+Two domains share the review page but never each other's archive: ``script`` (planner ``knowledge``, answered here)
+and ``team_kb`` (game features / test cases, answered by the intranet team-kb service; design
+docs/superpowers/specs/2026-11-10-team-knowledge-base.md §5.8).
 """
 
 from __future__ import annotations
@@ -42,7 +46,12 @@ FIX_IGNORED = "ignored"
 FIX_APPLIED = "applied"
 FIX_STATUSES = (FIX_PENDING, FIX_ACCEPTED, FIX_IGNORED, FIX_APPLIED)
 
-CATEGORIES = ("开服", "关服", "清档", "合服", "热更", "配置", "查询", "通用")
+DOMAIN_SCRIPT = "script"
+DOMAIN_TEAM_KB = "team_kb"
+DOMAINS = (DOMAIN_SCRIPT, DOMAIN_TEAM_KB)
+
+CATEGORIES = ("开服", "关服", "清档", "合服", "热更", "配置", "查询", "通用", "知识库")
+TEAM_KB_CATEGORY = "知识库"
 # Words that suggest a category in a question (bonus only, never a filter).
 CATEGORY_HINTS = {
     "开服": ("开服", "启服", "起服", "对外", "外部体验", "启动"),
@@ -125,6 +134,9 @@ class QaStore:
                 );
                 """
             )
+            for table in ("qa_records", "qa_archive"):
+                if not self._has_columns(conn, table, ("domain",)):
+                    conn.execute("ALTER TABLE {} ADD COLUMN domain TEXT NOT NULL DEFAULT '{}'".format(table, DOMAIN_SCRIPT))
             conn.commit()
 
     # records ----------------------------------------------------------------
@@ -139,14 +151,15 @@ class QaStore:
         model: str,
         elapsed_ms: int,
         status: str = QA_PENDING,
+        domain: str = DOMAIN_SCRIPT,
         now: int | None = None,
     ) -> None:
         with self._connect() as conn:
             conn.execute(
                 """
                 INSERT OR IGNORE INTO qa_records
-                    (message_id, question, answer, sources_json, answer_model, answer_ms, status, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    (message_id, question, answer, sources_json, answer_model, answer_ms, status, created_at, domain)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     message_id,
@@ -157,6 +170,7 @@ class QaStore:
                     elapsed_ms,
                     status,
                     _now(now),
+                    domain if domain in DOMAINS else DOMAIN_SCRIPT,
                 ),
             )
             conn.commit()
@@ -259,6 +273,7 @@ class QaStore:
         scripts: str,
         catalog_digest: str,
         operator: str,
+        domain: str = DOMAIN_SCRIPT,
         now: int | None = None,
     ) -> int:
         timestamp = _now(now)
@@ -266,8 +281,8 @@ class QaStore:
             cursor = conn.execute(
                 """
                 INSERT INTO qa_archive (source_message_id, canonical_question, answer, category, keywords, scripts,
-                                        status, catalog_digest, operator, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                        status, catalog_digest, operator, created_at, updated_at, domain)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     source_message_id,
@@ -281,6 +296,7 @@ class QaStore:
                     operator,
                     timestamp,
                     timestamp,
+                    domain if domain in DOMAINS else DOMAIN_SCRIPT,
                 ),
             )
             conn.commit()
@@ -291,9 +307,11 @@ class QaStore:
             row = conn.execute("SELECT * FROM qa_archive WHERE archive_id = ?", (archive_id,)).fetchone()
         return dict(row) if row else None
 
-    def active_archive(self) -> list[dict[str, Any]]:
+    def active_archive(self, domain: str = DOMAIN_SCRIPT) -> list[dict[str, Any]]:
         with self._connect() as conn:
-            rows = conn.execute("SELECT * FROM qa_archive WHERE status = ?", (ARCHIVE_ACTIVE,)).fetchall()
+            rows = conn.execute(
+                "SELECT * FROM qa_archive WHERE status = ? AND domain = ?", (ARCHIVE_ACTIVE, domain)
+            ).fetchall()
         return [dict(row) for row in rows]
 
     def list_archive(self, status: str, *, limit: int, offset: int) -> tuple[list[dict[str, Any]], int]:
@@ -601,6 +619,8 @@ class QaService:
 
     async def reanswer(self, record: dict[str, Any], corrections: list[str]) -> QaAnswer:
         """Answer again, taking the reviewer's corrections into account."""
+        if record.get("domain") == DOMAIN_TEAM_KB:
+            return await self._reanswer_team_kb(record, corrections)
         doc_context, doc_paths = self._documents(record["question"])
         notes = "\n".join("{}. {}".format(index, text) for index, text in enumerate(corrections, start=1))
         previous = record["revisions"][-1]["answer"] if record.get("revisions") else record["answer"]
@@ -628,6 +648,8 @@ class QaService:
 
     async def draft_archive(self, record: dict[str, Any], final_answer: str, corrected: bool) -> dict[str, Any]:
         """AI-suggested 标准问法 / 类别 / 关键词 / 脚本, plus MD fix suggestions when the answer was corrected."""
+        if record.get("domain") == DOMAIN_TEAM_KB:
+            return await self._draft_team_kb_archive(record, final_answer)
         cited_docs = [path for path in record.get("sources", {}).get("docs", []) if self._doc_file(path)]
         doc_blocks = []
         if corrected:
@@ -681,6 +703,64 @@ class QaService:
             "doc_fixes": fixes,
         }
 
+    # team knowledge base ------------------------------------------------------
+
+    def team_kb_lookup(self, question: str) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+        """``(archive entry for the identical question, similar reviewed answers)`` among team-kb archives.
+
+        An identical question is answered from the archive without AI; similar ones go to the team-kb service as
+        references the answer must prefer (the reviewer's patch takes effect immediately).
+        """
+        archive = self._safe_active_archive(DOMAIN_TEAM_KB)
+        exact = exact_archive(question, archive)
+        if exact is not None:
+            self._safe_hits([exact["archive_id"]])
+            return exact, []
+        matches = [match.archive for match in rank_archive(question, archive)]
+        self._safe_hits([item["archive_id"] for item in matches])
+        return None, matches
+
+    async def _reanswer_team_kb(self, record: dict[str, Any], corrections: list[str]) -> QaAnswer:
+        notes = "\n".join("{}. {}".format(index, text) for index, text in enumerate(corrections, start=1))
+        previous = record["revisions"][-1]["answer"] if record.get("revisions") else record["answer"]
+        sources = "、".join(
+            "{}（{} · {}）".format(s.get("title", ""), s.get("group", ""), s.get("owner", ""))
+            for s in record.get("sources", {}).get("team_kb", [])
+        ) or "（无）"
+        prompt = (
+            "你是游戏测试组的组内知识库助手。上一次的回答被人工评审判定为有误。请依据人工纠正说明和原回答中仍然正确的部分，"
+            "给出修正后的完整回答（直接写给提问人，不要提及“纠正”“上次回答”）。人工纠正说明是可信的事实来源。"
+            "不要补充纠正说明和原回答都没有的游戏规则、人员、配置或数值；资料里的 *** 是打码，不要还原。"
+            "第一句直接给结论，300 字以内，不用表格和标题，列表用「- 」开头。\n\n"
+            "原回答引用的功能：{sources}\n\n用户问题：{question}\n\n被判定有误的回答：\n{previous}\n\n人工纠正说明：\n{notes}"
+        ).format(sources=sources, question=record["question"], previous=previous, notes=notes)
+        started = time.perf_counter()
+        generation = await generate_with_provenance(self._curation_client, [], prompt)
+        return QaAnswer(
+            text=str(generation.text).strip(),
+            model=str(generation.model or ""),
+            elapsed_ms=int((time.perf_counter() - started) * 1000),
+        )
+
+    async def _draft_team_kb_archive(self, record: dict[str, Any], final_answer: str) -> dict[str, Any]:
+        prompt = (
+            "你在整理游戏测试组知识库的已审核问答。根据下面的问题与最终答案，输出一个 JSON 对象，不要输出其他内容：\n"
+            '{{"canonical_question": "规范、完整、去掉口语的问法",\n'
+            ' "keywords": ["功能名、模块名、同义说法，5-12 个"]}}\n\n'
+            "问题：{question}\n\n最终答案：\n{answer}"
+        ).format(question=record["question"], answer=final_answer)
+        generation = await generate_with_provenance(self._curation_client, [], prompt)
+        draft = _parse_json_object(str(generation.text))
+        features = ", ".join(s.get("title", "") for s in record.get("sources", {}).get("team_kb", []) if s.get("title"))
+        return {
+            "canonical_question": str(draft.get("canonical_question") or record["question"])[:300],
+            "answer": final_answer,
+            "category": TEAM_KB_CATEGORY,
+            "keywords": _join_list(draft.get("keywords")),
+            "scripts": features[:300],  # shown as 「涉及功能」 for team-kb archives
+            "doc_fixes": [],
+        }
+
     # helpers ------------------------------------------------------------------
 
     def _documents(self, question: str) -> tuple[str, list[str]]:
@@ -713,11 +793,11 @@ class QaService:
             for match in matches
         )
 
-    def _safe_active_archive(self) -> list[dict[str, Any]]:
+    def _safe_active_archive(self, domain: str = DOMAIN_SCRIPT) -> list[dict[str, Any]]:
         if self.store is None:
             return []
         try:
-            return self.store.active_archive()
+            return self.store.active_archive(domain)
         except Exception:  # noqa: BLE001 - archive lookup must never break answering
             logger.warning("qa archive unavailable", exc_info=True)
             return []

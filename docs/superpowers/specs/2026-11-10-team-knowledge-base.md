@@ -154,7 +154,7 @@ Excel 原件转换器（处理合并单元格、单元格内换行）是后续�
 - `GET /internal/team-kb/questions?wait=25` → `{"items":[{"id","text","asked_at"}]}`，返回即标记 claimed。
 - `POST /internal/team-kb/questions/{id}/answer` → `{"ok":true,"text","sources":[{"title","group","owner","path"}],"model","elapsed_ms"}`；`ok:false` 带 `reason`，Gateway 回复通用失败话术（不把内部原因发到飞书）。
 - 表 `team_kb_questions`：id（= 飞书 message_id）、chat_id、text、status（pending / claimed / answered / failed）、asked_at、claimed_at、answered_at、answer、sources_json、model、error。
-- 运维页 v1 不加页签：问答写入现有对话日志；以后要审核问答质量再接现有问答审核。
+- 运维页：回答进入现有「问答」页签评审（§5.8），同时写对话日志。
 
 ### 5.6 实施顺序
 
@@ -167,6 +167,18 @@ Excel 原件转换器（处理合并单元格、单元格内换行）是后续�
 
 1. 分类：规划器自动分类；另加前缀「问题」（用户 2026-11-11 改定，比「用例：」自然；后跟空格 / 冒号 / 逗号）强制走知识库，绕开误判。
 2. 来源不附内网链接（IP 不进飞书消息），只写「功能（组别 · 作者）」。
+
+### 5.8 问答评审与纠正（2026-11-11，用户要求：答错要能人工纠正、打补丁）
+
+沿用现有问答评审（`docs/superpowers/specs/2026-11-04-qa-review-archive.md`，运维页「问答」页签），按 `domain` 区分：`script`（脚本资料问答）与 `team_kb`（组内知识库）。
+
+- **记录**：知识库回答（ok）进入 `qa_records`（`domain=team_kb`，sources 含引用的功能与参考的归档编号），状态「待评审」；页面标「组内知识库」。
+- **纠正**：「回答错误」→ 写正确说法 → Gateway 上的 AI 依据纠正说明和原回答重新回答（知识库资料在 Worker，重新回答不再检索；纠正说明是可信事实）。归档表单里答案可以直接手改。
+- **归档**：类别固定「知识库」，「涉及功能」填引用的功能；不生成文档修正建议（用例资料在 Worker，修资料走重新上传）。
+- **补丁生效**（立即）：
+  1. 提问与某条知识库归档的标准问法完全相同 → Gateway 直接回复「📒 组内知识库（已审核答案，问答 #N）」，不调用 AI、不经过 Worker，记为「直接复用」；
+  2. 相似（与脚本问答同一套匹配，最多 3 条）→ 随问题发给 team-kb（`references`），放在资料最前面，提示词要求相关时优先依据、与用例冲突时以它为准；检索没命中功能时也照样交给 AI 判断。
+- **隔离**：脚本问答只用 `script` 归档，知识库问答只用 `team_kb` 归档；旧数据库启动时自动加 `domain` 列（默认 `script`）。
 
 ## 6. 浏览与搜索（内网）
 

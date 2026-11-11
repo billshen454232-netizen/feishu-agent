@@ -48,7 +48,8 @@ ANSWER_PROMPT = """你是游戏测试组的组内知识库助手，根据「资�
 3. 提到具体结论或用例时，在句末注明出处，格式「（功能名 · 测试人姓名）」，例如「（浮桥 用例集 · 金阳）」。
 4. 不编造人员、配置、数值、时间；资料里的 *** 是打码，不要还原或猜测。
 5. 问「谁测的 / 谁负责」时，回答资料里的测试（作者）；策划、程序信息知识库里没有，直接说明。
-6. 资料来自多个功能时，只用和问题相关的部分；都不相关就说没有找到。"""
+6. 资料来自多个功能时，只用和问题相关的部分；都不相关就说没有找到。
+7. 资料开头的「已审核答案」是人工确认过的标准答案：与问题相关时优先依据它，与用例资料冲突时以它为准；不相关就忽略。"""
 
 NOT_FOUND = "组内知识库里没有找到和这个问题相关的功能。可以换个说法（带上功能名会更准），或到内网知识库站点搜索。"
 
@@ -198,12 +199,22 @@ def source(feature: Dict) -> Dict:
     return {k: feature.get(k, "") for k in ("title", "group", "owner", "path")}
 
 
-def answer(question: str, index: QAIndex, ai: Optional["cards.CardAI"]) -> Dict:
+def reference_context(references: List[Dict]) -> str:
+    """Reviewed answers the Gateway sent along (admin-corrected 「补丁」, design §5.8)."""
+    return normalize.mask_text("\n\n".join(
+        "【已审核答案 #{}】\n问：{}\n答：{}".format(r.get("id", ""), r.get("question", ""), r.get("answer", ""))
+        for r in references))[:3000]
+
+
+def answer(question: str, index: QAIndex, ai: Optional["cards.CardAI"], references: Optional[List[Dict]] = None) -> Dict:
     """``{ok, text, sources, model, elapsed_ms}`` for the Gateway; text is already masked."""
     started = time.perf_counter()
     question = (question or "").strip()[:500]
+    references = [r for r in (references or []) if isinstance(r, dict) and r.get("answer")][:3]
     retrieval = index.retrieve(question)
     result: Dict = {"ok": True, "sources": [], "model": ""}
+    if references and retrieval["kind"] != "features":  # only reviewed answers fit: let the AI judge their relevance
+        retrieval = {"kind": "features", "features": [], "rows": []}
     if retrieval["kind"] == "none":
         result["text"] = NOT_FOUND
     elif retrieval["kind"] == "owner":
@@ -215,7 +226,7 @@ def answer(question: str, index: QAIndex, ai: Optional["cards.CardAI"]) -> Dict:
         result["text"] = "\n".join(lines)
     else:
         result["sources"] = [source(f) for f in retrieval["features"]]
-        context = build_context(retrieval)
+        context = "\n\n".join(part for part in (reference_context(references), build_context(retrieval)) if part)
         text = ""
         if ai is not None:
             try:
@@ -225,7 +236,10 @@ def answer(question: str, index: QAIndex, ai: Optional["cards.CardAI"]) -> Dict:
         if text:  # list only the features the answer actually used
             used = [s for s in result["sources"] if s["title"].replace("用例集", "").strip() in text]
             result["sources"] = used or result["sources"]
-        if not text:  # no AI or it failed: still point to the right features
+        if not text and references and not retrieval["features"]:
+            text = "AI 暂时不可用，以下是最接近的已审核答案（问答 #{}）：\n{}".format(references[0].get("id", ""),
+                                                                    references[0]["answer"])
+        elif not text:  # no AI or it failed: still point to the right features
             text = "AI 暂时不可用，先列出最相关的功能：\n" + "\n".join(
                 "- {}（{} · {}）{}".format(f["title"], f.get("group", ""), f.get("owner") or "—",
                                           "：" + f["card"]["一句话"] if (f.get("card") or {}).get("一句话") else "")

@@ -28,7 +28,7 @@ def test_store_claims_once_answers_only_claimed_and_expires_slow_questions(tmp_p
     store = _store(tmp_path)
     assert store.ask("om_1", "oc_1", "浮桥谁测的", now=1000) and not store.ask("om_1", "oc_1", "again", now=1000)
     assert store.finish("om_1", parse_answer(ANSWER), now=1001) is None  # not claimed yet
-    assert store.claim(now=1002) == [{"id": "om_1", "text": "浮桥谁测的", "asked_at": 1000}]
+    assert store.claim(now=1002) == [{"id": "om_1", "text": "浮桥谁测的", "asked_at": 1000, "references": []}]
     assert store.claim(now=1003) == []
     done = store.finish("om_1", parse_answer(ANSWER), now=1010)
     assert done["status"] == "answered" and done["sources"][0]["owner"] == "金阳" and done["chat_id"] == "oc_1"
@@ -141,3 +141,43 @@ def test_gateway_question_endpoints_long_poll_and_deliver(monkeypatch, tmp_path)
         assert client.post("/internal/team-kb/questions/om_1/answer", json=ANSWER, headers=headers).json() == {"status": "ok"}
         assert client.post("/internal/team-kb/questions/om_1/answer", json=ANSWER, headers=headers).status_code == 404
     assert feishu.replies == [("om_1", format_reply(parse_answer(ANSWER)))]
+
+
+def _qa_processor(tmp_path, questions):
+    from src.qa_library import QaService, QaStore
+
+    qa_store = QaStore(tmp_path / "jobs.sqlite3")
+    qa_store.initialize()
+    store = MessageJobStore(tmp_path / "jobs.sqlite3")
+    store.initialize()
+    feishu = FakeFeishuClient()
+    processor = MessageJobProcessor(make_config(), store, ConversationStore(4), FakeAIClient(), feishu,
+                                    operation_planner=_Planner(MuliuPlanKind.TEAM_KB), team_kb_questions=questions,
+                                    qa_service=QaService(answer_client=FakeAIClient(), store=qa_store))
+    return processor, store, feishu, qa_store
+
+
+@pytest.mark.asyncio
+async def test_reviewed_answers_are_reused_or_sent_along_and_new_answers_go_to_review(tmp_path):
+    questions = _store(tmp_path)
+    processor, store, feishu, qa_store = _qa_processor(tmp_path, questions)
+    kb_id = qa_store.add_archive(source_message_id="om_0", canonical_question="浮桥之前是谁测的", answer="唐黎艳测的",
+                                 category="知识库", keywords="浮桥, 谁测, 测试人", scripts="", catalog_digest="",
+                                 operator="me", domain="team_kb")
+
+    store.create_if_new("om_1", "evt_1", "oc_1", "ou_1", "浮桥之前是谁测的？", now=1000)
+    await processor.process_one("om_1")
+    assert feishu.replies == [("om_1", "📒 组内知识库（已审核答案，问答 #{}）\n\n唐黎艳测的".format(kb_id))]
+    assert questions.claim() == [] and qa_store.get_record("om_1")["status"] == "reused"
+
+    store.create_if_new("om_2", "evt_2", "oc_1", "ou_1", "浮桥是谁测的", now=1000)
+    await processor.process_one("om_2")
+    claimed = questions.claim()
+    assert claimed[0]["references"] == [{"id": kb_id, "question": "浮桥之前是谁测的", "answer": "唐黎艳测的"}]
+
+    answer = parse_answer({**ANSWER, "text": "浮桥由唐黎艳测试（浮桥 用例集 · 唐黎艳）"})
+    asked = questions.get("om_2")["asked_at"]
+    await processor.deliver_team_kb_answer(questions.finish("om_2", answer, now=asked + 5), format_reply(answer), answer=answer)
+    record = qa_store.get_record("om_2")
+    assert record["domain"] == "team_kb" and record["status"] == "pending" and record["answer_ms"] == 5000
+    assert record["sources"] == {"team_kb": ANSWER["sources"], "archives": [kb_id]}

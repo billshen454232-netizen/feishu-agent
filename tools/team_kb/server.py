@@ -454,7 +454,8 @@ class QuestionPoller(threading.Thread):
     def answer_one(self, item: Dict) -> Dict:
         question_id = str(item.get("id") or "")
         try:
-            result = qa.answer(str(item.get("text") or ""), self.kb.index.qa, self.kb.ai)
+            result = qa.answer(str(item.get("text") or ""), self.kb.index.qa, self.kb.ai,
+                               references=item.get("references") or [])
         except Exception as exc:  # noqa: BLE001 - the asker still gets a reply from the Gateway
             logger.exception("question failed id=%s", question_id)
             result = {"ok": False, "reason": type(exc).__name__, "text": "", "sources": []}

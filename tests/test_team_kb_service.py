@@ -346,3 +346,16 @@ def test_question_poller_answers_and_posts_back(tmp_path):
     poller.answer_one({"id": "om_1", "text": "浮桥建造条件"})
     method, path, payload = calls[-1]
     assert (method, path) == ("POST", "/internal/team-kb/questions/om_1/answer") and payload["ok"] and payload["sources"]
+
+
+def test_reviewed_answers_lead_the_context_and_work_without_any_feature_hit(tmp_path):
+    index = _qa_kb(tmp_path).index.qa
+    ai = FakeAnswerAI(reply="浮桥由唐黎艳测试（浮桥 用例集 · 唐黎艳）")
+    refs = [{"id": 7, "question": "浮桥之前是谁测的", "answer": "唐黎艳测的，服务器 10.20.30.40"}]
+    qa.answer("浮桥建造条件", index, ai, references=refs)
+    assert ai.calls[0].startswith("资料：\n【已审核答案 #7】") and "10.20.30.40" not in ai.calls[0]
+
+    result = qa.answer("帮我重启5000服", index, ai, references=refs)  # no feature hit: still answered from the reference
+    assert len(ai.calls) == 2 and result["sources"] == [] and "【功能" not in ai.calls[1]
+    fallback = qa.answer("帮我重启5000服", index, FakeAnswerAI(error="down"), references=refs)
+    assert fallback["text"].startswith("AI 暂时不可用，以下是最接近的已审核答案（问答 #7）") and "10.20.30.40" not in fallback["text"]
