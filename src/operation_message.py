@@ -225,6 +225,36 @@ def build_operation_status_card(
     }
 
 
+QA_FEEDBACK_ACTION = "qa_feedback"
+
+
+def build_answer_card(title: str, body: str, request_message_id: str) -> dict[str, object]:
+    """A knowledge answer with 👍 / 👎 buttons; the vote lands on the ops page 问答 review (no Muliu involved).
+
+    The body is plain text on purpose: masked values such as ``10.***40`` must not turn into Markdown.
+    """
+    reference = {"action": QA_FEEDBACK_ACTION, "request_message_id": request_message_id}
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {"template": "turquoise", "title": {"tag": "plain_text", "content": title}},
+        "elements": [
+            {"tag": "div", "text": {"tag": "plain_text", "content": mask_sensitive_operation_data(body)[:6000]}},
+            {"tag": "hr"},
+            {
+                "tag": "action",
+                "actions": [
+                    {"tag": "button", "type": "default", "text": {"tag": "plain_text", "content": "👍 有用"},
+                     "value": {**reference, "vote": "up"}},
+                    {"tag": "button", "type": "default", "text": {"tag": "plain_text", "content": "👎 没答对"},
+                     "value": {**reference, "vote": "down"}},
+                ],
+            },
+            {"tag": "note", "elements": [{"tag": "plain_text",
+                                          "content": "没答对的会交给管理员纠正；纠正后，同样的问题会直接用正确答案。"}]},
+        ],
+    }
+
+
 def _lark_md_safe(text: str) -> str:
     """Escape angle brackets so script/AI text cannot inject ``<at>``/``<font>`` tags."""
     return text.replace("<", "&lt;").replace(">", "&gt;")

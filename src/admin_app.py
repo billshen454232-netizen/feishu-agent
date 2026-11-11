@@ -36,6 +36,7 @@ from .qa_library import (
     FIX_STATUSES,
     QA_ARCHIVED,
     QA_DISMISSED,
+    QA_LIST_FILTERS,
     QA_PENDING,
     QA_STATUSES,
     QaService,
@@ -415,7 +416,7 @@ def _add_qa_routes(app: FastAPI, qa: QaService) -> None:
 
     @app.get("/api/qa")
     async def list_qa(status: str = QA_PENDING, page: int = 1, page_size: int = 20) -> dict[str, Any]:
-        if status not in QA_STATUSES:
+        if status not in QA_LIST_FILTERS:
             raise HTTPException(status_code=400, detail="unknown status")
         page, page_size = _paging(page, page_size)
         items, total = qa_store.list_records(status, limit=page_size, offset=(page - 1) * page_size)
@@ -490,6 +491,16 @@ def _add_qa_routes(app: FastAPI, qa: QaService) -> None:
         logger.info("qa archived message_id=%s archive=%s fixes=%s operator=%s",
                     message_id, archive_id, fixes, request.state.operator)
         return {"archive_id": archive_id, "doc_fixes": fixes}
+
+    @app.post("/api/qa/{message_id}/feedback")
+    async def mark_feedback(message_id: str, payload: dict[str, Any], request: Request) -> dict[str, str]:
+        """The reviewer marks / clears 「不满意」 on the page (same field as the Feishu 👎 button)."""
+        vote = str(payload.get("vote", ""))
+        if vote not in {"down", ""}:
+            raise HTTPException(status_code=400, detail="vote 只能是 down 或空")
+        record_or_404(message_id)
+        qa_store.set_feedback(message_id, vote, user_id="admin", user_name=request.state.operator)
+        return {"feedback": vote}
 
     @app.post("/api/qa/{message_id}/dismiss")
     async def dismiss(message_id: str) -> dict[str, str]:
@@ -885,6 +896,7 @@ const EMPTY = {
   "qa:retired": ["没有已下线的归档。", "下线的归档不再参与回答，可以随时恢复。"],
   "qa:dismissed": ["没有标记为不归档的问答。", ""],
   "qa:reused": ["还没有直接复用归档答案的问答。", "提问与归档的标准问法完全相同时，会直接回复归档答案。"],
+  "qa:unsatisfied": ["没有不满意的问答。", "在飞书回答卡片上点「👎 没答对」，或在这里点「标记不满意」的问答会出现在这里，纠正并归档后移出。"],
   "docfix:pending": ["没有待处理的文档修正建议。", "纠正过的问答归档时，会为它引用过的资料生成修改建议。"],
   "docfix:accepted": ["没有已采纳、待回写的建议。", "采纳的建议由开发机回写到仓库，见下方说明。"],
   "docfix:applied": ["还没有已回写的建议。", ""],
@@ -893,7 +905,7 @@ const EMPTY = {
   "teamkb:approved": ["还没有通过的上传。", ""],
   "teamkb:rejected": ["还没有拒绝的上传。", ""],
 };
-const QA_FILTERS = [["pending", "待评审"], ["correcting", "纠正中"], ["archive", "归档库"], ["retired", "已下线"], ["dismissed", "不归档"], ["reused", "直接复用"]];
+const QA_FILTERS = [["pending", "待评审"], ["unsatisfied", "不满意"], ["correcting", "纠正中"], ["archive", "归档库"], ["retired", "已下线"], ["dismissed", "不归档"], ["reused", "直接复用"]];
 const FIX_FILTERS = [["pending", "待处理"], ["accepted", "已采纳"], ["applied", "已回写"], ["ignored", "已忽略"]];
 const KB_FILTERS = [["pending", "待审核"], ["approved", "已通过"], ["rejected", "已拒绝"]];
 const CATEGORIES = ["开服", "关服", "清档", "合服", "热更", "配置", "查询", "通用", "知识库"];
@@ -1092,11 +1104,18 @@ function renderQa(items) {
     } else if (r.status === "dismissed") {
       actions = `<button class="btn" data-qa="restore">恢复为待评审</button>`;
     }
+    if (r.status !== "archived" && r.status !== "dismissed") {
+      actions += r.feedback === "down"
+        ? `<button class="btn" data-qa="unmark-bad">取消不满意</button>`
+        : `<button class="btn" data-qa="mark-bad">标记不满意</button>`;
+    }
     return `
     <article class="tpl qa" data-mid="${esc(r.message_id)}">
       <div class="tpl-head">
         <span class="script">${esc(r.user_name || r.user_id) || "未知成员"}</span>
         <span class="tag">${teamKb ? "组内知识库" : "脚本资料"}</span>
+        ${r.feedback === "down" ? `<span class="badge warn">👎 不满意${r.feedback_name ? `（${esc(r.feedback_name)}）` : ""}</span>` : ""}
+        ${r.feedback === "up" ? `<span class="badge ok">👍 有用${r.feedback_name ? `（${esc(r.feedback_name)}）` : ""}</span>` : ""}
         <dl class="facts">
           <div><dt>时间</dt><dd>${fmt(r.created_at)}</dd></div>
           ${r.planning_model ? `<div><dt>需求分析</dt><dd>${esc(r.planning_model)}，${secs(r.planning_ms)}</dd></div>` : ""}
@@ -1292,6 +1311,10 @@ async function qaAction(button) {
       }));
       toast(`已归档为问答 #${r.archive_id}` + (r.doc_fixes ? `，生成 ${r.doc_fixes} 条资料修改建议` : ""));
       invalidateQa(); return load();
+    }
+    if (act === "mark-bad" || act === "unmark-bad") {
+      await api("POST", `/api/qa/${encodeURIComponent(mid)}/feedback`, { vote: act === "mark-bad" ? "down" : "" });
+      toast(act === "mark-bad" ? "已标记为不满意" : "已取消不满意"); invalidateQa(); return load();
     }
     if (act === "dismiss") { await api("POST", `/api/qa/${encodeURIComponent(mid)}/dismiss`); toast("已标记为不归档"); invalidateQa(); return load(); }
     if (act === "restore") { await api("POST", `/api/qa/${encodeURIComponent(mid)}/restore`); toast("已恢复为待评审"); invalidateQa(); return load(); }

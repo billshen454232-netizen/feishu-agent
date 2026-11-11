@@ -20,6 +20,7 @@ from .muliu_plan import MuliuPlan, MuliuPlanError, MuliuPlanKind, parse_plan
 from .muliu_planner import MuliuPlanGeneration, MuliuPlanGenerationError
 from .muliu_routing import MuliuPlanRouteResolver, MuliuRouteSnapshot, MuliuRoutingError
 from .operation_message import (
+    build_answer_card,
     build_execution_status_card,
     build_execution_warning_card,
     build_job_failure_card,
@@ -43,6 +44,7 @@ from .execution_report import (
 )
 from .qa_library import DOMAIN_TEAM_KB, QA_PENDING, QA_REUSED, QaService
 from .server_environments import ServerEnvironments, ServerEnvironmentsError
+from .team_kb_questions import REPLY_HEADER as TEAM_KB_REPLY_HEADER
 from .team_kb_questions import strip_prefix as strip_team_kb_prefix
 from .worker_protocol import parse_execution_result, serialize_execution_result
 
@@ -983,7 +985,8 @@ class MessageJobProcessor:
         self._conversations.append(job.chat_id, "user", job.text)
         self._conversations.append(job.chat_id, "assistant", reply)
         reply_started = time.perf_counter()
-        await self._reply_and_finish(message_id, reply)
+        await self._reply_answer(message_id, "📚 脚本资料问答", reply, fallback=reply)
+        self._store.mark_done(message_id)
         self._record_qa(job, answer)
         return (
             knowledge_ms,
@@ -1012,7 +1015,9 @@ class MessageJobProcessor:
         exact, similar = self._qa_service.team_kb_lookup(question)
         if exact is not None:  # the reviewer's archived answer for exactly this question: no AI, no Worker round trip
             reply = "📒 组内知识库（已审核答案，问答 #{}）\n\n{}".format(exact["archive_id"], exact["answer"])
-            await self._reply_and_finish(message_id, reply)
+            await self._reply_answer(message_id, "📒 组内知识库",
+                                     "已审核答案（问答 #{}）\n\n{}".format(exact["archive_id"], exact["answer"]), fallback=reply)
+            self._store.mark_done(message_id)
             self._conversations.append(job.chat_id, "user", job.text)
             self._conversations.append(job.chat_id, "assistant", reply)
             self._record_team_kb_qa(job.message_id, question, exact["answer"], sources={"archives": [exact["archive_id"]]},
@@ -1037,7 +1042,11 @@ class MessageJobProcessor:
     ) -> None:
         """Reply under the asker's message with the team-kb answer (or the timeout notice), log it and queue it for review."""
         message_id = question["question_id"]
-        await self._feishu_client.reply_text(message_id, reply)
+        if answer is not None and answer.get("ok"):
+            await self._reply_answer(message_id, TEAM_KB_REPLY_HEADER, reply[len(TEAM_KB_REPLY_HEADER):].lstrip("\n"),
+                                     fallback=reply)
+        else:
+            await self._feishu_client.reply_text(message_id, reply)
         if answer is not None and answer.get("ok"):
             asked, answered = int(question.get("asked_at") or 0), int(question.get("answered_at") or 0)
             self._record_team_kb_qa(
@@ -1053,6 +1062,25 @@ class MessageJobProcessor:
         self._append_conversation_log(
             job, kind, reply, source_paths=tuple(s.get("path", "") for s in question.get("sources") or []),
         )
+
+    async def _reply_answer(self, message_id: str, title: str, body: str, *, fallback: str) -> None:
+        """Reply with the 👍 / 👎 answer card; plain text if the card cannot be sent, so the answer is never lost."""
+        try:
+            await self._feishu_client.reply_card(message_id, build_answer_card(title, body, message_id))
+        except Exception:  # noqa: BLE001
+            logger.warning("answer card not sent, replying text message_id=%s", message_id, exc_info=True)
+            await self._feishu_client.reply_text(message_id, fallback)
+
+    def record_qa_feedback(self, message_id: str, vote: str, user_id: str) -> bool:
+        """Store a 👍 / 👎 from the answer card (quick: runs inside the 3-second card callback)."""
+        store = self._qa_service.store
+        if store is None:
+            return False
+        try:
+            return store.set_feedback(message_id, vote, user_id=user_id, user_name=self._member_names.get(user_id, ""))
+        except Exception:  # noqa: BLE001
+            logger.warning("qa feedback not stored message_id=%s", message_id, exc_info=True)
+            return False
 
     def _record_team_kb_qa(self, message_id: str, question: str, answer: str, *, sources: dict[str, Any], model: str,
                            elapsed_ms: int, status: str = QA_PENDING) -> None:

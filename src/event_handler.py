@@ -6,6 +6,7 @@ import re
 from typing import Any
 
 from .config import AppConfig
+from .operation_message import QA_FEEDBACK_ACTION
 
 logger = logging.getLogger(__name__)
 
@@ -127,6 +128,15 @@ class FeishuEventHandler:
         confirmation_message_id = str(context.get("open_message_id", ""))
         chat_id = str(context.get("open_chat_id", ""))
         user_id = str(operator.get("open_id") or operator.get("user_id") or operator.get("union_id") or "")
+        if action_name == QA_FEEDBACK_ACTION:
+            vote = str(value.get("vote", ""))
+            if vote not in {"up", "down"} or not request_message_id or not user_id:
+                return _card_action_response("反馈数据无效。", "warning")
+            if not self._job_processor.record_qa_feedback(request_message_id, vote, user_id):
+                return _card_action_response("这条回答已不在问答记录里。", "warning")
+            logger.warning("qa feedback event_id=%s request_message_id=%s vote=%s", event_id, request_message_id, vote)
+            return {"toast": {"type": "success",
+                              "content": "已记录：👍 有用，谢谢反馈" if vote == "up" else "已记录：👎 没答对，管理员会纠正"}}
         if not all((action_name, request_message_id, confirmation_token, confirmation_message_id, chat_id, user_id)):
             logger.warning("ignored card event_id=%s reason=missing_callback_identity", event_id)
             return _card_action_response("卡片操作信息不完整，未执行。", "warning")

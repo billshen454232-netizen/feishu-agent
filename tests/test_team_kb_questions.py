@@ -181,3 +181,35 @@ async def test_reviewed_answers_are_reused_or_sent_along_and_new_answers_go_to_r
     record = qa_store.get_record("om_2")
     assert record["domain"] == "team_kb" and record["status"] == "pending" and record["answer_ms"] == 5000
     assert record["sources"] == {"team_kb": ANSWER["sources"], "archives": [kb_id]}
+
+
+class CardFeishu(FakeFeishuClient):
+    def __init__(self):
+        super().__init__()
+        self.cards = []
+
+    async def reply_card(self, message_id, card):
+        self.cards.append((message_id, card))
+        return "om_card"
+
+
+@pytest.mark.asyncio
+async def test_team_kb_answers_go_out_as_feedback_cards_and_votes_reach_the_record(tmp_path):
+    questions = _store(tmp_path)
+    processor, store, _, qa_store = _qa_processor(tmp_path, questions)
+    feishu = CardFeishu()
+    processor._feishu_client = feishu
+    store.create_if_new("om_1", "evt_1", "oc_1", "ou_1", "浮桥之前是谁测的", now=1000)
+    await processor.process_one("om_1")
+    questions.claim()
+    answer = parse_answer(ANSWER)
+    await processor.deliver_team_kb_answer(questions.finish("om_1", answer), format_reply(answer), answer=answer)
+    message_id, card = feishu.cards[0]
+    assert message_id == "om_1" and card["header"]["title"]["content"] == "📒 组内知识库"
+    assert card["elements"][0]["text"]["content"] == "浮桥建造需要同盟（浮桥 用例集 · 金阳）。\n\n来源：浮桥 用例集（赛季组 · 金阳）"
+    assert card["elements"][2]["actions"][1]["value"] == {"action": "qa_feedback", "request_message_id": "om_1", "vote": "down"}
+    assert processor.record_qa_feedback("om_1", "down", "ou_9") and qa_store.get_record("om_1")["feedback"] == "down"
+    assert not processor.record_qa_feedback("om_unknown", "down", "ou_9")
+
+    await processor.deliver_team_kb_answer(questions.get("om_1"), UNAVAILABLE_REPLY, kind="team_kb_unavailable")
+    assert feishu.replies == [("om_1", UNAVAILABLE_REPLY)]  # notices stay plain text, without buttons

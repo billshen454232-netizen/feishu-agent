@@ -372,3 +372,30 @@ async def test_logs_received_event_and_job_queued(caplog):
     assert result == {"code": 0}
     assert "received event_id=evt-log message_id=om_1 chat_id=oc_1" in caplog.text
     assert "job queued message_id=om_1" in caplog.text
+
+
+class FeedbackProcessor:
+    def __init__(self, known=True):
+        self.votes, self.known = [], known
+
+    def record_qa_feedback(self, message_id, vote, user_id):
+        self.votes.append((message_id, vote, user_id))
+        return self.known
+
+
+def feedback_event(vote="down", request_message_id="om_q"):
+    payload = card_action_event(action="qa_feedback", request_message_id=request_message_id)
+    payload["event"]["action"]["value"] = {"action": "qa_feedback", "vote": vote, "request_message_id": request_message_id}
+    return payload
+
+
+@pytest.mark.asyncio
+async def test_answer_card_feedback_is_recorded_without_a_confirmation_token():
+    processor = FeedbackProcessor()
+    handler = FeishuEventHandler(make_config(), FakeJobStore(), FakeJobQueue(), job_processor=processor)
+    response = await handler.handle(feedback_event("down"))
+    assert response == {"toast": {"type": "success", "content": "已记录：👎 没答对，管理员会纠正"}}
+    assert processor.votes == [("om_q", "down", "ou_requester")]
+    assert (await handler.handle(feedback_event("maybe")))["toast"]["type"] == "warning"
+    unknown = FeishuEventHandler(make_config(), FakeJobStore(), FakeJobQueue(), job_processor=FeedbackProcessor(known=False))
+    assert (await unknown.handle(feedback_event("up")))["toast"]["content"] == "这条回答已不在问答记录里。"

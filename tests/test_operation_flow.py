@@ -600,8 +600,13 @@ async def test_registry_knowledge_decision_answers_without_confirmation(tmp_path
     assert len(ai.calls) == 1
     assert "不得生成执行计划" in ai.calls[0][1]
     assert "knowledge/docs/cc_patch.md" in ai.calls[0][1]
-    assert "确认执行" not in feishu.replies[0][1]
-    assert feishu.replies[0][1].startswith("📚 以下回答基于当前执行注册表和本地脚本资料生成。")
+    card = feishu.cards[0][1]
+    body = card["elements"][0]["text"]["content"]
+    assert feishu.replies == [] and card["header"]["title"]["content"] == "📚 脚本资料问答"
+    assert "确认执行" not in body and body.startswith("📚 以下回答基于当前执行注册表和本地脚本资料生成。")
+    buttons = card["elements"][2]["actions"]
+    assert [b["value"] for b in buttons] == [{"action": "qa_feedback", "request_message_id": feishu.cards[0][0], "vote": v}
+                                             for v in ("up", "down")]
 
 
 @pytest.mark.asyncio
@@ -1523,5 +1528,5 @@ async def test_knowledge_answer_is_recorded_for_review_and_archive_is_reused(tmp
     await processor.process_one("om_q2")
 
     assert len(ai.calls) == calls_before  # planner is faked; the identical question skipped the answer AI call
-    assert feishu.replies[-1][1].startswith("📚 以下为已审核答案（问答 #1）")
+    assert feishu.cards[-1][1]["elements"][0]["text"]["content"].startswith("📚 以下为已审核答案（问答 #1）")
     assert qa_store.get_record("om_q2")["status"] == "reused"

@@ -35,6 +35,11 @@ QA_ARCHIVED = "archived"
 QA_DISMISSED = "dismissed"
 QA_REUSED = "reused"
 QA_STATUSES = (QA_PENDING, QA_CORRECTING, QA_ARCHIVED, QA_DISMISSED, QA_REUSED)
+# Not a stored status: a 👎 (Feishu button or the review page) on an answer nobody has fixed yet.
+QA_UNSATISFIED = "unsatisfied"
+QA_LIST_FILTERS = QA_STATUSES + (QA_UNSATISFIED,)
+_UNRESOLVED = (QA_PENDING, QA_CORRECTING, QA_REUSED)
+FEEDBACK_VOTES = ("up", "down", "")
 
 ARCHIVE_ACTIVE = "active"
 ARCHIVE_RETIRED = "retired"
@@ -137,6 +142,10 @@ class QaStore:
             for table in ("qa_records", "qa_archive"):
                 if not self._has_columns(conn, table, ("domain",)):
                     conn.execute("ALTER TABLE {} ADD COLUMN domain TEXT NOT NULL DEFAULT '{}'".format(table, DOMAIN_SCRIPT))
+            for column, definition in (("feedback", "TEXT NOT NULL DEFAULT ''"), ("feedback_user", "TEXT NOT NULL DEFAULT ''"),
+                                       ("feedback_name", "TEXT NOT NULL DEFAULT ''"), ("feedback_at", "INTEGER NOT NULL DEFAULT 0")):
+                if not self._has_columns(conn, "qa_records", (column,)):
+                    conn.execute("ALTER TABLE qa_records ADD COLUMN {} {}".format(column, definition))
             conn.commit()
 
     # records ----------------------------------------------------------------
@@ -181,8 +190,12 @@ class QaStore:
         return self._record_dict(row) if row else None
 
     def list_records(self, status: str, *, limit: int, offset: int) -> tuple[list[dict[str, Any]], int]:
-        if status not in QA_STATUSES:
+        if status not in QA_LIST_FILTERS:
             raise ValueError("unknown qa status: {}".format(status))
+        if status == QA_UNSATISFIED:
+            where, params = "r.feedback = 'down' AND r.status IN ({})".format(",".join("?" * len(_UNRESOLVED))), _UNRESOLVED
+        else:
+            where, params = "r.status = ?", (status,)
         with self._connect() as conn:
             has_jobs = self._has_table(conn, "message_jobs")
             join = "LEFT JOIN message_jobs j ON j.message_id = r.message_id" if has_jobs else ""
@@ -193,11 +206,11 @@ class QaStore:
                 else "'' AS user_id, '' AS user_name, '' AS planning_model, 0 AS planning_ms"
             )
             rows = conn.execute(
-                "SELECT r.*, {} FROM qa_records r {} WHERE r.status = ? "
-                "ORDER BY r.created_at DESC LIMIT ? OFFSET ?".format(extra, join),
-                (status, limit, offset),
+                "SELECT r.*, {} FROM qa_records r {} WHERE {} "
+                "ORDER BY r.created_at DESC LIMIT ? OFFSET ?".format(extra, join, where),
+                (*params, limit, offset),
             ).fetchall()
-            total = conn.execute("SELECT COUNT(*) FROM qa_records WHERE status = ?", (status,)).fetchone()[0]
+            total = conn.execute("SELECT COUNT(*) FROM qa_records r WHERE {}".format(where), params).fetchone()[0]
         records = [self._record_dict(row) for row in rows]
         for item in records:
             item["revisions"] = self.list_revisions(item["message_id"])
@@ -208,7 +221,24 @@ class QaStore:
             rows = conn.execute("SELECT status, COUNT(*) AS n FROM qa_records GROUP BY status").fetchall()
         counts = {status: 0 for status in QA_STATUSES}
         counts.update({str(row["status"]): int(row["n"]) for row in rows})
+        with self._connect() as conn:
+            counts[QA_UNSATISFIED] = int(conn.execute(
+                "SELECT COUNT(*) FROM qa_records WHERE feedback = 'down' AND status IN ({})".format(
+                    ",".join("?" * len(_UNRESOLVED))), _UNRESOLVED).fetchone()[0])
         return counts
+
+    def set_feedback(self, message_id: str, vote: str, *, user_id: str = "", user_name: str = "",
+                     now: int | None = None) -> bool:
+        """Record 👍 (``up``) / 👎 (``down``) / cleared (``""``) for an answer; the latest vote wins."""
+        if vote not in FEEDBACK_VOTES:
+            raise ValueError("unknown feedback vote: {}".format(vote))
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "UPDATE qa_records SET feedback = ?, feedback_user = ?, feedback_name = ?, feedback_at = ? WHERE message_id = ?",
+                (vote, user_id[:100], user_name[:100], _now(now), message_id),
+            )
+            conn.commit()
+        return cursor.rowcount > 0
 
     def set_record_status(self, message_id: str, status: str, now: int | None = None) -> bool:
         if status not in QA_STATUSES:

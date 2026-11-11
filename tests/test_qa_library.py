@@ -264,3 +264,21 @@ async def test_team_kb_correction_and_archive_draft_use_their_own_prompts(tmp_pa
     draft = await service.draft_archive(record, result.text, corrected=True)
     assert draft == {"canonical_question": "浮桥由谁测试", "answer": result.text, "category": "知识库",
                      "keywords": "浮桥, 测试人", "scripts": "浮桥 用例集", "doc_fixes": []}
+
+
+def test_feedback_votes_and_the_unsatisfied_filter(tmp_path):
+    store = _store(tmp_path)
+    for mid in ("om_a", "om_b", "om_c"):
+        store.record(mid, "问" + mid, "答", sources={}, model="m", elapsed_ms=1)
+    assert store.set_feedback("om_a", "down", user_id="ou_1", user_name="沈涛")
+    assert store.set_feedback("om_b", "up", user_id="ou_2")
+    store.set_feedback("om_c", "down")
+    store.set_record_status("om_c", "archived")  # fixed already: no longer 「不满意」
+    assert not store.set_feedback("om_missing", "down")
+    with pytest.raises(ValueError):
+        store.set_feedback("om_a", "meh")
+    items, total = store.list_records("unsatisfied", limit=10, offset=0)
+    assert total == 1 and items[0]["message_id"] == "om_a" and items[0]["feedback_name"] == "沈涛"
+    assert store.count_records()["unsatisfied"] == 1
+    store.set_feedback("om_a", "")
+    assert store.list_records("unsatisfied", limit=10, offset=0)[1] == 0

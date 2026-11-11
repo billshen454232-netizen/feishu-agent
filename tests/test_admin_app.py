@@ -354,3 +354,26 @@ def test_rewrite_diagnosis_returns_a_draft_around_reviewer_notes(tmp_path):
     no_ai = TestClient(create_admin_app(store), base_url="http://127.0.0.1:8901")
     assert no_ai.post(f"/api/patterns/{pattern.pattern_id}/rewrite", headers=HEADERS, json={"diagnosis": notes}).status_code == 503
     assert "AI 按人工说明重写" in client.get("/").text
+
+
+def test_reviewer_marks_and_lists_unsatisfied_answers(tmp_path):
+    client, qa_store, _ = _qa_client(tmp_path)
+    assert client.post("/api/qa/om_q/feedback", json={"vote": "down"}).status_code == 403  # admin header required
+    assert client.post("/api/qa/om_q/feedback", headers=HEADERS, json={"vote": "up"}).status_code == 400
+    assert client.post("/api/qa/om_missing/feedback", headers=HEADERS, json={"vote": "down"}).status_code == 404
+    assert client.post("/api/qa/om_q/feedback", headers=HEADERS, json={"vote": "down"}).json() == {"feedback": "down"}
+    listed = client.get("/api/qa?status=unsatisfied").json()
+    assert listed["total"] == 1 and listed["items"][0]["feedback"] == "down"
+    assert client.get("/api/summary").json()["qa"]["unsatisfied"] == 1
+    client.post("/api/qa/om_q/feedback", headers=HEADERS, json={"vote": ""})
+    assert client.get("/api/qa?status=unsatisfied").json()["total"] == 0
+
+
+def test_team_kb_record_archives_into_its_own_domain(tmp_path):
+    client, qa_store, _ = _qa_client(tmp_path)
+    qa_store.record("om_kb", "浮桥谁测的", "金阳", sources={"team_kb": [{"title": "浮桥 用例集", "group": "赛季组", "owner": "金阳"}]},
+                    model="m", elapsed_ms=1, domain="team_kb")
+    archived = client.post("/api/qa/om_kb/archive", headers=HEADERS, json={
+        "canonical_question": "浮桥由谁测试", "answer": "唐黎艳", "category": "知识库", "keywords": "浮桥", "scripts": "浮桥 用例集"}).json()
+    entry = qa_store.get_archive(archived["archive_id"])
+    assert entry["domain"] == "team_kb" and entry["catalog_digest"] == "" and qa_store.active_archive() == []
