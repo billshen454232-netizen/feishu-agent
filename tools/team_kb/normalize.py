@@ -4,7 +4,8 @@ Rules (agreed with the owner, 2026-11-10):
   * case tables (have 预期结果 and one of 执行步骤/前置条件/测试项) get the standard header; 模块 / 二级模块 empty
     cells are forward-filled within the table (Excel merged cells); empty 分级 becomes 「未分级」 (never guessed);
   * every other table and all prose are copied verbatim;
-  * sensitive values (IP, password, token, phone, database host) reject the file; nothing is stored.
+  * sensitive values (IP, password, token, phone, database host) hold the file for the admin's review (server.py);
+    text sent to the card AI is masked with ``mask_text``.
 Standard library only, Python 3.9+.
 """
 
@@ -66,34 +67,63 @@ def masked_hits(text: str, limit: int = 50) -> List[Dict]:
     """
     hits: List[Dict] = []
     for number, line in enumerate(text.splitlines(), 1):
-        spans = []
-        for kind, pattern in SENSITIVE.items():
-            for match in pattern.finditer(line):
-                if kind == "IP 地址" and all(int(part) < 10 for part in match.group(0).split(".")):
-                    continue
-                spans.append([match.start(), match.end(), kind])
-        if not spans:
+        masked, kinds = _mask_line(line)
+        if not kinds:
             continue
-        spans.sort()
-        merged = [spans[0]]
-        for span in spans[1:]:
-            if span[0] < merged[-1][1]:
-                merged[-1][1] = max(merged[-1][1], span[1])
-            else:
-                merged.append(span)
-        masked = line
-        for start, end, _ in reversed(merged):
-            masked = masked[:start] + _mask(masked[start:end]) + masked[end:]
         masked = masked.strip()
         first = masked.find("***")
         if len(masked) > 120:
             begin = max(0, first - 50)
             masked = ("…" if begin else "") + masked[begin:begin + 120] + "…"
-        for kind in dict.fromkeys(span[2] for span in spans):
+        for kind in kinds:
             hits.append({"kind": kind, "line": number, "context": masked})
             if len(hits) >= limit:
                 return hits
     return hits
+
+
+def mask_text(text: str) -> str:
+    """The text with every sensitive value masked (what may leave the intranet, e.g. to the card AI)."""
+    return "\n".join(_mask_line(line)[0] for line in text.split("\n"))
+
+
+def _mask_line(line: str) -> Tuple[str, List[str]]:
+    spans = []
+    for kind, pattern in SENSITIVE.items():
+        for match in pattern.finditer(line):
+            if kind == "IP 地址" and all(int(part) < 10 for part in match.group(0).split(".")):
+                continue
+            spans.append([match.start(), match.end(), kind])
+    if not spans:
+        return line, []
+    spans.sort()
+    merged = [spans[0]]
+    for span in spans[1:]:
+        if span[0] < merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], span[1])
+        else:
+            merged.append(span)
+    masked = line
+    for start, end, _ in reversed(merged):
+        masked = masked[:start] + _mask(masked[start:end]) + masked[end:]
+    return masked, list(dict.fromkeys(span[2] for span in spans))
+
+
+def case_records(body: str):
+    """Yield ``{column: cell}`` for every row of every case table (tables with a 预期结果 column) in the body."""
+    header = None
+    lines = body.splitlines()
+    for i, line in enumerate(lines):
+        if not line.lstrip().startswith("|"):
+            header = None
+            continue
+        if header is None:
+            if i + 1 < len(lines) and SEP.match(lines[i + 1]):
+                header = cells(line)
+            continue
+        if SEP.match(line) or "预期结果" not in header:
+            continue
+        yield dict(zip(header, cells(line)))
 
 
 def _is_case_header(header: List[str]) -> bool:

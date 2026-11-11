@@ -15,6 +15,7 @@ import base64
 import hashlib
 import json
 import logging
+import queue
 import re
 import subprocess
 import sys
@@ -29,6 +30,7 @@ from urllib.request import Request, urlopen
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import build_site  # noqa: E402
+import cards  # noqa: E402
 import normalize  # noqa: E402
 
 logger = logging.getLogger("team-kb")
@@ -77,21 +79,8 @@ class SearchIndex:
 
     @staticmethod
     def _rows(rel: str, title: str, owner: str, body: str) -> List[Dict]:
-        rows, header = [], None
-        lines = body.splitlines()
-        for i, line in enumerate(lines):
-            if not line.lstrip().startswith("|"):
-                header = None
-                continue
-            if header is None:
-                if i + 1 < len(lines) and normalize.SEP.match(lines[i + 1]):
-                    header = normalize.cells(line)
-                continue
-            if normalize.SEP.match(line):
-                continue
-            if "预期结果" not in header:
-                continue
-            record = dict(zip(header, normalize.cells(line)))
+        rows = []
+        for record in normalize.case_records(body):
             item = record.get("测试项") or record.get("执行步骤") or ""
             rows.append({
                 "path": rel, "title": title, "owner": owner,
@@ -145,6 +134,7 @@ class KnowledgeBase:
         self.public_url = public_url.rstrip("/")
         self.index = SearchIndex(root)
         self.lock = threading.Lock()
+        self.cards: Optional["CardWorker"] = None  # set when an AI is configured
 
     def upload(self, payload: Dict) -> Dict:
         uploader = str(payload.get("uploader") or "").strip()
@@ -229,7 +219,10 @@ class KnowledgeBase:
         target.parent.mkdir(parents=True, exist_ok=True)
         build_site.write(target, stored)
         warnings = list(summary.get("warnings") or [])
-        if (self.root / "cards" / rel).is_file():
+        if self.cards is not None and cards.card_input(stored) is not None:
+            self.cards.enqueue(rel.as_posix())
+            warnings.append("摘要卡片由 AI 在后台生成，约 1 分钟后刷新页面可见")
+        elif (self.root / "cards" / rel).is_file():
             if existed:
                 warnings.append("摘要卡片仍是旧版本，用例已更新")
         else:
@@ -436,6 +429,63 @@ class GatewaySync(threading.Thread):
             raise RuntimeError("{} {} -> {}".format(method, path, exc.reason)) from None
 
 
+class CardWorker(threading.Thread):
+    """Writes the feature card of each stored upload in the background (one AI call takes ~10–60 s)."""
+
+    RETRY_SECONDS = 60
+
+    def __init__(self, kb: KnowledgeBase, ai: "cards.CardAI") -> None:
+        super().__init__(name="team-kb-cards", daemon=True)
+        self.kb, self.ai = kb, ai
+        self._queue: "queue.Queue[str]" = queue.Queue()
+        self._queued: set = set()
+        self._guard = threading.Lock()
+
+    def enqueue(self, rel: str) -> None:
+        with self._guard:
+            if rel in self._queued:
+                return
+            self._queued.add(rel)
+        self._queue.put(rel)
+
+    def run(self) -> None:
+        while True:
+            rel = self._queue.get()
+            with self._guard:
+                self._queued.discard(rel)
+            for attempt in (1, 2):
+                try:
+                    logger.warning("card %s: %s", rel, self.process(rel))
+                    break
+                except Exception as exc:  # noqa: BLE001 - one retry, then the page keeps showing no card
+                    logger.error("card failed (attempt %s) path=%s: %s", attempt, rel, exc)
+                    if attempt == 1:
+                        time.sleep(self.RETRY_SECONDS)
+
+    def process(self, rel: str) -> str:
+        case_path = self.kb.root / "cases" / rel
+        if not case_path.is_file():
+            return "skipped: case file gone"
+        stored = case_path.read_text(encoding="utf-8")
+        source = cards.card_input(stored)
+        if source is None:
+            return "skipped: no case table"
+        card, model = self.ai.generate(*source)  # slow; outside the lock
+        with self.kb.lock:
+            if not case_path.is_file() or case_path.read_text(encoding="utf-8") != stored:
+                return "skipped: case changed meanwhile (the newer upload queued its own card)"
+            target = self.kb.root / "cards" / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            build_site.write(target, card)
+            build_site.build(self.kb.root)
+            try:
+                cards.commit(self.kb.root, [rel], model)
+            except (OSError, subprocess.CalledProcessError) as exc:
+                logger.error("git commit (card) failed: %s", getattr(exc, "stderr", exc))
+            self.kb.index.load()
+        return "written by " + model
+
+
 def _gateway_settings(agent_config: str) -> Optional[Tuple[str, str]]:
     if not agent_config or not Path(agent_config).is_file():
         return None
@@ -450,6 +500,7 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8091)
     parser.add_argument("--public-url", default="", help="intranet base URL of the site, for the admin's full-text links")
     parser.add_argument("--agent-config", default="", help="feishu-agent Worker config.json (gateway_base_url, worker_token)")
+    parser.add_argument("--ai-config", default="", help="ai.json with the card models (see cards.py); absent = no cards")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     kb = KnowledgeBase(Path(args.root), public_url=args.public_url)
@@ -460,6 +511,13 @@ def main() -> None:
         GatewaySync(kb, *gateway).start()
     else:
         logger.warning("gateway sync disabled: no --agent-config with runtime.gateway_base_url / worker_token")
+    ai = cards.CardAI.from_file(args.ai_config)
+    if ai:
+        kb.cards = CardWorker(kb, ai)
+        kb.cards.start()
+        logger.warning("card generation enabled: %s", ", ".join(m["model"] for m in ai.models))
+    else:
+        logger.warning("card generation disabled: no usable --ai-config")
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     logger.warning("team-kb service listening on 127.0.0.1:%s", args.port)
     server.serve_forever()

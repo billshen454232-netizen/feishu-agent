@@ -4,6 +4,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 _TOOLS = Path(__file__).resolve().parents[1] / "tools/team_kb"
 sys.path.insert(0, str(_TOOLS))
 _SPEC = importlib.util.spec_from_file_location("team_kb_server", _TOOLS / "server.py")
@@ -145,6 +147,106 @@ def test_gateway_sync_reports_once_and_applies_decisions(tmp_path):
     calls.clear()
     sync.sync_once()
     assert [c[1] for c in calls] == ["/internal/team-kb/decisions", f"/internal/team-kb/reviews/{review_id}/applied"]
+
+
+cards = server.cards
+REPLY = """好的，卡片如下：
+```
+=== 浮桥用例集.md ===
+功能名：浮桥
+一句话：同盟可建造和拆除的浮桥。
+简介：浮桥需要同盟才能建造。
+用例验证建造与拆除。
+测试关注点：
+- 建造：有同盟才能建造。
+- 拆除：拆除返还资源。
+关键词：浮桥、同盟、建造、拆除
+典型问题：
+- 浮桥建造需要什么条件？
+```
+以上。"""
+
+
+def test_card_input_is_masked_compact_and_p0_first():
+    title, summary = cards.card_input(normalize.normalize(TABLE + "| 浮桥 | 运维 | P2 | 无 | 登录 10.20.30.40 重启 | 正常 |  |  |\n",
+                                                          title_fallback="x", group="赛季组", owner="唐黎艳", extra_meta={})[0])
+    assert title == "浮桥 用例集"
+    assert "- 浮桥：建造、拆除、运维" in summary and "用例数：4" in summary
+    assert summary.index("[P0]") < summary.index("[P1]") < summary.index("[P2]")
+    assert "10.20.30.40" not in summary and "10.***40" in summary
+    assert cards.card_input("---\ntitle: \"README\"\n---\n| 预期结果 |\n|---|\n| x |\n") is None
+    assert cards.card_input("---\ntitle: \"说明\"\n---\n只有文字\n") is None
+
+
+def test_clean_card_rebuilds_layout_and_rejects_incomplete_replies():
+    card = cards.clean_card(REPLY, "浮桥 用例集")
+    assert card.startswith("功能名：浮桥 用例集\n一句话：同盟可建造和拆除的浮桥。\n简介：浮桥需要同盟才能建造。用例验证建造与拆除。\n")
+    assert "```" not in card and "===" not in card and "以上" not in card
+    assert card.endswith("典型问题：\n- 浮桥建造需要什么条件？\n")
+    assert cards.clean_card("功能名：浮桥\n一句话：x\n", "浮桥") is None
+    assert cards.clean_card("对不起，我无法处理", "浮桥") is None
+
+
+def test_card_ai_falls_back_to_the_next_model_and_reports_without_keys(tmp_path):
+    ai = cards.CardAI([{"model": "a", "api_key": "sk-secret", "base_url": "https://x"},
+                       {"model": "b", "api_key": "sk-secret", "base_url": "https://x"}])
+    replies = {"a": cards.CardError("HTTP 502"), "b": REPLY}
+
+    def fake_chat(model, summary):
+        reply = replies[model["model"]]
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+    ai._chat = fake_chat
+    assert ai.generate("浮桥", "摘要")[1] == "b"
+    replies["b"] = "不知道"
+    with pytest.raises(cards.CardError) as error:
+        ai.generate("浮桥", "摘要")
+    assert str(error.value) == "a: HTTP 502；b: 输出格式不符" and "sk-secret" not in str(error.value)
+
+    assert cards.CardAI.from_file(str(tmp_path / "none.json")) is None
+    (tmp_path / "ai.json").write_text(json.dumps({"models": [{"model": "m", "api_key": "", "base_url": "https://x"}]}), encoding="utf-8")
+    assert cards.CardAI.from_file(str(tmp_path / "ai.json")) is None
+
+
+class FakeAI:
+    def __init__(self, before_return=None):
+        self.calls, self.before_return = [], before_return
+
+    def generate(self, title, summary):
+        self.calls.append(summary)
+        if self.before_return:
+            self.before_return()
+        return cards.clean_card(REPLY, title), "fake-model"
+
+
+def test_upload_queues_an_ai_card_that_becomes_searchable(tmp_path):
+    kb = _kb(tmp_path)
+    kb.cards = server.CardWorker(kb, FakeAI())
+    queued = []
+    kb.cards.enqueue = queued.append  # run it by hand instead of in the thread
+    result = kb.upload({"uploader": "沈涛", "group": "赛季组", "owner": "唐黎艳",
+                        "files": [{"name": "浮桥用例集.md", "content": _b64(TABLE)}]})
+    assert queued == ["赛季组/唐黎艳/浮桥用例集.md"]
+    assert any("AI 在后台生成" in w for w in result["files"][0]["warnings"])
+    assert kb.index.search("同盟可建造")["features"] == []
+
+    assert kb.cards.process(queued[0]) == "written by fake-model"
+    assert (tmp_path / "cards/赛季组/唐黎艳/浮桥用例集.md").read_text(encoding="utf-8").startswith("功能名：浮桥 用例集\n")
+    assert kb.index.search("浮桥")["features"][0]["summary"] == "同盟可建造和拆除的浮桥。"
+    assert "> 同盟可建造和拆除的浮桥。" in (tmp_path / "site/赛季组/唐黎艳/浮桥用例集.md").read_text(encoding="utf-8")
+
+
+def test_card_is_dropped_when_the_case_changed_during_the_ai_call(tmp_path):
+    kb = _kb(tmp_path)
+    kb.upload({"uploader": "沈涛", "group": "赛季组", "owner": "唐黎艳",
+               "files": [{"name": "浮桥用例集.md", "content": _b64(TABLE)}]})
+    case = tmp_path / "cases/赛季组/唐黎艳/浮桥用例集.md"
+    worker = server.CardWorker(kb, FakeAI(before_return=lambda: case.write_text(case.read_text(encoding="utf-8") + "\n新内容\n", encoding="utf-8")))
+    assert worker.process("赛季组/唐黎艳/浮桥用例集.md").startswith("skipped: case changed")
+    assert not (tmp_path / "cards/赛季组/唐黎艳/浮桥用例集.md").exists()
+    assert worker.process("赛季组/唐黎艳/没有.md") == "skipped: case file gone"
 
 
 def test_search_ranks_full_matches_and_falls_back_to_partial_bigrams(tmp_path):
