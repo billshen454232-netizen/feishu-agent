@@ -282,3 +282,18 @@ def test_feedback_votes_and_the_unsatisfied_filter(tmp_path):
     assert store.count_records()["unsatisfied"] == 1
     store.set_feedback("om_a", "")
     assert store.list_records("unsatisfied", limit=10, offset=0)[1] == 0
+
+
+def test_stale_team_kb_archives_are_not_replayed_but_sent_as_outdated_references(tmp_path):
+    from src.team_kb_questions import TeamKbQuestionStore
+
+    store = _store(tmp_path)
+    store.record("om_kb", "浮桥之前是谁测的", "金阳", sources={"team_kb": [{"path": "赛季组/金阳/浮桥.md"}]},
+                 model="m", elapsed_ms=1, domain="team_kb")
+    store.add_archive(source_message_id="om_kb", canonical_question="浮桥之前是谁测的", answer="金阳测的", category="知识库",
+                      keywords="浮桥", scripts="", catalog_digest="", operator="me", domain="team_kb", now=1000)
+    features = TeamKbQuestionStore(tmp_path / "db.sqlite3")
+    features.initialize()
+    features.replace_features([{"path": "赛季组/金阳/浮桥.md", "updated_at": 5000}])
+    exact, similar = _service(tmp_path, FakeAI(), store=store).team_kb_lookup("浮桥之前是谁测的")
+    assert exact is None and similar[0]["stale"] is True and similar[0]["answer"] == "金阳测的"

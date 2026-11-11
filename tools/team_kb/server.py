@@ -73,6 +73,7 @@ class SearchIndex:
             features.append({
                 "path": rel, "title": title, "owner": meta.get("owner", ""), "group": rel.split("/")[0],
                 "cases": int(meta.get("case_count") or 0), "summary": one,
+                "_updated_at": _stamp_epoch(meta.get("uploaded_at", "")),
                 "_text": " ".join([title, keywords, one, " ".join(meta.get("modules") or []), meta.get("owner", "")]).lower(),
                 "_title": title.lower(),
             })
@@ -321,6 +322,14 @@ class KnowledgeBase:
             logger.error("git commit failed: %s", getattr(exc, "stderr", exc))
 
 
+def _stamp_epoch(stamp: str) -> int:
+    """``uploaded_at`` (``YYYYmmdd-HHMMSS``, Worker local time) as epoch seconds; 0 when missing."""
+    try:
+        return int(time.mktime(time.strptime(str(stamp), "%Y%m%d-%H%M%S")))
+    except (TypeError, ValueError):
+        return 0
+
+
 def _same_content(old: str, new: str) -> bool:
     strip = lambda text: re.sub(r"^uploaded_(by|at): .*\n", "", text, flags=re.M)  # noqa: E731
     return strip(old) == strip(new)
@@ -392,6 +401,8 @@ class GatewaySync(threading.Thread):
         super().__init__(name="team-kb-gateway-sync", daemon=True)
         self.kb, self.base_url, self.token, self.interval = kb, base_url.rstrip("/"), token, interval
         self._last_error = ""
+        self._features_digest = ""
+        self._features_warned = False
 
     def run(self) -> None:
         while True:
@@ -408,6 +419,17 @@ class GatewaySync(threading.Thread):
             time.sleep(self.interval)
 
     def sync_once(self) -> None:
+        features = [{"path": f["path"], "title": f["title"], "updated_at": f.get("_updated_at", 0)}
+                    for f in self.kb.index.features]
+        digest = hashlib.sha1(json.dumps(features, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+        if digest != self._features_digest:  # last upload time per feature: the Gateway flags archives built on old cases
+            try:
+                self._call("POST", "/internal/team-kb/features", {"items": features})
+                self._features_digest = digest
+            except RuntimeError as exc:  # an older Gateway without the endpoint must not stop reviews below
+                if not self._features_warned:
+                    logger.warning("feature times not reported (retrying each sync): %s", exc)
+                self._features_warned = True
         unreported = self.kb.unreported()
         if unreported:
             fields = ("id", "uploader", "group", "owner", "name", "path", "title", "cases", "hits", "uploaded_at", "view_url")

@@ -8,12 +8,15 @@ localhost) and the Host header must be a loopback name (blocks DNS rebinding).
 
 from __future__ import annotations
 
+import base64
 import logging
 import re
 import threading
+import time
 from typing import Any, Optional
+from urllib.parse import quote
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, PlainTextResponse
 
 from .access_auth import AccessDenied, CloudflareAccessVerifier
@@ -23,6 +26,7 @@ from .plan_page import PLAN_HTML
 from .threshold_page import THRESHOLDS_HTML
 from .routes_page import ROUTES_HTML
 from .execution_routes import ExecutionRouteStore, RouteError
+from . import qa_excel
 from .team_kb_reviews import REVIEW_PENDING, REVIEW_STATUSES, ReviewError, TeamKbReviewStore
 from .qa_library import (
     ARCHIVE_ACTIVE,
@@ -36,8 +40,11 @@ from .qa_library import (
     FIX_STATUSES,
     QA_ARCHIVED,
     QA_DISMISSED,
+    QA_IMPORTED,
     QA_LIST_FILTERS,
     QA_PENDING,
+    QA_UNSATISFIED,
+    TEAM_KB_CATEGORY,
     QA_STATUSES,
     QaService,
 )
@@ -504,10 +511,81 @@ def _add_qa_routes(app: FastAPI, qa: QaService) -> None:
         return {"feedback": vote}
 
     @app.post("/api/qa/{message_id}/dismiss")
-    async def dismiss(message_id: str) -> dict[str, str]:
+    async def dismiss(message_id: str, request: Request, payload: Optional[dict[str, Any]] = None) -> dict[str, str]:
+        """不归档; with ``{"correct": true}`` it is 「回答正确，不归档」 and also records a 👍."""
         record_or_404(message_id)
+        if (payload or {}).get("correct"):
+            qa_store.set_feedback(message_id, "up", user_id="admin", user_name=request.state.operator)
         qa_store.set_record_status(message_id, QA_DISMISSED)
         return {"status": QA_DISMISSED}
+
+    @app.get("/api/qa/export")
+    async def export_qa(status: str = QA_UNSATISFIED) -> Response:
+        """「不满意」 (or another list) as .xlsx for the askers to fill in 「正确回答」."""
+        if status not in QA_LIST_FILTERS:
+            raise HTTPException(status_code=400, detail="unknown status")
+        items, _ = qa_store.list_records(status, limit=qa_excel.MAX_ROWS, offset=0)
+        try:
+            data = qa_excel.export_records(items)
+        except qa_excel.QaExcelError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        name = "不满意问答-{}.xlsx".format(time.strftime("%Y%m%d"))
+        return Response(
+            data, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": "attachment; filename=qa.xlsx; filename*=UTF-8''{}".format(quote(name)),
+                     "Cache-Control": "no-store"},
+        )
+
+    @app.post("/api/qa/import")
+    async def import_qa(payload: dict[str, Any], request: Request) -> dict[str, Any]:
+        """Filled-in workbook (base64) → each 正确回答 becomes a 「待确认」 revision on its record."""
+        try:
+            data = base64.b64decode(str(payload.get("content") or ""), validate=True)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="文件内容读取失败") from exc
+        if not data or len(data) > 10 * 1024 * 1024:
+            raise HTTPException(status_code=400, detail="文件为空或超过 10 MB")
+        try:
+            filled, problems = qa_excel.parse_import(data)
+        except qa_excel.QaExcelError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        imported = 0
+        for row in filled:
+            record = qa_store.get_record(row["message_id"])
+            if record is None:
+                problems.append("第 {} 行编号不存在".format(row["row"]))
+                continue
+            if record["status"] in {QA_ARCHIVED, QA_DISMISSED}:
+                problems.append("第 {} 行已处理（{}），跳过".format(row["row"], "已归档" if record["status"] == QA_ARCHIVED else "不归档"))
+                continue
+            qa_store.import_answer(row["message_id"], row["answer"], filler=row["filler"], operator=request.state.operator)
+            imported += 1
+        logger.info("qa excel imported=%s problems=%s operator=%s", imported, len(problems), request.state.operator)
+        return {"imported": imported, "problems": problems[:50]}
+
+    @app.post("/api/qa/archive-imported")
+    async def archive_imported(request: Request) -> dict[str, int]:
+        """「全部归档」 for 待确认: archive each filled answer as is (标准问法 = the question; no AI draft)."""
+        items, _ = qa_store.list_records(QA_IMPORTED, limit=qa_excel.MAX_ROWS, offset=0)
+        archived = 0
+        for record in items:
+            team_kb = record.get("domain") == DOMAIN_TEAM_KB
+            features = ", ".join(s.get("title", "") for s in record.get("sources", {}).get("team_kb", []) if s.get("title"))
+            qa_store.add_archive(
+                source_message_id=record["message_id"],
+                canonical_question=record["question"][:300],
+                answer=record["revisions"][-1]["answer"] if record["revisions"] else record["answer"],
+                category=TEAM_KB_CATEGORY if team_kb else "通用",
+                keywords="",
+                scripts=features[:300] if team_kb else "",
+                catalog_digest="" if team_kb else qa.catalog_digest(),
+                operator=request.state.operator,
+                domain=DOMAIN_TEAM_KB if team_kb else DOMAIN_SCRIPT,
+            )
+            qa_store.set_record_status(record["message_id"], QA_ARCHIVED)
+            archived += 1
+        logger.info("qa imported answers archived=%s operator=%s", archived, request.state.operator)
+        return {"archived": archived}
 
     @app.post("/api/qa/{message_id}/restore")
     async def restore(message_id: str) -> dict[str, str]:
@@ -524,6 +602,7 @@ def _add_qa_routes(app: FastAPI, qa: QaService) -> None:
         digest = qa.catalog_digest()
         for item in items:
             item["stale"] = bool(digest and item.get("catalog_digest") and item["catalog_digest"] != digest)
+        qa_store.annotate_team_kb_stale(items)  # team-kb: a referenced feature was uploaded again
         return {"items": items, "total": total, "page": page, "page_size": page_size}
 
     @app.put("/api/qa-archive/{archive_id}")
@@ -897,6 +976,7 @@ const EMPTY = {
   "qa:retired": ["没有已下线的归档。", "下线的归档不再参与回答，可以随时恢复。"],
   "qa:dismissed": ["没有标记为不归档的问答。", ""],
   "qa:reused": ["还没有直接复用归档答案的问答。", "提问与归档的标准问法完全相同时，会直接回复归档答案。"],
+  "qa:imported": ["没有待确认的回答。", "在「不满意」导出 Excel，请提问人填写「正确回答」后导入，填好的回答会出现在这里。"],
   "qa:unsatisfied": ["没有不满意的问答。", "在飞书回答卡片上点「👎 没答对」，或在这里点「标记不满意」的问答会出现在这里，纠正并归档后移出。"],
   "docfix:pending": ["没有待处理的文档修正建议。", "纠正过的问答归档时，会为它引用过的资料生成修改建议。"],
   "docfix:accepted": ["没有已采纳、待回写的建议。", "采纳的建议由开发机回写到仓库，见下方说明。"],
@@ -906,7 +986,7 @@ const EMPTY = {
   "teamkb:approved": ["还没有通过的上传。", ""],
   "teamkb:rejected": ["还没有拒绝的上传。", ""],
 };
-const QA_FILTERS = [["pending", "待评审"], ["unsatisfied", "不满意"], ["correcting", "纠正中"], ["archive", "归档库"], ["retired", "已下线"], ["dismissed", "不归档"], ["reused", "直接复用"]];
+const QA_FILTERS = [["pending", "待评审"], ["unsatisfied", "不满意"], ["imported", "待确认"], ["correcting", "纠正中"], ["archive", "归档库"], ["retired", "已下线"], ["dismissed", "不归档"], ["reused", "直接复用"]];
 const FIX_FILTERS = [["pending", "待处理"], ["accepted", "已采纳"], ["applied", "已回写"], ["ignored", "已忽略"]];
 const KB_FILTERS = [["pending", "待审核"], ["approved", "已通过"], ["rejected", "已拒绝"]];
 const CATEGORIES = ["开服", "关服", "清档", "合服", "热更", "配置", "查询", "通用", "知识库"];
@@ -1077,9 +1157,22 @@ function emptyFor(key) {
 
 const secs = (ms) => ms ? `${(ms / 1000).toFixed(1)} 秒` : "";
 
+function qaToolbar(count) {
+  const importer = `<label class="btn">导入填好的 Excel<input type="file" class="qa-import" accept=".xlsx" hidden></label>`;
+  if (state.filter === "unsatisfied") {
+    return `<div class="row-actions qa-tools"><button class="btn primary" data-qa-tool="export" ${count ? "" : "disabled"}>导出 Excel（发给提问人填写正确回答）</button>${importer}</div>`;
+  }
+  if (state.filter === "imported") {
+    return `<div class="row-actions qa-tools"><button class="btn primary" data-qa-tool="archive-all" ${count ? "" : "disabled"}>全部归档（${count} 条）</button>${importer}
+      <span class="hint">全部归档直接用填写的回答、标准问法取原问题；想调整的先逐条「确认归档」。</span></div>`;
+  }
+  return "";
+}
+
 function renderQa(items) {
-  if (!items.length) { $("#content").innerHTML = emptyFor(`qa:${state.filter}`); return; }
-  $("#content").innerHTML = items.map((r) => {
+  const tools = qaToolbar(items.length);
+  if (!items.length) { $("#content").innerHTML = tools + emptyFor(`qa:${state.filter}`); return; }
+  $("#content").innerHTML = tools + items.map((r) => {
     const teamKb = r.domain === "team_kb";
     const sources = [
       ...(r.sources.archives || []).map((id) => `已审核问答 #${id}`),
@@ -1088,15 +1181,19 @@ function renderQa(items) {
     ];
     const revisions = (r.revisions || []).map((v) => `
       <div class="rev">
-        <div class="label">第 ${v.round} 轮纠正${v.operator ? `（${esc(v.operator)}）` : ""}</div>
+        <div class="label">${v.model === "excel-import" ? "Excel 导入" : `第 ${v.round} 轮纠正`}${v.operator ? `（${esc(v.operator)}）` : ""}</div>
         <blockquote>${esc(v.correction)}</blockquote>
-        <div class="label">AI 重新回答${v.model ? `：${esc(v.model)}，${secs(v.elapsed_ms)}` : ""}</div>
+        <div class="label">${v.model === "excel-import" ? "填写的正确回答" : `AI 重新回答${v.model ? `：${esc(v.model)}，${secs(v.elapsed_ms)}` : ""}`}</div>
         <div class="prose">${esc(v.answer)}</div>
       </div>`).join("");
     let actions = "";
     if (r.status === "pending") {
       actions = `<button class="btn primary" data-qa="draft">回答正确，去归档</button>
-        <button class="btn" data-qa="open-correct">回答错误</button>
+        <button class="btn" data-qa="dismiss-ok">回答正确，不归档</button>
+        <button class="btn" data-qa="open-correct">回答错误</button>`;
+    } else if (r.status === "imported") {
+      actions = `<button class="btn primary" data-qa="draft">确认归档</button>
+        <button class="btn" data-qa="open-correct">继续纠正</button>
         <button class="btn" data-qa="dismiss">不归档</button>`;
     } else if (r.status === "correcting") {
       actions = `<button class="btn primary" data-qa="draft">这次对了，去归档</button>
@@ -1177,7 +1274,8 @@ function renderArchive(items) {
           ${a.operator ? `<div><dt>归档人</dt><dd>${esc(a.operator)}</dd></div>` : ""}
         </dl>
         ${a.written_back ? '<span class="badge ok">资料已回写</span>' : ""}
-        ${a.stale ? '<span class="badge warn" title="执行注册表在归档后有变化，答案可能过时">注册表已变化，请复核</span>' : ""}
+        ${a.stale && a.domain === "team_kb" ? '<span class="badge warn" title="引用的功能在归档后重新上传过用例，答案可能过时；复核后点「保存修改」即可清除">用例已更新，请复核</span>' : ""}
+        ${a.stale && a.domain !== "team_kb" ? '<span class="badge warn" title="执行注册表在归档后有变化，答案可能过时">注册表已变化，请复核</span>' : ""}
       </div>
       <div class="form-grid">
         <label>标准问法</label><input class="a-question" value="${esc(a.canonical_question)}" maxlength="300">
@@ -1313,6 +1411,10 @@ async function qaAction(button) {
       toast(`已归档为问答 #${r.archive_id}` + (r.doc_fixes ? `，生成 ${r.doc_fixes} 条资料修改建议` : ""));
       invalidateQa(); return load();
     }
+    if (act === "dismiss-ok") {
+      await api("POST", `/api/qa/${encodeURIComponent(mid)}/dismiss`, { correct: true });
+      toast("已确认回答正确（记为 👍，不归档）"); invalidateQa(); return load();
+    }
     if (act === "mark-bad" || act === "unmark-bad") {
       await api("POST", `/api/qa/${encodeURIComponent(mid)}/feedback`, { vote: act === "mark-bad" ? "down" : "" });
       toast(act === "mark-bad" ? "已标记为不满意" : "已取消不满意"); invalidateQa(); return load();
@@ -1348,7 +1450,38 @@ async function qaAction(button) {
   } catch (err) { toast(`操作失败：${err.message}`, true); }
 }
 
+async function qaTool(button) {
+  if (button.dataset.qaTool === "export") { window.location.href = "/api/qa/export?status=unsatisfied"; return; }
+  if (button.dataset.qaTool === "archive-all") {
+    if (!confirm("把「待确认」里的回答全部归档？归档后同样的问题会直接用这些回答。")) return;
+    button.disabled = true;
+    try {
+      const r = await api("POST", "/api/qa/archive-imported");
+      toast(`已归档 ${r.archived} 条`); invalidateQa(); return load();
+    } catch (err) { toast(`归档失败：${err.message}`, true); button.disabled = false; }
+  }
+}
+
+async function qaImport(input) {
+  const file = input.files[0];
+  if (!file) return;
+  try {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    let bin = "";
+    for (let i = 0; i < bytes.length; i += 32768) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 32768));
+    const r = await api("POST", "/api/qa/import", { name: file.name, content: btoa(bin) });
+    const notes = r.problems.length ? `；${r.problems.length} 条未导入：${r.problems.slice(0, 3).join("；")}${r.problems.length > 3 ? "…" : ""}` : "";
+    toast(`已导入 ${r.imported} 条，到「待确认」查看${notes}`, r.problems.length > 0 && !r.imported);
+    invalidateQa(); state.filter = "imported"; state.page = 1; return load();
+  } catch (err) { toast(`导入失败：${err.message}`, true); }
+  finally { input.value = ""; }
+}
+
+$("#content").addEventListener("change", (e) => { if (e.target.matches(".qa-import")) qaImport(e.target); });
+
 $("#content").addEventListener("click", (e) => {
+  const tool = e.target.closest("[data-qa-tool]");
+  if (tool) { qaTool(tool); return; }
   const button = e.target.closest("button[data-qa]");
   if (button) qaAction(button);
   const kb = e.target.closest("button[data-kb]");

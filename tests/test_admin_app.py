@@ -382,3 +382,83 @@ def test_team_kb_record_archives_into_its_own_domain(tmp_path):
 def test_index_page_is_not_cached_by_the_browser(tmp_path):
     response = _client_with(create_admin_app(_store(tmp_path))).get("/")
     assert response.status_code == 200 and response.headers["cache-control"] == "no-cache"
+
+
+def _filled_workbook(rows):
+    import io
+
+    import openpyxl
+
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.append(["编号", "问题", "正确回答", "填写人"])
+    for row in rows:
+        sheet.append(row)
+    buffer = io.BytesIO()
+    workbook.save(buffer)
+    return buffer.getvalue()
+
+
+def test_unsatisfied_answers_round_trip_through_excel_and_archive_in_one_go(tmp_path):
+    import base64
+    import io
+
+    import openpyxl
+
+    client, qa_store, _ = _qa_client(tmp_path)
+    qa_store.record("om_kb", "浮桥谁测的", "金阳", sources={"team_kb": [{"title": "浮桥 用例集", "group": "赛季组", "owner": "金阳",
+                                                                      "path": "赛季组/金阳/浮桥用例集.md"}]},
+                    model="m", elapsed_ms=1, domain="team_kb")
+    qa_store.record("om_done", "已处理", "x", sources={}, model="m", elapsed_ms=1)
+    qa_store.set_record_status("om_done", "archived")
+    for mid in ("om_q", "om_kb"):
+        qa_store.set_feedback(mid, "down")
+
+    exported = client.get("/api/qa/export?status=unsatisfied")
+    assert exported.status_code == 200 and "filename*=UTF-8''" in exported.headers["content-disposition"]
+    sheet = openpyxl.load_workbook(io.BytesIO(exported.content)).active
+    rows = list(sheet.iter_rows(values_only=True))
+    assert rows[0][:5] == ("编号", "时间", "提问人", "类型", "问题") and rows[0][7:] == ("正确回答", "填写人")
+    assert {r[0]: r[3] for r in rows[1:]} == {"om_q": "脚本资料", "om_kb": "组内知识库"}
+
+    data = _filled_workbook([["om_kb", "浮桥谁测的", "唐黎艳测的", "张三"], ["om_q", "x", "", ""],
+                             ["om_done", "x", "迟到的回答", ""], ["om_nope", "x", "回答", ""]])
+    result = client.post("/api/qa/import", headers=HEADERS, json={"content": base64.b64encode(data).decode()}).json()
+    assert result["imported"] == 1 and result["problems"] == ["第 4 行已处理（已归档），跳过", "第 5 行编号不存在"]
+    pending = client.get("/api/qa?status=imported").json()["items"]
+    assert [r["message_id"] for r in pending] == ["om_kb"]
+    assert pending[0]["revisions"][-1]["answer"] == "唐黎艳测的" and pending[0]["revisions"][-1]["model"] == "excel-import"
+    assert client.get("/api/qa?status=unsatisfied").json()["total"] == 1  # om_q is still waiting for an answer
+
+    assert client.post("/api/qa/import", headers=HEADERS, json={"content": "bm90IGEgemlw"}).status_code == 400
+    assert client.post("/api/qa/archive-imported", headers=HEADERS).json() == {"archived": 1}
+    entry = qa_store.active_archive("team_kb")[0]
+    assert (entry["canonical_question"], entry["answer"], entry["category"], entry["scripts"]) == (
+        "浮桥谁测的", "唐黎艳测的", "知识库", "浮桥 用例集")
+    assert qa_store.get_record("om_kb")["status"] == "archived"
+
+
+def test_correct_answers_can_be_dismissed_with_a_thumbs_up(tmp_path):
+    client, qa_store, _ = _qa_client(tmp_path)
+    assert client.post("/api/qa/om_q/dismiss", headers=HEADERS, json={"correct": True}).json() == {"status": "dismissed"}
+    record = qa_store.get_record("om_q")
+    assert record["status"] == "dismissed" and record["feedback"] == "up"
+
+
+def test_team_kb_archive_is_flagged_after_its_feature_is_uploaded_again(tmp_path):
+    from src.team_kb_questions import TeamKbQuestionStore
+
+    client, qa_store, _ = _qa_client(tmp_path)
+    qa_store.record("om_kb", "浮桥谁测的", "金阳", sources={"team_kb": [{"title": "浮桥", "path": "赛季组/金阳/浮桥.md"}]},
+                    model="m", elapsed_ms=1, domain="team_kb")
+    archive_id = qa_store.add_archive(source_message_id="om_kb", canonical_question="浮桥谁测的", answer="金阳",
+                                      category="知识库", keywords="", scripts="", catalog_digest="", operator="me",
+                                      domain="team_kb", now=1000)
+    features = TeamKbQuestionStore(tmp_path / "db.sqlite3")
+    features.initialize()
+    features.replace_features([{"path": "赛季组/金阳/浮桥.md", "title": "浮桥", "updated_at": 999}])
+    assert client.get("/api/qa-archive?status=active").json()["items"][0]["stale"] is False
+    features.replace_features([{"path": "赛季组/金阳/浮桥.md", "title": "浮桥", "updated_at": 2000}])
+    assert client.get("/api/qa-archive?status=active").json()["items"][0]["stale"] is True
+    client.put("/api/qa-archive/{}".format(archive_id), headers=HEADERS, json={"answer": "金阳（已复核）"})
+    assert client.get("/api/qa-archive?status=active").json()["items"][0]["stale"] is False  # saving = reviewed

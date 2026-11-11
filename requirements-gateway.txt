@@ -1,3 +1,5 @@
 # Gateway only: Cloudflare Access JWT check for the public review page (src/access_auth.py).
 -r requirements.txt
 PyJWT[crypto]==2.10.1
+# Gateway only: Excel export/import of unsatisfied Q&A on the review page (src/qa_excel.py).
+openpyxl==3.1.5

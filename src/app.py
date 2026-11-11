@@ -503,6 +503,21 @@ def _add_gateway_worker_routes(
                 return {"items": []}
             await asyncio.sleep(TEAM_KB_POLL_SECONDS)
 
+    @app.post("/internal/team-kb/features", include_in_schema=False)
+    async def report_team_kb_features(
+        payload: dict[str, Any],
+        authorization: Optional[str] = Header(default=None),
+        x_feishu_worker_id: Optional[str] = Header(default=None),
+    ) -> dict[str, int]:
+        """Feature list with last upload times; an archive built on a re-uploaded feature is flagged for review."""
+        store = require_team_kb_questions(authorization, x_feishu_worker_id)
+        items = payload.get("items")
+        if not isinstance(items, list) or len(items) > 5000:
+            raise HTTPException(status_code=422, detail="items must be a list of at most 5000")
+        stored = store.replace_features([item for item in items if isinstance(item, dict)])
+        logger.warning("team kb features reported count=%s", stored)
+        return {"stored": stored}
+
     @app.post("/internal/team-kb/questions/{question_id}/answer", include_in_schema=False)
     async def answer_team_kb_question(
         question_id: str,

@@ -140,6 +140,8 @@ def test_gateway_sync_reports_once_and_applies_decisions(tmp_path):
     sync = server.GatewaySync(kb, "https://gateway.example", "token")
     sync._call = fake_call
     sync.sync_once()
+    assert calls[0][1] == "/internal/team-kb/features" and calls[0][2]["items"] == []  # nothing stored yet
+    calls.pop(0)
     reported = calls[0][2]["items"][0]
     assert calls[0][1] == "/internal/team-kb/reviews" and reported["id"] == review_id
     assert "summary" not in reported and "10.20.30.40" not in json.dumps(reported, ensure_ascii=False)
@@ -359,3 +361,38 @@ def test_reviewed_answers_lead_the_context_and_work_without_any_feature_hit(tmp_
     assert len(ai.calls) == 2 and result["sources"] == [] and "【功能" not in ai.calls[1]
     fallback = qa.answer("帮我重启5000服", index, FakeAnswerAI(error="down"), references=refs)
     assert fallback["text"].startswith("AI 暂时不可用，以下是最接近的已审核答案（问答 #7）") and "10.20.30.40" not in fallback["text"]
+
+
+def test_feature_upload_times_are_synced_and_stale_references_are_labelled(tmp_path):
+    kb = _kb(tmp_path)
+    kb.upload({"uploader": "沈涛", "group": "赛季组", "owner": "唐黎艳", "files": [{"name": "浮桥用例集.md", "content": _b64(TABLE)}]})
+    calls = []
+    sync = server.GatewaySync(kb, "https://gateway.example", "token")
+    sync._call = lambda method, path, payload=None: calls.append((path, payload)) or {}
+    sync.sync_once()
+    sync.sync_once()
+    features = [payload for path, payload in calls if path == "/internal/team-kb/features"]
+    assert len(features) == 1 and features[0]["items"][0]["path"] == "赛季组/唐黎艳/浮桥用例集.md"
+    assert features[0]["items"][0]["updated_at"] > 1_700_000_000  # the upload stamp, as epoch seconds
+    assert server._stamp_epoch("bad") == 0
+
+    text = qa.reference_context([{"id": 3, "question": "q", "answer": "a", "stale": True}, {"id": 4, "question": "q", "answer": "b"}])
+    assert "【已审核答案 #3（归档后相关用例又更新过，可能过时" in text and "【已审核答案 #4】" in text
+
+
+def test_an_old_gateway_without_the_feature_endpoint_does_not_block_reviews(tmp_path):
+    kb = _kb(tmp_path)
+    review_id = _held(kb)
+    calls = []
+
+    def fake_call(method, path, payload=None):
+        calls.append(path)
+        if path == "/internal/team-kb/features":
+            raise RuntimeError("POST /internal/team-kb/features -> HTTP 404")
+        return {}
+
+    sync = server.GatewaySync(kb, "https://gateway.example", "token")
+    sync._call = fake_call
+    sync.sync_once()
+    assert calls == ["/internal/team-kb/features", "/internal/team-kb/reviews", "/internal/team-kb/decisions"]
+    assert kb.unreported() == [] and review_id

@@ -1024,8 +1024,8 @@ class MessageJobProcessor:
                                     model="", elapsed_ms=0, status=QA_REUSED)
             self._append_conversation_log(job, "team_kb", reply, generation=generation)
             return
-        references = [{"id": item["archive_id"], "question": item["canonical_question"], "answer": item["answer"]}
-                      for item in similar]
+        references = [{"id": item["archive_id"], "question": item["canonical_question"], "answer": item["answer"],
+                       "stale": bool(item.get("stale"))} for item in similar]
         self._team_kb_questions.ask(message_id, job.chat_id, question, references=references)
         # The Gateway queue's part is done; a restart must not ask again (the answer is delivered by message id).
         self._store.mark_done(message_id)

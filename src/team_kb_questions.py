@@ -100,6 +100,10 @@ class TeamKbQuestionStore:
                 CREATE INDEX IF NOT EXISTS idx_team_kb_questions_status ON team_kb_questions (status, asked_at);
                 """
             )
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS team_kb_features (path TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '', "
+                "updated_at INTEGER NOT NULL DEFAULT 0)"
+            )
             columns = {row["name"] for row in conn.execute("PRAGMA table_info(team_kb_questions)")}
             if "references_json" not in columns:  # reviewed answers sent along with the question (§5.8)
                 conn.execute("ALTER TABLE team_kb_questions ADD COLUMN references_json TEXT NOT NULL DEFAULT '[]'")
@@ -112,7 +116,8 @@ class TeamKbQuestionStore:
         ``references`` are reviewed answers (``{id, question, answer}``) the team-kb answer must prefer.
         """
         timestamp = int(time.time()) if now is None else now
-        refs = [{"id": int(r["id"]), "question": str(r["question"])[:300], "answer": str(r["answer"])[:2000]}
+        refs = [{"id": int(r["id"]), "question": str(r["question"])[:300], "answer": str(r["answer"])[:2000],
+                 "stale": bool(r.get("stale"))}
                 for r in (references or [])[:MAX_REFERENCES]]
         with self._connect() as conn:
             cursor = conn.execute(
@@ -181,6 +186,23 @@ class TeamKbQuestionStore:
                     expired.append(row["question_id"])
             conn.commit()
         return [item for item in (self.get(question_id) for question_id in expired) if item]
+
+    def replace_features(self, items: list[dict[str, Any]]) -> int:
+        """The team-kb service's current feature list (path, title, last upload time), used to flag stale archives."""
+        rows = []
+        for item in items:
+            path = str(item.get("path") or "")[:300]
+            if path:
+                try:
+                    updated = max(0, int(item.get("updated_at") or 0))
+                except (TypeError, ValueError):
+                    updated = 0
+                rows.append((path, str(item.get("title") or "")[:200], updated))
+        with self._connect() as conn:
+            conn.execute("DELETE FROM team_kb_features")
+            conn.executemany("INSERT OR REPLACE INTO team_kb_features (path, title, updated_at) VALUES (?, ?, ?)", rows)
+            conn.commit()
+        return len(rows)
 
     def get(self, question_id: str) -> Optional[dict[str, Any]]:
         with self._connect() as conn:

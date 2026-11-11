@@ -173,7 +173,7 @@ async def test_reviewed_answers_are_reused_or_sent_along_and_new_answers_go_to_r
     store.create_if_new("om_2", "evt_2", "oc_1", "ou_1", "浮桥是谁测的", now=1000)
     await processor.process_one("om_2")
     claimed = questions.claim()
-    assert claimed[0]["references"] == [{"id": kb_id, "question": "浮桥之前是谁测的", "answer": "唐黎艳测的"}]
+    assert claimed[0]["references"] == [{"id": kb_id, "question": "浮桥之前是谁测的", "answer": "唐黎艳测的", "stale": False}]
 
     answer = parse_answer({**ANSWER, "text": "浮桥由唐黎艳测试（浮桥 用例集 · 唐黎艳）"})
     asked = questions.get("om_2")["asked_at"]

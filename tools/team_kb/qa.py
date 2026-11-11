@@ -202,7 +202,9 @@ def source(feature: Dict) -> Dict:
 def reference_context(references: List[Dict]) -> str:
     """Reviewed answers the Gateway sent along (admin-corrected 「补丁」, design §5.8)."""
     return normalize.mask_text("\n\n".join(
-        "【已审核答案 #{}】\n问：{}\n答：{}".format(r.get("id", ""), r.get("question", ""), r.get("answer", ""))
+        "【已审核答案 #{}{}】\n问：{}\n答：{}".format(
+            r.get("id", ""), "（归档后相关用例又更新过，可能过时：与下面的用例冲突时以用例为准）" if r.get("stale") else "",
+            r.get("question", ""), r.get("answer", ""))
         for r in references))[:3000]
 
 

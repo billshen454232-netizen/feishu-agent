@@ -34,7 +34,9 @@ QA_CORRECTING = "correcting"
 QA_ARCHIVED = "archived"
 QA_DISMISSED = "dismissed"
 QA_REUSED = "reused"
-QA_STATUSES = (QA_PENDING, QA_CORRECTING, QA_ARCHIVED, QA_DISMISSED, QA_REUSED)
+QA_IMPORTED = "imported"  # a correct answer filled in through the Excel round trip, waiting for the reviewer (§5.9-2)
+QA_STATUSES = (QA_PENDING, QA_CORRECTING, QA_ARCHIVED, QA_DISMISSED, QA_REUSED, QA_IMPORTED)
+EXCEL_IMPORT_MODEL = "excel-import"
 # Not a stored status: a 👎 (Feishu button or the review page) on an answer nobody has fixed yet.
 QA_UNSATISFIED = "unsatisfied"
 QA_LIST_FILTERS = QA_STATUSES + (QA_UNSATISFIED,)
@@ -260,6 +262,7 @@ class QaStore:
         model: str,
         elapsed_ms: int,
         operator: str,
+        status: str = QA_CORRECTING,
         now: int | None = None,
     ) -> int:
         with self._connect() as conn:
@@ -276,10 +279,35 @@ class QaStore:
             )
             conn.execute(
                 "UPDATE qa_records SET status = ?, reviewed_at = ? WHERE message_id = ?",
-                (QA_CORRECTING, _now(now), message_id),
+                (status, _now(now), message_id),
             )
             conn.commit()
         return round_number
+
+    def import_answer(self, message_id: str, answer: str, *, filler: str, operator: str, now: int | None = None) -> int:
+        """An asker's correct answer from the Excel round trip: a revision, the record waits as 「待确认」."""
+        note = "Excel 导入（填写人：{}）".format(filler or "未填写")
+        return self.add_revision(message_id, note, answer, model=EXCEL_IMPORT_MODEL, elapsed_ms=0, operator=operator,
+                                 status=QA_IMPORTED, now=now)
+
+    def team_kb_feature_times(self) -> dict[str, int]:
+        """Last upload time of every team-kb feature (path → epoch), reported by the team-kb service."""
+        with self._connect() as conn:
+            if not self._has_table(conn, "team_kb_features"):
+                return {}
+            return {row["path"]: int(row["updated_at"]) for row in conn.execute("SELECT path, updated_at FROM team_kb_features")}
+
+    def annotate_team_kb_stale(self, archives: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """``stale`` = a feature the archived answer was based on was uploaded again after the archive was last saved."""
+        times = self.team_kb_feature_times()
+        for item in archives:
+            if item.get("domain") != DOMAIN_TEAM_KB:
+                continue
+            record = self.get_record(item["source_message_id"]) if item.get("source_message_id") else None
+            paths = [s.get("path", "") for s in ((record or {}).get("sources") or {}).get("team_kb", [])]
+            newest = max((times.get(path, 0) for path in paths), default=0)
+            item["stale"] = newest > int(item.get("updated_at") or 0)
+        return archives
 
     def list_revisions(self, message_id: str) -> list[dict[str, Any]]:
         with self._connect() as conn:
@@ -742,7 +770,13 @@ class QaService:
         references the answer must prefer (the reviewer's patch takes effect immediately).
         """
         archive = self._safe_active_archive(DOMAIN_TEAM_KB)
-        exact = exact_archive(question, archive)
+        try:
+            self.store.annotate_team_kb_stale(archive)
+        except Exception:  # noqa: BLE001 - staleness is a hint; never break answering
+            logger.warning("team kb archive staleness unavailable", exc_info=True)
+        # A stale archive (its cases were uploaded again since) is never replayed verbatim; it only travels as a
+        # reference marked as possibly outdated.
+        exact = exact_archive(question, [item for item in archive if not item.get("stale")])
         if exact is not None:
             self._safe_hits([exact["archive_id"]])
             return exact, []
