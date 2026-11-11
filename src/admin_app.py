@@ -23,6 +23,7 @@ from .plan_page import PLAN_HTML
 from .threshold_page import THRESHOLDS_HTML
 from .routes_page import ROUTES_HTML
 from .execution_routes import ExecutionRouteStore, RouteError
+from .team_kb_reviews import REVIEW_PENDING, REVIEW_STATUSES, ReviewError, TeamKbReviewStore
 from .qa_library import (
     ARCHIVE_ACTIVE,
     ARCHIVE_STATUSES,
@@ -71,6 +72,7 @@ def create_admin_app(
     review_client: Any | None = None,
     route_store: ExecutionRouteStore | None = None,
     route_contracts: Any | None = None,
+    team_kb_reviews: TeamKbReviewStore | None = None,
 ) -> FastAPI:
     app = FastAPI(title="执行结果模板审批", docs_url=None, redoc_url=None, openapi_url=None)
 
@@ -126,6 +128,8 @@ def create_admin_app(
             result["qa"] = qa_service.store.count_records()
             result["qa_archive"] = qa_service.store.count_archive()
             result["doc_fixes"] = qa_service.store.count_doc_fixes()
+        if team_kb_reviews is not None:
+            result["team_kb_pending"] = team_kb_reviews.count_pending()
         return result
 
     @app.get("/api/patterns")
@@ -226,6 +230,30 @@ def create_admin_app(
 
     if qa_service is not None and qa_service.store is not None:
         _add_qa_routes(app, qa_service)
+
+    # Team knowledge base: uploads held for review on the intranet (masked hits only).
+    @app.get("/api/team-kb/reviews")
+    async def list_team_kb_reviews(status: str = REVIEW_PENDING, page: int = 1, page_size: int = 20) -> dict[str, Any]:
+        if team_kb_reviews is None:
+            raise HTTPException(status_code=404, detail="team kb reviews unavailable")
+        if status not in REVIEW_STATUSES:
+            raise HTTPException(status_code=400, detail="unknown status")
+        page, page_size = _paging(page, page_size)
+        items, total = team_kb_reviews.list_reviews(status, limit=page_size, offset=(page - 1) * page_size)
+        return {"items": items, "total": total, "page": page, "page_size": page_size}
+
+    @app.post("/api/team-kb/reviews/{review_id}/decision")
+    async def decide_team_kb_review(review_id: str, payload: dict[str, Any], request: Request) -> dict[str, Any]:
+        if team_kb_reviews is None:
+            raise HTTPException(status_code=404, detail="team kb reviews unavailable")
+        try:
+            result = team_kb_reviews.decide(review_id, str(payload.get("action") or ""), operator=request.state.operator,
+                                            note=str(payload.get("note") or ""))
+        except ReviewError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        logger.info("team kb review decided id=%s status=%s operator=%s", review_id, result["status"], request.state.operator)
+        return result
+
     if plan_store is not None:
         _add_plan_routes(app, plan_store)
     if threshold_store is not None:
@@ -805,6 +833,7 @@ _INDEX_HTML = r"""<!doctype html>
       <a href="#tab=executions" data-tab="executions">最近执行</a>
       <a href="#tab=qa" data-tab="qa">问答 <span class="count" id="n-qa">–</span></a>
       <a href="#tab=docfix" data-tab="docfix">文档修正 <span class="count" id="n-docfix">–</span></a>
+      <a href="#tab=teamkb" data-tab="teamkb">知识库审核 <span class="count" id="n-teamkb">–</span></a>
     </nav>
   </div>
 </header>
@@ -856,12 +885,17 @@ const EMPTY = {
   "docfix:accepted": ["没有已采纳、待回写的建议。", "采纳的建议由开发机回写到仓库，见下方说明。"],
   "docfix:applied": ["还没有已回写的建议。", ""],
   "docfix:ignored": ["没有已忽略的建议。", ""],
+  "teamkb:pending": ["没有待审核的上传。", "组内知识库上传的文件命中 IP、密码等规则时会在这里等你审核；全文只在内网可看。"],
+  "teamkb:approved": ["还没有通过的上传。", ""],
+  "teamkb:rejected": ["还没有拒绝的上传。", ""],
 };
 const QA_FILTERS = [["pending", "待评审"], ["correcting", "纠正中"], ["archive", "归档库"], ["retired", "已下线"], ["dismissed", "不归档"], ["reused", "直接复用"]];
 const FIX_FILTERS = [["pending", "待处理"], ["accepted", "已采纳"], ["applied", "已回写"], ["ignored", "已忽略"]];
+const KB_FILTERS = [["pending", "待审核"], ["approved", "已通过"], ["rejected", "已拒绝"]];
 const CATEGORIES = ["开服", "关服", "清档", "合服", "热更", "配置", "查询", "通用"];
-const TABS = ["candidate", "verified", "executions", "qa", "docfix"];
-const DEFAULT_FILTER = { qa: "pending", docfix: "pending" };
+const TABS = ["candidate", "verified", "executions", "qa", "docfix", "teamkb"];
+const DEFAULT_FILTER = { qa: "pending", docfix: "pending", teamkb: "pending" };
+const filtersFor = (tab) => tab === "qa" ? QA_FILTERS : tab === "docfix" ? FIX_FILTERS : tab === "teamkb" ? KB_FILTERS : null;
 
 const $ = (s) => document.querySelector(s);
 const esc = (t) => String(t ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -894,7 +928,7 @@ function readHash() {
   const params = new URLSearchParams(location.hash.slice(1));
   const tab = params.get("tab");
   state.tab = TABS.includes(tab) ? tab : "candidate";
-  const filters = state.tab === "qa" ? QA_FILTERS : state.tab === "docfix" ? FIX_FILTERS : [];
+  const filters = filtersFor(state.tab) || [];
   const filter = params.get("filter");
   state.filter = filters.some(([key]) => key === filter) ? filter : (DEFAULT_FILTER[state.tab] || "");
   state.page = Math.max(1, parseInt(params.get("page") || "1", 10) || 1);
@@ -954,6 +988,7 @@ async function load({ force = false } = {}) {
     $("#n-verified").textContent = summary.counts.verified;
     $("#n-qa").textContent = summary.qa ? summary.qa.pending : "–";
     $("#n-docfix").textContent = summary.doc_fixes ? summary.doc_fixes.pending : "–";
+    $("#n-teamkb").textContent = summary.team_kb_pending ?? "–";
     setMode(summary.read_success_mode);
     let entry = cached;
     if (!entry) {
@@ -973,6 +1008,9 @@ async function load({ force = false } = {}) {
     } else if (state.tab === "qa") {
       if (state.filter === "archive" || state.filter === "retired") renderArchive(entry.data.items); else renderQa(entry.data.items);
       $("#summary").textContent = `问答：${QA_FILTERS.find(([k]) => k === state.filter)[1]} ${total} 条`;
+    } else if (state.tab === "teamkb") {
+      renderTeamKb(entry.data.items);
+      $("#summary").textContent = `知识库审核：${KB_FILTERS.find(([k]) => k === state.filter)[1]} ${total} 条`;
     } else {
       renderDocFixes(entry.data.items);
       $("#summary").textContent = `文档修正：${FIX_FILTERS.find(([k]) => k === state.filter)[1]} ${total} 条`;
@@ -1002,11 +1040,12 @@ function listUrl() {
     if (state.filter === "retired") return `/api/qa-archive?status=retired&${paging}`;
     return `/api/qa?status=${state.filter}&${paging}`;
   }
+  if (state.tab === "teamkb") return `/api/team-kb/reviews?status=${state.filter}&${paging}`;
   return `/api/doc-fixes?status=${state.filter}&${paging}`;
 }
 
 function renderFilters() {
-  const filters = state.tab === "qa" ? QA_FILTERS : state.tab === "docfix" ? FIX_FILTERS : null;
+  const filters = filtersFor(state.tab);
   const box = $("#filters");
   box.hidden = !filters;
   if (!filters) return;
@@ -1158,6 +1197,50 @@ function renderDocFixes(items) {
   }).join("");
 }
 
+function renderTeamKb(items) {
+  if (!items.length) { $("#content").innerHTML = emptyFor(`teamkb:${state.filter}`); return; }
+  $("#content").innerHTML = items.map((r) => {
+    const hits = r.hits.map((h) => `<li><b>${esc(h.kind)}</b> 第 ${h.line} 行：<code>${esc(h.context)}</code></li>`).join("");
+    const applied = r.status === "pending" ? "" : r.applied_at
+      ? `<p class="hint">${r.apply_ok ? "已在内网处理" : "内网处理失败"}（${fmt(r.applied_at)}）${r.apply_message ? "：" + esc(r.apply_message) : ""}</p>`
+      : '<p class="hint">已决定，等待内网知识库同步（约 15 秒）</p>';
+    const decided = r.status === "pending" ? "" :
+      `<div><dt>审核</dt><dd>${esc(r.decided_by)} · ${fmt(r.decided_at)}${r.note ? " · " + esc(r.note) : ""}</dd></div>`;
+    const actions = r.status !== "pending" ? "" : `
+      <input class="kb-note" placeholder="备注（可选）" style="width:40%">
+      <button class="btn primary" data-kb="approve">通过并入库</button><button class="btn" data-kb="reject">拒绝</button>`;
+    return `
+    <article class="tpl" data-rid="${esc(r.review_id)}">
+      <div class="tpl-head">
+        <span class="script">${esc(r.target_path || r.file_name)}</span>
+        <span class="tag">${esc(r.group_name)}${r.owner ? " · " + esc(r.owner) : ""}</span>
+        <dl class="facts"><div><dt>上传人</dt><dd>${esc(r.uploader)}</dd></div>
+          <div><dt>上传于</dt><dd>${fmt(r.uploaded_at || r.received_at)}</dd></div>
+          <div><dt>用例</dt><dd>${r.cases} 条</dd></div>${decided}</dl>
+      </div>
+      <div class="label">命中的规则（命中值已部分打码）</div>
+      <ul class="lines">${hits}</ul>
+      ${r.view_url ? `<p><a href="${esc(r.view_url)}" target="_blank" rel="noopener noreferrer">内网查看全文 ↗</a>
+        <span class="hint">（只有连着公司内网才能打开）</span></p>` : ""}
+      ${applied}
+      ${actions ? `<div class="row-actions">${actions}</div>` : ""}
+    </article>`;
+  }).join("");
+}
+
+async function teamKbAction(button) {
+  const card = button.closest("article");
+  const action = button.dataset.kb;
+  if (action === "approve" && !confirm("确认这些命中内容可以入库？入库后组内所有人都能在知识库里看到。")) return;
+  button.disabled = true;
+  try {
+    await api("POST", `/api/team-kb/reviews/${encodeURIComponent(card.dataset.rid)}/decision`,
+      { action, note: card.querySelector(".kb-note").value.trim() });
+    toast(action === "approve" ? "已通过，内网知识库约 15 秒内入库" : "已拒绝");
+    invalidateAll(); return load();
+  } catch (err) { toast(`操作失败：${err.message}`, true); button.disabled = false; }
+}
+
 async function qaAction(button) {
   const act = button.dataset.qa;
   const card = button.closest("article");
@@ -1236,6 +1319,8 @@ async function qaAction(button) {
 $("#content").addEventListener("click", (e) => {
   const button = e.target.closest("button[data-qa]");
   if (button) qaAction(button);
+  const kb = e.target.closest("button[data-kb]");
+  if (kb) teamKbAction(kb);
 });
 $("#filters").addEventListener("click", (e) => {
   const chip = e.target.closest("button[data-filter]");

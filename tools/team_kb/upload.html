@@ -14,7 +14,7 @@
     button:disabled { background: #9ccfb6; cursor: wait; }
     table { border-collapse: collapse; width: 100%; margin-top: 18px; font-size: 13px; }
     th, td { border: 1px solid #e1e4e8; padding: 6px 8px; text-align: left; vertical-align: top; }
-    .added, .updated { color: #2e8b57; } .unchanged { color: #7f8c8d; } .rejected { color: #c0392b; }
+    .added, .updated { color: #2e8b57; } .unchanged { color: #7f8c8d; } .rejected { color: #c0392b; } .held { color: #d68910; }
     .rules { background: #f6f8fa; padding: 10px 14px; border-radius: 4px; font-size: 13px; line-height: 1.7; }
   </style>
 </head>
@@ -24,7 +24,7 @@
   <div class="rules">
     只接受 <b>.md</b>（Obsidian 整理的文档即可），一次最多 20 个、每个 3 MB 以内。<br>
     同一组别、同一测试、同名文件 = 更新旧版本（历史版本保留，可回滚）；不同测试写同一功能会并存。<br>
-    包含 IP、密码、token、手机号、数据库地址的文件会被拒绝，请屏蔽后再传。<br>
+    命中 IP、密码、token、手机号、数据库地址等规则的文件不会直接入库，会交给管理员审核，通过后自动入库。<br>
     用例表格会自动统一表头；Excel 合并单元格会向下填充，空分级记为「未分级」。
   </div>
   <form id="f">
@@ -55,7 +55,7 @@
         r.readAsArrayBuffer(file);   // raw bytes: the server detects UTF-8 / GBK
       });
     }
-    var LABEL = {added: '新增', updated: '已更新', unchanged: '无变化', rejected: '已拒绝'};
+    var LABEL = {added: '新增', updated: '已更新', unchanged: '无变化', rejected: '已拒绝', held: '待审核'};
     $('f').addEventListener('submit', function (e) {
       e.preventDefault();
       var uploader = $('uploader').value.trim();
@@ -68,7 +68,7 @@
         if (!d.ok) { $('out').innerHTML = '<p class="rejected">' + d.errors.map(esc).join('<br>') + '</p>'; return; }
         var html = '<table><tr><th>文件</th><th>结果</th><th>用例数</th><th>说明</th></tr>';
         d.files.forEach(function (f) {
-          var link = f.path && f.status !== 'rejected' ? '<br><a href="./#/' + encodeURI(f.path.replace(/\.md$/, '')) + '">查看</a>' : '';
+          var link = f.path && (f.status === 'added' || f.status === 'updated' || f.status === 'unchanged') ? '<br><a href="./#/' + encodeURI(f.path.replace(/\.md$/, '')) + '">查看</a>' : '';
           html += '<tr><td>' + esc(f.name) + link + '</td><td class="' + f.status + '">' + LABEL[f.status] + '</td><td>'
             + (f.cases != null ? f.cases + (f.unrated ? '（未分级 ' + f.unrated + '）' : '') : '') + '</td><td>'
             + (f.reasons || []).concat(f.warnings || []).map(esc).join('<br>') + '</td></tr>';

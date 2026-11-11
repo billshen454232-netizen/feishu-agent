@@ -4,7 +4,9 @@ Description=Team knowledge base search/upload service
 After=network.target
 
 [Service]
-ExecStart=/usr/bin/python3 /opt/team-kb/tools/server.py --root /opt/team-kb --port 8091
+# TEAM_KB_PUBLIC_URL（内网站点地址，给管理员的「内网查看全文」链接）写在 /opt/team-kb/team-kb.env，不进仓库
+EnvironmentFile=-/opt/team-kb/team-kb.env
+ExecStart=/usr/bin/python3 /opt/team-kb/tools/server.py --root /opt/team-kb --port 8091 --public-url=${TEAM_KB_PUBLIC_URL} --agent-config=/opt/feishu-agent/config/config.json
 WorkingDirectory=/opt/team-kb
 Restart=on-failure
 RestartSec=3

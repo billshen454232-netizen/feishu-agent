@@ -20,6 +20,7 @@ from .clear_notifier import ClearNotifier
 from .plan_board import PlanStore
 from .hotfix_thresholds import HotfixPlannerCatalog, ThresholdStore
 from .execution_routes import ExecutionRouteStore
+from .team_kb_reviews import ReviewError, TeamKbReviewStore, parse_review_item
 from .baye_check import (
     BayeCheckCoordinator,
     build_followup_card,
@@ -77,6 +78,8 @@ def create_app(config_path: str | Path = "config/config.json") -> FastAPI:
     executable_contracts = MuliuScriptCatalog(config.muliu.script_catalog_path).read_call_contracts()
     route_store = ExecutionRouteStore(config.job_queue.database_path)
     route_store.initialize()
+    team_kb_reviews = TeamKbReviewStore(config.job_queue.database_path)
+    team_kb_reviews.initialize()
     operation_planner = MuliuPlanner(
         ai_client=planning_ai_client,
         script_catalog=script_catalog,
@@ -185,6 +188,7 @@ def create_app(config_path: str | Path = "config/config.json") -> FastAPI:
                     review_client=create_ai_client(config.ai_for("interpretation")),
                     route_store=route_store,
                     route_contracts=executable_contracts,
+                    team_kb_reviews=team_kb_reviews,
                 ),
                 port=config.admin.port,
             )
@@ -212,7 +216,7 @@ def create_app(config_path: str | Path = "config/config.json") -> FastAPI:
     if config.runtime.role == "gateway":
         _add_gateway_worker_routes(
             app, config, job_store, job_processor, route_store, executable_contracts,
-            feishu_client=feishu_client, judge_ai_client=interpretation_ai_client,
+            feishu_client=feishu_client, judge_ai_client=interpretation_ai_client, team_kb_reviews=team_kb_reviews,
         )
 
     return app
@@ -289,6 +293,7 @@ def _add_gateway_worker_routes(
     *,
     feishu_client: Any = None,
     judge_ai_client: Any = None,
+    team_kb_reviews: Optional[TeamKbReviewStore] = None,
 ) -> None:
     """Expose a minimal authenticated pull protocol for the intranet worker."""
     delivered_followups: set[str] = set()
@@ -416,6 +421,52 @@ def _add_gateway_worker_routes(
             )
         except Exception:  # noqa: BLE001
             logger.exception("baye follow-up reply failed message_id=%s check_id=%s", message_id, followup["check_id"])
+
+    # Team knowledge base (intranet team-kb service): held uploads go to the admin page, decisions come back.
+    def require_team_kb(authorization: str | None, worker_id: str | None) -> TeamKbReviewStore:
+        require_worker(authorization, worker_id)
+        if team_kb_reviews is None:
+            raise HTTPException(status_code=503, detail="team kb reviews unavailable")
+        return team_kb_reviews
+
+    @app.post("/internal/team-kb/reviews", include_in_schema=False)
+    async def report_team_kb_reviews(
+        payload: dict[str, Any],
+        authorization: Optional[str] = Header(default=None),
+        x_feishu_worker_id: Optional[str] = Header(default=None),
+    ) -> dict[str, int]:
+        store = require_team_kb(authorization, x_feishu_worker_id)
+        raw_items = payload.get("items")
+        if not isinstance(raw_items, list) or len(raw_items) > 100:
+            raise HTTPException(status_code=422, detail="items must be a list of at most 100")
+        try:
+            items = [parse_review_item(raw) for raw in raw_items]
+        except ReviewError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        inserted = store.report(items)
+        if inserted:
+            logger.warning("team kb reviews reported inserted=%s", inserted)
+        return {"accepted": len(items), "inserted": inserted}
+
+    @app.get("/internal/team-kb/decisions", include_in_schema=False)
+    async def team_kb_decisions(
+        authorization: Optional[str] = Header(default=None),
+        x_feishu_worker_id: Optional[str] = Header(default=None),
+    ) -> dict[str, Any]:
+        return {"items": require_team_kb(authorization, x_feishu_worker_id).decisions_to_apply()}
+
+    @app.post("/internal/team-kb/reviews/{review_id}/applied", include_in_schema=False)
+    async def team_kb_applied(
+        review_id: str,
+        payload: dict[str, Any],
+        authorization: Optional[str] = Header(default=None),
+        x_feishu_worker_id: Optional[str] = Header(default=None),
+    ) -> dict[str, str]:
+        store = require_team_kb(authorization, x_feishu_worker_id)
+        if not store.mark_applied(review_id, ok=bool(payload.get("ok")), message=str(payload.get("message") or "")):
+            raise HTTPException(status_code=404, detail="review not found or not decided")
+        logger.warning("team kb review applied id=%s ok=%s", review_id, bool(payload.get("ok")))
+        return {"status": "ok"}
 
     @app.post("/internal/worker/jobs/{message_id}/followup", include_in_schema=False)
     async def worker_job_followup(

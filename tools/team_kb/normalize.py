@@ -55,6 +55,47 @@ def sensitive_hits(text: str) -> List[str]:
     return hits
 
 
+def _mask(value: str) -> str:
+    return value[:1] + "***" if len(value) <= 6 else value[:3] + "***" + value[-2:]
+
+
+def masked_hits(text: str, limit: int = 50) -> List[Dict]:
+    """Hits for the admin review: ``{kind, line, context}`` where every sensitive value in the line is masked.
+
+    Only these masked lines leave the intranet (to the Gateway admin page); the full file stays on the Worker.
+    """
+    hits: List[Dict] = []
+    for number, line in enumerate(text.splitlines(), 1):
+        spans = []
+        for kind, pattern in SENSITIVE.items():
+            for match in pattern.finditer(line):
+                if kind == "IP 地址" and all(int(part) < 10 for part in match.group(0).split(".")):
+                    continue
+                spans.append([match.start(), match.end(), kind])
+        if not spans:
+            continue
+        spans.sort()
+        merged = [spans[0]]
+        for span in spans[1:]:
+            if span[0] < merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], span[1])
+            else:
+                merged.append(span)
+        masked = line
+        for start, end, _ in reversed(merged):
+            masked = masked[:start] + _mask(masked[start:end]) + masked[end:]
+        masked = masked.strip()
+        first = masked.find("***")
+        if len(masked) > 120:
+            begin = max(0, first - 50)
+            masked = ("…" if begin else "") + masked[begin:begin + 120] + "…"
+        for kind in dict.fromkeys(span[2] for span in spans):
+            hits.append({"kind": kind, "line": number, "context": masked})
+            if len(hits) >= limit:
+                return hits
+    return hits
+
+
 def _is_case_header(header: List[str]) -> bool:
     names = {ALIASES.get(h) for h in header}
     return "预期结果" in names and bool(names & {"执行步骤", "前置条件", "测试项"})

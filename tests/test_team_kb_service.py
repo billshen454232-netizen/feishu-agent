@@ -1,5 +1,6 @@
 import base64
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -80,17 +81,70 @@ def test_upload_stores_rebuilds_and_becomes_searchable(tmp_path):
     assert again["files"][0]["status"] == "unchanged"
 
 
-def test_upload_rejects_bad_input_without_storing(tmp_path):
+def test_upload_rejects_bad_names_and_holds_sensitive_files_for_review(tmp_path):
     kb = _kb(tmp_path)
     assert kb.upload({"uploader": "", "group": "赛季组", "files": [{"name": "a.md", "content": _b64("x")}]})["ok"] is False
     result = kb.upload({"uploader": "沈涛", "group": "赛季组", "files": [
         {"name": "../evil.md", "content": _b64("x")},
         {"name": "a.txt", "content": _b64("x")},
-        {"name": "密码.md", "content": _b64("登录密码：hunter22")},
+        {"name": "密码.md", "content": _b64("# 登录\n登录密码：hunter22\n")},
     ]})
-    assert [f["status"] for f in result["files"]] == ["rejected"] * 3
-    assert "敏感信息" in result["files"][2]["reasons"][0] and "hunter22" not in result["files"][2]["reasons"][0]
+    assert [f["status"] for f in result["files"]] == ["rejected", "rejected", "held"]
+    held = result["files"][2]
+    assert "管理员审核" in held["warnings"][0] and "hunter22" not in json.dumps(result, ensure_ascii=False)
     assert list((tmp_path / "cases").rglob("*.md")) == []
+    meta = kb.unreported()[0]
+    assert meta["id"] == held["review_id"] and meta["hits"][0]["context"] == "登录密码：***22"
+    assert "hunter22" in kb.pending_text(held["review_id"])  # full text only through the intranet link
+
+
+def _held(kb):
+    result = kb.upload({"uploader": "沈涛", "group": "赛季组", "owner": "唐黎艳",
+                        "files": [{"name": "浮桥用例集.md", "content": _b64(TABLE + "测试服 10.20.30.40\n")}]})
+    return result["files"][0]["review_id"]
+
+
+def test_approved_review_is_stored_committed_and_searchable(tmp_path):
+    kb = _kb(tmp_path)
+    review_id = _held(kb)
+    assert kb.apply_decision({"id": review_id, "action": "approve", "operator": "boss"}) == (True, "已入库（新增）：赛季组/唐黎艳/浮桥用例集.md")
+    assert (tmp_path / "cases/赛季组/唐黎艳/浮桥用例集.md").is_file()
+    assert (tmp_path / "pending/_done" / review_id).is_dir() and kb.unreported() == []
+    assert kb.index.search("浮桥")["features"]
+    assert kb.apply_decision({"id": review_id, "action": "approve"}) == (True, "此前已处理")
+
+
+def test_rejected_review_is_archived_without_storing(tmp_path):
+    kb = _kb(tmp_path)
+    review_id = _held(kb)
+    assert kb.apply_decision({"id": review_id, "action": "reject"}) == (True, "已拒绝，未入库")
+    assert list((tmp_path / "cases").rglob("*.md")) == []
+    assert (tmp_path / "pending/_rejected" / review_id).is_dir()
+    assert kb.apply_decision({"id": "20990101-000000-00000000", "action": "approve"}) == (False, "内网找不到这个待审核文件")
+    assert kb.apply_decision({"id": "../../etc", "action": "approve"})[0] is False
+
+
+def test_gateway_sync_reports_once_and_applies_decisions(tmp_path):
+    kb = _kb(tmp_path)
+    review_id = _held(kb)
+    calls = []
+
+    def fake_call(method, path, payload=None):
+        calls.append((method, path, payload))
+        if path == "/internal/team-kb/decisions":
+            return {"items": [{"id": review_id, "action": "reject", "operator": "boss"}]}
+        return {}
+
+    sync = server.GatewaySync(kb, "https://gateway.example", "token")
+    sync._call = fake_call
+    sync.sync_once()
+    reported = calls[0][2]["items"][0]
+    assert calls[0][1] == "/internal/team-kb/reviews" and reported["id"] == review_id
+    assert "summary" not in reported and "10.20.30.40" not in json.dumps(reported, ensure_ascii=False)
+    assert calls[-1] == ("POST", f"/internal/team-kb/reviews/{review_id}/applied", {"ok": True, "message": "已拒绝，未入库"})
+    calls.clear()
+    sync.sync_once()
+    assert [c[1] for c in calls] == ["/internal/team-kb/decisions", f"/internal/team-kb/reviews/{review_id}/applied"]
 
 
 def test_search_ranks_full_matches_and_falls_back_to_partial_bigrams(tmp_path):

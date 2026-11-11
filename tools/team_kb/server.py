@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import logging
 import re
@@ -21,8 +22,10 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
+from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlparse
+from urllib.request import Request, urlopen
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import build_site  # noqa: E402
@@ -37,6 +40,8 @@ MAX_FILE_BYTES = 3 * 1024 * 1024
 MAX_FILES = 20
 MAX_BODY_BYTES = 45 * 1024 * 1024
 MAX_QUERY = 50
+REVIEW_ID = re.compile(r"[0-9]{8}-[0-9]{6}-[0-9a-f]{8}")
+SYNC_INTERVAL_SECONDS = 15
 
 
 class SearchIndex:
@@ -135,8 +140,9 @@ class SearchIndex:
 
 
 class KnowledgeBase:
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, public_url: str = "") -> None:
         self.root = root
+        self.public_url = public_url.rstrip("/")
         self.index = SearchIndex(root)
         self.lock = threading.Lock()
 
@@ -195,10 +201,6 @@ class KnowledgeBase:
             except UnicodeDecodeError:
                 result["reasons"].append("无法识别文件编码（请另存为 UTF-8）")
                 return result
-        hits = normalize.sensitive_hits(text)
-        if hits:
-            result["reasons"].append("包含敏感信息，请屏蔽后重新上传：" + "；".join(hits[:10]) + ("…" if len(hits) > 10 else ""))
-            return result
         rel = Path(group, owner, name) if group in ("系统组", "赛季组") or owner != uploader else Path(group, name)
         stored, summary = normalize.normalize(
             text, title_fallback=Path(name).stem, group=group, owner=owner,
@@ -209,22 +211,110 @@ class KnowledgeBase:
         if existed and _same_content(target.read_text(encoding="utf-8"), stored):
             result.update(status="unchanged", path=rel.as_posix(), cases=summary["cases"], title=summary["title"])
             return result
+        hits = normalize.masked_hits(text)
+        if hits:  # not a blanket rejection: the admin decides on the ops page (design §4.1)
+            review_id = self._hold(raw, name, rel, stored, summary, hits, uploader, group, owner)
+            where = "；".join("{} 第 {} 行".format(h["kind"], h["line"]) for h in hits[:5]) + ("…" if len(hits) > 5 else "")
+            result.update(status="held", path=rel.as_posix(), cases=summary["cases"], title=summary["title"], review_id=review_id,
+                          warnings=["命中 IP / 密码等规则（{}），已提交管理员审核，通过后自动入库".format(where)])
+            return result
+        result.update(path=rel.as_posix(), cases=summary["cases"], unrated=summary["unrated"], title=summary["title"],
+                      **self._write_case(rel, stored, summary))
+        written.append(rel.as_posix())
+        return result
+
+    def _write_case(self, rel: Path, stored: str, summary: Dict) -> Dict:
+        target = self.root / "cases" / rel
+        existed = target.is_file()
         target.parent.mkdir(parents=True, exist_ok=True)
         build_site.write(target, stored)
-        written.append(rel.as_posix())
-        warnings = list(summary["warnings"])
+        warnings = list(summary.get("warnings") or [])
         if (self.root / "cards" / rel).is_file():
             if existed:
                 warnings.append("摘要卡片仍是旧版本，用例已更新")
         else:
             warnings.append("暂无摘要卡片")
-        result.update(status="updated" if existed else "added", path=rel.as_posix(), cases=summary["cases"],
-                      unrated=summary["unrated"], title=summary["title"], warnings=warnings)
-        return result
+        return {"status": "updated" if existed else "added", "warnings": warnings}
 
-    def _git_commit(self, uploader: str, written: List[str]) -> None:
+    # ---- admin review of held files (design §4.1) -------------------------------------------------
+    def _hold(self, raw: bytes, name: str, rel: Path, stored: str, summary: Dict, hits: List[Dict],
+              uploader: str, group: str, owner: str) -> str:
+        review_id = "{}-{}".format(time.strftime("%Y%m%d-%H%M%S"), hashlib.sha1(raw).hexdigest()[:8])
+        box = self.root / "pending" / review_id
+        box.mkdir(parents=True, exist_ok=True)
+        (box / "raw.md").write_bytes(raw)
+        build_site.write(box / "stored.md", stored)
+        meta = {
+            "id": review_id, "uploader": uploader, "group": group, "owner": owner, "name": name, "path": rel.as_posix(),
+            "title": summary["title"], "cases": summary["cases"], "hits": hits, "uploaded_at": int(time.time()),
+            "view_url": "{}/api/pending/{}".format(self.public_url, review_id) if self.public_url else "",
+            "summary": summary, "reported": False,
+        }
+        build_site.write(box / "meta.json", json.dumps(meta, ensure_ascii=False, indent=1))
+        logger.warning("upload held for review id=%s uploader=%s path=%s hits=%s", review_id, uploader, rel, len(hits))
+        return review_id
+
+    def unreported(self) -> List[Dict]:
+        items = []
+        for meta_path in sorted((self.root / "pending").glob("*/meta.json")):
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            if not meta.get("reported"):
+                items.append(meta)
+        return items
+
+    def mark_reported(self, review_ids: List[str]) -> None:
+        with self.lock:
+            for review_id in review_ids:
+                meta_path = self.root / "pending" / review_id / "meta.json"
+                if meta_path.is_file():
+                    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                    meta["reported"] = True
+                    build_site.write(meta_path, json.dumps(meta, ensure_ascii=False, indent=1))
+
+    def apply_decision(self, decision: Dict) -> Tuple[bool, str]:
+        review_id = str(decision.get("id") or "")
+        if not REVIEW_ID.fullmatch(review_id):
+            return False, "无效的审核编号"
+        pending = self.root / "pending"
+        with self.lock:
+            if any((pending / done / review_id).is_dir() for done in ("_done", "_rejected")):
+                return True, "此前已处理"
+            box = pending / review_id
+            if not box.is_dir():
+                return False, "内网找不到这个待审核文件"
+            meta = json.loads((box / "meta.json").read_text(encoding="utf-8"))
+            if decision.get("action") == "approve":
+                rel = Path(meta["path"])
+                outcome = self._write_case(rel, (box / "stored.md").read_text(encoding="utf-8"), meta.get("summary") or {})
+                build_site.build(self.root)
+                self._git_commit(meta["uploader"], [meta["path"]], approved_by=str(decision.get("operator") or "管理员"))
+                self.index.load()
+                destination, message = "_done", "已入库（{}）：{}".format("更新" if outcome["status"] == "updated" else "新增", meta["path"])
+            else:
+                destination, message = "_rejected", "已拒绝，未入库"
+            (pending / destination).mkdir(exist_ok=True)
+            box.rename(pending / destination / review_id)
+        logger.warning("review applied id=%s action=%s", review_id, decision.get("action"))
+        return True, message
+
+    def pending_text(self, review_id: str) -> Optional[str]:
+        """Full text of a held file, for the admin's intranet-only link."""
+        if not REVIEW_ID.fullmatch(review_id):
+            return None
+        for folder in ("", "_done", "_rejected"):
+            raw_path = self.root / "pending" / folder / review_id / "raw.md"
+            if raw_path.is_file():
+                raw = raw_path.read_bytes()
+                try:
+                    return raw.decode("utf-8-sig")
+                except UnicodeDecodeError:
+                    return raw.decode("gb18030", errors="replace")
+        return None
+
+    def _git_commit(self, uploader: str, written: List[str], approved_by: str = "") -> None:
         author = "{} <{}@team-kb>".format(uploader, "upload")
-        message = "upload by {}: {}".format(uploader, ", ".join(written[:5]) + (" …" if len(written) > 5 else ""))
+        message = "upload by {}{}: {}".format(uploader, " (approved by {})".format(approved_by) if approved_by else "",
+                                             ", ".join(written[:5]) + (" …" if len(written) > 5 else ""))
         try:
             subprocess.run(["git", "add", "-A", "cases", "index.md"], cwd=self.root, check=True, capture_output=True)
             subprocess.run(["git", "-c", "user.name=team-kb", "-c", "user.email=team-kb@localhost", "commit", "-q",
@@ -257,6 +347,18 @@ class Handler(BaseHTTPRequestHandler):
         url = urlparse(self.path)
         if url.path == "/api/health":
             return self._json(200, {"ok": True, "features": len(self.kb.index.features), "rows": len(self.kb.index.rows)})
+        if url.path.startswith("/api/pending/"):
+            text = self.kb.pending_text(url.path[len("/api/pending/"):])
+            if text is None:
+                return self._json(404, {"error": "not found"})
+            body = text.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+            return None
         if url.path == "/api/search":
             query = (parse_qs(url.query).get("q") or [""])[0]
             started = time.perf_counter()
@@ -285,15 +387,79 @@ class Handler(BaseHTTPRequestHandler):
         return self._json(200, result)
 
 
+class GatewaySync(threading.Thread):
+    """Report held files to the Gateway admin page and apply the admin's decisions (Worker pulls; Gateway never calls in)."""
+
+    def __init__(self, kb: KnowledgeBase, base_url: str, token: str, interval: float = SYNC_INTERVAL_SECONDS) -> None:
+        super().__init__(name="team-kb-gateway-sync", daemon=True)
+        self.kb, self.base_url, self.token, self.interval = kb, base_url.rstrip("/"), token, interval
+        self._last_error = ""
+
+    def run(self) -> None:
+        while True:
+            try:
+                self.sync_once()
+                if self._last_error:
+                    logger.warning("gateway sync recovered")
+                self._last_error = ""
+            except Exception as exc:  # noqa: BLE001 - keep retrying; log each new kind of failure once
+                message = "{}: {}".format(type(exc).__name__, exc)
+                if message != self._last_error:
+                    logger.error("gateway sync failed: %s", message)
+                self._last_error = message
+            time.sleep(self.interval)
+
+    def sync_once(self) -> None:
+        unreported = self.kb.unreported()
+        if unreported:
+            fields = ("id", "uploader", "group", "owner", "name", "path", "title", "cases", "hits", "uploaded_at", "view_url")
+            self._call("POST", "/internal/team-kb/reviews", {"items": [{k: m.get(k) for k in fields} for m in unreported[:100]]})
+            self.kb.mark_reported([m["id"] for m in unreported[:100]])
+        for decision in self._call("GET", "/internal/team-kb/decisions").get("items", []):
+            ok, message = self.kb.apply_decision(decision)
+            self._call("POST", "/internal/team-kb/reviews/{}/applied".format(decision.get("id")), {"ok": ok, "message": message})
+
+    def _call(self, method: str, path: str, payload: Optional[Dict] = None) -> Dict:
+        request = Request(
+            self.base_url + path, method=method,
+            data=None if payload is None else json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            # Own User-Agent: Cloudflare rejects the default "Python-urllib/x.y" (error 1010).
+            headers={"Authorization": "Bearer " + self.token, "X-Feishu-Worker-Id": "team-kb",
+                     "Content-Type": "application/json", "User-Agent": "team-kb/1.0"},
+        )
+        try:
+            with urlopen(request, timeout=20) as response:
+                return json.loads(response.read().decode("utf-8") or "{}")
+        except HTTPError as exc:
+            raise RuntimeError("{} {} -> HTTP {}".format(method, path, exc.code)) from None
+        except URLError as exc:
+            raise RuntimeError("{} {} -> {}".format(method, path, exc.reason)) from None
+
+
+def _gateway_settings(agent_config: str) -> Optional[Tuple[str, str]]:
+    if not agent_config or not Path(agent_config).is_file():
+        return None
+    runtime = json.loads(Path(agent_config).read_text(encoding="utf-8")).get("runtime") or {}
+    base_url, token = str(runtime.get("gateway_base_url") or ""), str(runtime.get("worker_token") or "")
+    return (base_url, token) if base_url.startswith(("http://", "https://")) and token else None
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--root", required=True)
     parser.add_argument("--port", type=int, default=8091)
+    parser.add_argument("--public-url", default="", help="intranet base URL of the site, for the admin's full-text links")
+    parser.add_argument("--agent-config", default="", help="feishu-agent Worker config.json (gateway_base_url, worker_token)")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-    kb = KnowledgeBase(Path(args.root))
+    kb = KnowledgeBase(Path(args.root), public_url=args.public_url)
     kb.index.load()
     Handler.kb = kb
+    gateway = _gateway_settings(args.agent_config)
+    if gateway:
+        GatewaySync(kb, *gateway).start()
+    else:
+        logger.warning("gateway sync disabled: no --agent-config with runtime.gateway_base_url / worker_token")
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     logger.warning("team-kb service listening on 127.0.0.1:%s", args.port)
     server.serve_forever()
