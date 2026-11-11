@@ -178,6 +178,19 @@ def test_card_input_is_masked_compact_and_p0_first():
     assert cards.card_input("---\ntitle: \"说明\"\n---\n只有文字\n") is None
 
 
+def test_card_input_skips_spilled_rows_and_counts_rows_when_the_header_was_not_recognised():
+    spilled = TABLE + "| 2.停起服 | 数据存盘 |  |  |  | x |  |  |\n| （第4天中午12点前） | 初始状态 | ui |  | 点击 | y |  |  |\n"
+    _, summary = cards.card_input(normalize.normalize(spilled, title_fallback="x", group="赛季组", owner="a", extra_meta={})[0])
+    assert "停起服" not in summary and "第4天" not in summary and "- 浮桥：建造、拆除" in summary
+
+    odd = ('---\ntitle: "弱网"\ncase_count: 0\nlevels: {未分级: 2, 快速切换: 1}\n---\n| 模块 | 列B | 预期结果 |\n|---|---|---|\n'
+           '| 登录 | 切服 |  |\n| 登录 | 切服 | 正常切换服务器 |\n| 登录 | 切服 | 正常切换服务器 |\n')
+    _, summary = cards.card_input(odd)
+    assert "用例数：3" in summary and "分级：未分级 2\n" in summary and "- 登录\n" in summary
+    samples = summary.split("最多 8 条）\n")[1].splitlines()
+    assert samples == ["- [] 登录｜｜预期：正常切换服务器", "- [] 登录｜｜预期："]  # filled first, duplicates once
+
+
 def test_clean_card_rebuilds_layout_and_rejects_incomplete_replies():
     card = cards.clean_card(REPLY, "浮桥 用例集")
     assert card.startswith("功能名：浮桥 用例集\n一句话：同盟可建造和拆除的浮桥。\n简介：浮桥需要同盟才能建造。用例验证建造与拆除。\n")

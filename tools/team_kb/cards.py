@@ -66,7 +66,9 @@ def card_input(stored: str) -> Optional[Tuple[str, str]]:
     """``(title, masked summary for the AI)`` of a stored case file, or None when it needs no card."""
     meta, body = build_site.parse_frontmatter(stored)
     title = meta.get("title") or ""
-    records = list(normalize.case_records(body))
+    # Rows split off a multi-line Excel cell (「2.停起服」 in 模块) would fill the module tree with noise.
+    records = [r for r in normalize.case_records(body)
+               if not normalize.SPILL.match(r.get("模块") or "") and not normalize.SPILL.match(r.get("二级模块") or "")]
     if not title or not records or SKIP.search(title):
         return None
     modules: "OrderedDict[str, OrderedDict]" = OrderedDict()
@@ -74,11 +76,11 @@ def card_input(stored: str) -> Optional[Tuple[str, str]]:
         subs = modules.setdefault(record.get("模块") or "（未写模块）", OrderedDict())
         if record.get("二级模块"):
             subs[record["二级模块"]] = None
-    levels = meta.get("levels") or {}
+    levels = {k: v for k, v in (meta.get("levels") or {}).items() if k in normalize.LEVELS or k == "未分级"}
     lines = [
         "# 功能：" + title,
         "- 组别：{}；作者：{}；用例数：{}；分级：{}".format(
-            meta.get("group", ""), meta.get("owner") or "—", meta.get("case_count") or len(records),
+            meta.get("group", ""), meta.get("owner") or "—", int(meta.get("case_count") or 0) or len(records),
             "、".join("{} {}".format(k, v) for k, v in sorted(levels.items())) or "—"),
         "",
         "## 模块结构（模块：二级模块）",
@@ -87,10 +89,16 @@ def card_input(stored: str) -> Optional[Tuple[str, str]]:
         sub = "、".join(list(subs)[:12])
         lines.append("- {}：{}".format(module, sub) if sub else "- " + module)
     lines += ["", "## 用例样例（P0 优先，最多 {} 条）".format(MAX_SAMPLES)]
-    for record in sorted(records, key=lambda r: LEVEL_ORDER.get(r.get("分级", ""), 3))[:MAX_SAMPLES]:
-        item = record.get("测试项") or record.get("执行步骤") or ""
-        lines.append("- [{}] {}｜{}｜预期：{}".format(record.get("分级", ""), record.get("二级模块") or record.get("模块", ""),
-                                                   item[:80], record.get("预期结果", "")[:80]))
+    seen = set()
+    for record in sorted(records, key=lambda r: (LEVEL_ORDER.get(r.get("分级", ""), 3), not r.get("预期结果"))):
+        item = record.get("测试项") or record.get("执行步骤") or record.get("前置条件") or ""
+        line = "- [{}] {}｜{}｜预期：{}".format(record.get("分级", ""), record.get("二级模块") or record.get("模块", ""),
+                                              item[:80], record.get("预期结果", "")[:80])
+        if line not in seen:
+            seen.add(line)
+            lines.append(line)
+        if len(seen) >= MAX_SAMPLES:
+            break
     return title, normalize.mask_text("\n".join(lines))
 
 
