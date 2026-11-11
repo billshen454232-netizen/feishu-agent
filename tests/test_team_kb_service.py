@@ -205,7 +205,7 @@ def test_card_ai_falls_back_to_the_next_model_and_reports_without_keys(tmp_path)
                        {"model": "b", "api_key": "sk-secret", "base_url": "https://x"}])
     replies = {"a": cards.CardError("HTTP 502"), "b": REPLY}
 
-    def fake_chat(model, summary):
+    def fake_chat(model, summary, **_):
         reply = replies[model["model"]]
         if isinstance(reply, Exception):
             raise reply
@@ -269,3 +269,80 @@ def test_search_ranks_full_matches_and_falls_back_to_partial_bigrams(tmp_path):
     assert kb.index.search("提示需要同盟")["rows"][0]["expected"] == "提示需要同盟"
     assert kb.index.search("需要同盟了吗")["rows"]  # 60% of the bigrams match
     assert kb.index.search("完全无关的词")["rows"] == []
+
+
+QA_CARD = "功能名：浮桥 用例集\n一句话：同盟可建造和拆除的浮桥。\n简介：浮桥需要同盟才能建造。\n测试关注点：\n- 建造需要同盟\n关键词：浮桥、渡河、同盟建筑\n典型问题：\n- 浮桥建造需要什么条件？\n"
+OTHER = "# 亲卫队\n| 模块 | 二级 | 分级 | 测试项 | 预期结果 |\n|---|---|---|---|---|\n| 亲卫队 | 补兵 | P0 | 补兵额度用完 | 显示今日补兵额度已全部消耗 |\n| 亲卫队 | 服务器 | P1 | 连接 10.20.30.40 | 正常 |\n"
+
+
+def _qa_kb(tmp_path):
+    kb = _kb(tmp_path)
+    (tmp_path / "cards/赛季组/唐黎艳").mkdir(parents=True)
+    (tmp_path / "cards/赛季组/唐黎艳/浮桥用例集.md").write_text(QA_CARD, encoding="utf-8")
+    kb.upload({"uploader": "沈涛", "group": "赛季组", "owner": "唐黎艳",
+               "files": [{"name": "浮桥用例集.md", "content": _b64(TABLE)}]})
+    kb.apply_decision({"id": kb.upload({"uploader": "沈涛", "group": "系统组", "owner": "张宇杰",
+                                        "files": [{"name": "亲卫队.md", "content": _b64(OTHER)}]})["files"][0]["review_id"],
+                       "action": "approve"})
+    return kb
+
+
+class FakeAnswerAI:
+    def __init__(self, reply="浮桥建造需要有同盟（浮桥 用例集 · 唐黎艳）。服务器 10.20.30.40", error=None):
+        self.reply, self.error, self.calls = reply, error, []
+
+    def complete(self, system, user, max_tokens=800):
+        self.calls.append(user)
+        if self.error:
+            raise server.cards.CardError(self.error)
+        return self.reply, "fake-model"
+
+
+qa = server.qa
+
+
+def test_retrieval_finds_features_by_card_keywords_owners_and_misses_unrelated(tmp_path):
+    index = _qa_kb(tmp_path).index.qa
+    found = index.retrieve("渡河的同盟建筑之前有没有测过")
+    assert found["kind"] == "features" and found["features"][0]["title"] == "浮桥 用例集"
+    assert found["rows"][0]["item"] == "点击建造浮桥"  # P0 first when the question names no case
+    assert index.retrieve("补兵额度用完后界面显示什么")["rows"][0]["expected"] == "显示今日补兵额度已全部消耗"
+    owner = index.retrieve("张宇杰测过哪些功能")
+    assert owner["kind"] == "owner" and [f["title"] for f in owner["features"]] == ["亲卫队"]
+    assert index.retrieve("张宇杰的补兵额度")["kind"] == "features"
+    assert index.retrieve("帮我重启5000服")["kind"] == "none"
+    assert qa.evaluate(index)["top1"] == 1.0
+
+
+def test_answer_masks_context_and_reply_and_lists_used_sources(tmp_path):
+    index = _qa_kb(tmp_path).index.qa
+    ai = FakeAnswerAI()
+    result = qa.answer("亲卫队连接哪个服务器，浮桥呢", index, ai)
+    assert "10.20.30.40" not in ai.calls[0] and "10.***40" in ai.calls[0]
+    assert result["ok"] and result["model"] == "fake-model" and "10.20.30.40" not in result["text"]
+    assert [s["title"] for s in result["sources"]] == ["浮桥 用例集"]  # 亲卫队 was in the context but not used
+
+    owner = qa.answer("唐黎艳测过哪些", index, ai)
+    assert owner["text"] == "唐黎艳 在知识库里有 1 份用例：\n- 浮桥 用例集（赛季组，3 条）" and owner["sources"] == []
+    assert qa.answer("帮我重启5000服", index, ai)["text"] == qa.NOT_FOUND and len(ai.calls) == 1
+
+
+def test_answer_falls_back_to_the_feature_list_when_the_ai_fails(tmp_path):
+    index = _qa_kb(tmp_path).index.qa
+    result = qa.answer("浮桥建造条件", index, FakeAnswerAI(error="a: HTTP 502"))
+    assert result["ok"] and result["error"] == "a: HTTP 502"
+    assert result["text"].startswith("AI 暂时不可用") and "浮桥 用例集（赛季组 · 唐黎艳）：同盟可建造和拆除的浮桥。" in result["text"]
+
+
+def test_question_poller_answers_and_posts_back(tmp_path):
+    kb = _qa_kb(tmp_path)
+    kb.ai = FakeAnswerAI()
+    poller = server.QuestionPoller(kb, "https://gateway.example", "token")
+    calls = []
+    poller._call = lambda method, path, payload=None, timeout=20: calls.append((method, path, payload)) or {
+        "items": [{"id": "om_1", "text": "浮桥建造条件"}]}
+    assert poller.poll_once() == [{"id": "om_1", "text": "浮桥建造条件"}]
+    assert calls[0][:2] == ("GET", "/internal/team-kb/questions?wait=25")
+    poller.answer_one({"id": "om_1", "text": "浮桥建造条件"})
+    method, path, payload = calls[-1]
+    assert (method, path) == ("POST", "/internal/team-kb/questions/om_1/answer") and payload["ok"] and payload["sources"]

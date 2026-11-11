@@ -21,17 +21,19 @@ import subprocess
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 from urllib.request import Request, urlopen
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import build_site  # noqa: E402
 import cards  # noqa: E402
 import normalize  # noqa: E402
+import qa  # noqa: E402
 
 logger = logging.getLogger("team-kb")
 
@@ -53,9 +55,10 @@ class SearchIndex:
         self._root = root
         self.features: List[Dict] = []
         self.rows: List[Dict] = []
+        self.qa = qa.QAIndex([], [])
 
     def load(self) -> None:
-        features, rows = [], []
+        features, rows, qa_features = [], [], []
         cases, cards = self._root / "cases", self._root / "cards"
         for path in sorted(cases.rglob("*.md")):
             rel = path.relative_to(cases).as_posix()
@@ -73,8 +76,9 @@ class SearchIndex:
                 "_text": " ".join([title, keywords, one, " ".join(meta.get("modules") or []), meta.get("owner", "")]).lower(),
                 "_title": title.lower(),
             })
+            qa_features.append(dict(features[-1], card=card, modules=meta.get("modules") or []))
             rows.extend(self._rows(rel, title, meta.get("owner", ""), body))
-        self.features, self.rows = features, rows
+        self.features, self.rows, self.qa = features, rows, qa.QAIndex(qa_features, rows)
         logger.warning("search index loaded: %s features, %s rows", len(features), len(rows))
 
     @staticmethod
@@ -135,6 +139,7 @@ class KnowledgeBase:
         self.index = SearchIndex(root)
         self.lock = threading.Lock()
         self.cards: Optional["CardWorker"] = None  # set when an AI is configured
+        self.ai: Optional["cards.CardAI"] = None  # answers Feishu questions; None = list the best features only
 
     def upload(self, payload: Dict) -> Dict:
         uploader = str(payload.get("uploader") or "").strip()
@@ -413,20 +418,75 @@ class GatewaySync(threading.Thread):
             self._call("POST", "/internal/team-kb/reviews/{}/applied".format(decision.get("id")), {"ok": ok, "message": message})
 
     def _call(self, method: str, path: str, payload: Optional[Dict] = None) -> Dict:
-        request = Request(
-            self.base_url + path, method=method,
-            data=None if payload is None else json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-            # Own User-Agent: Cloudflare rejects the default "Python-urllib/x.y" (error 1010).
-            headers={"Authorization": "Bearer " + self.token, "X-Feishu-Worker-Id": "team-kb",
-                     "Content-Type": "application/json", "User-Agent": "team-kb/1.0"},
-        )
+        return gateway_request(self.base_url, self.token, method, path, payload)
+
+
+class QuestionPoller(threading.Thread):
+    """Long-polls the Gateway for Feishu questions (design §5.1) and answers them in a small thread pool."""
+
+    WAIT_SECONDS = 25
+
+    def __init__(self, kb: KnowledgeBase, base_url: str, token: str, workers: int = 3) -> None:
+        super().__init__(name="team-kb-questions", daemon=True)
+        self.kb, self.base_url, self.token = kb, base_url.rstrip("/"), token
+        self._pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="team-kb-answer")
+        self._last_error = ""
+
+    def run(self) -> None:
+        while True:
+            try:
+                for item in self.poll_once():
+                    self._pool.submit(self.answer_one, item)
+                if self._last_error:
+                    logger.warning("question polling recovered")
+                self._last_error = ""
+            except Exception as exc:  # noqa: BLE001 - keep polling; log each new kind of failure once
+                message = "{}: {}".format(type(exc).__name__, exc)
+                if message != self._last_error:
+                    logger.error("question polling failed: %s", message)
+                self._last_error = message
+                time.sleep(15 if "HTTP 404" in message else 5)
+
+    def poll_once(self) -> List[Dict]:
+        path = "/internal/team-kb/questions?wait={}".format(self.WAIT_SECONDS)
+        return list(self._call("GET", path, timeout=self.WAIT_SECONDS + 15).get("items") or [])
+
+    def answer_one(self, item: Dict) -> Dict:
+        question_id = str(item.get("id") or "")
         try:
-            with urlopen(request, timeout=20) as response:
-                return json.loads(response.read().decode("utf-8") or "{}")
-        except HTTPError as exc:
-            raise RuntimeError("{} {} -> HTTP {}".format(method, path, exc.code)) from None
-        except URLError as exc:
-            raise RuntimeError("{} {} -> {}".format(method, path, exc.reason)) from None
+            result = qa.answer(str(item.get("text") or ""), self.kb.index.qa, self.kb.ai)
+        except Exception as exc:  # noqa: BLE001 - the asker still gets a reply from the Gateway
+            logger.exception("question failed id=%s", question_id)
+            result = {"ok": False, "reason": type(exc).__name__, "text": "", "sources": []}
+        logger.warning("question answered id=%s ok=%s sources=%s model=%s ms=%s error=%s", question_id, result.get("ok"),
+                       [s.get("title") for s in result.get("sources") or []], result.get("model"),
+                       result.get("elapsed_ms"), result.get("error", ""))
+        try:
+            self._call("POST", "/internal/team-kb/questions/{}/answer".format(quote(question_id, safe="")), result)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("answer delivery failed id=%s: %s", question_id, exc)
+        return result
+
+    def _call(self, method: str, path: str, payload: Optional[Dict] = None, timeout: float = 20) -> Dict:
+        return gateway_request(self.base_url, self.token, method, path, payload, timeout=timeout)
+
+
+def gateway_request(base_url: str, token: str, method: str, path: str, payload: Optional[Dict] = None,
+                    timeout: float = 20) -> Dict:
+    request = Request(
+        base_url + path, method=method,
+        data=None if payload is None else json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        # Own User-Agent: Cloudflare rejects the default "Python-urllib/x.y" (error 1010).
+        headers={"Authorization": "Bearer " + token, "X-Feishu-Worker-Id": "team-kb",
+                 "Content-Type": "application/json", "User-Agent": "team-kb/1.0"},
+    )
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8") or "{}")
+    except HTTPError as exc:
+        raise RuntimeError("{} {} -> HTTP {}".format(method, path.split("?")[0], exc.code)) from None
+    except URLError as exc:
+        raise RuntimeError("{} {} -> {}".format(method, path.split("?")[0], exc.reason)) from None
 
 
 class CardWorker(threading.Thread):
@@ -507,11 +567,13 @@ def main() -> None:
     kb.index.load()
     Handler.kb = kb
     gateway = _gateway_settings(args.agent_config)
+    ai = cards.CardAI.from_file(args.ai_config)
+    kb.ai = ai
     if gateway:
         GatewaySync(kb, *gateway).start()
+        QuestionPoller(kb, *gateway).start()
     else:
-        logger.warning("gateway sync disabled: no --agent-config with runtime.gateway_base_url / worker_token")
-    ai = cards.CardAI.from_file(args.ai_config)
+        logger.warning("gateway sync and Feishu questions disabled: no --agent-config with runtime.gateway_base_url / worker_token")
     if ai:
         kb.cards = CardWorker(kb, ai)
         kb.cards.start()

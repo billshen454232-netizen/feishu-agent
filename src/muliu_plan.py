@@ -17,6 +17,8 @@ class MuliuPlanKind(str, Enum):
 
     OPERATION = "operation"
     KNOWLEDGE = "knowledge"
+    # A question about game features / test cases, answered by the intranet team knowledge base.
+    TEAM_KB = "team_kb"
     CLARIFY = "clarify"
     REJECT = "reject"
 
@@ -52,7 +54,7 @@ def parse_plan(
     """Parse exactly one bounded planner decision returned by the AI.
 
     ``operation`` is the only kind allowed to contain steps. ``knowledge`` answers
-    a capability or script question, while ``clarify`` and ``reject`` explain why a
+    a capability or script question, ``team_kb`` a game-feature / test-case question, while ``clarify`` and ``reject`` explain why a
     request cannot yet become a registered call. None of the non-operation forms can
     reach Muliu.
     """

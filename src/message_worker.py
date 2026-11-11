@@ -43,6 +43,7 @@ from .execution_report import (
 )
 from .qa_library import QA_PENDING, QA_REUSED, QaService
 from .server_environments import ServerEnvironments, ServerEnvironmentsError
+from .team_kb_questions import strip_prefix as strip_team_kb_prefix
 from .worker_protocol import parse_execution_result, serialize_execution_result
 
 logger = logging.getLogger(__name__)
@@ -117,8 +118,11 @@ class MessageJobProcessor:
         interpretation_ai_client: Any | None = None,
         clear_notifier: Any | None = None,
         qa_service: QaService | None = None,
+        team_kb_questions: Any | None = None,
     ) -> None:
         self._config = config
+        # Questions for the intranet team knowledge base wait here until the team-kb service answers (design §5).
+        self._team_kb_questions = team_kb_questions
         self._store = store
         self._conversations = conversations
         self._ai_client = ai_client
@@ -193,6 +197,10 @@ class MessageJobProcessor:
         self._schedule_background(self._remember_requester_name(job))
 
         try:
+            forced_question = strip_team_kb_prefix(job.text)
+            if forced_question is not None:  # 「问题 …」 always goes to the team knowledge base
+                await self._ask_team_kb(message_id, job, forced_question)
+                return
             if self._operation_planner is not None:
                 # Every script-related request reaches the same registry-aware AI
                 # decision. Keyword routing used to prevent registered calls such as
@@ -234,6 +242,9 @@ class MessageJobProcessor:
                             source_paths=source_paths,
                             generation=generation,
                         )
+                        return
+                    if plan.kind is MuliuPlanKind.TEAM_KB:
+                        await self._ask_team_kb(message_id, job, job.text, generation=generation)
                         return
                     if plan.kind is not MuliuPlanKind.OPERATION:
                         reply = format_rejection(plan.summary)
@@ -981,6 +992,38 @@ class MessageJobProcessor:
             bool(source_paths),
             reply,
             tuple(source_paths),
+        )
+
+    async def _ask_team_kb(
+        self,
+        message_id: str,
+        job: Any,
+        question: str,
+        *,
+        generation: MuliuPlanGeneration | None = None,
+    ) -> None:
+        """Hand the question to the team-kb service; the answer arrives later through deliver_team_kb_answer."""
+        if self._team_kb_questions is None or not question.strip():
+            reply = "📒 请在「问题」后面写上要问的内容，例如：问题 浮桥之前是谁测的" if self._team_kb_questions is not None else "📒 组内知识库问答未启用。"
+            await self._reply_and_finish(message_id, reply)
+            self._append_conversation_log(job, "team_kb_unavailable", reply, generation=generation)
+            return
+        self._team_kb_questions.ask(message_id, job.chat_id, question.strip())
+        # The Gateway queue's part is done; a restart must not ask again (the answer is delivered by message id).
+        self._store.mark_done(message_id)
+        logger.warning("team kb question queued message_id=%s chars=%s", message_id, len(question))
+
+    async def deliver_team_kb_answer(self, question: dict[str, Any], reply: str, *, kind: str = "team_kb") -> None:
+        """Reply under the asker's message with the team-kb answer (or the timeout notice) and log it."""
+        message_id = question["question_id"]
+        await self._feishu_client.reply_text(message_id, reply)
+        job = self._store.get(message_id)
+        if job is None:
+            return
+        self._conversations.append(job.chat_id, "user", job.text)
+        self._conversations.append(job.chat_id, "assistant", reply)
+        self._append_conversation_log(
+            job, kind, reply, source_paths=tuple(s.get("path", "") for s in question.get("sources") or []),
         )
 
     def _record_qa(self, job: Any, answer: Any) -> None:

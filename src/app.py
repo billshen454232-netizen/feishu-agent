@@ -4,6 +4,7 @@ import asyncio
 import hmac
 import logging
 import re
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, AsyncIterator, Optional
@@ -21,6 +22,7 @@ from .plan_board import PlanStore
 from .hotfix_thresholds import HotfixPlannerCatalog, ThresholdStore
 from .execution_routes import ExecutionRouteStore
 from .team_kb_reviews import ReviewError, TeamKbReviewStore, parse_review_item
+from .team_kb_questions import UNAVAILABLE_REPLY, QuestionError, TeamKbQuestionStore, format_reply, parse_answer
 from .baye_check import (
     BayeCheckCoordinator,
     build_followup_card,
@@ -80,6 +82,8 @@ def create_app(config_path: str | Path = "config/config.json") -> FastAPI:
     route_store.initialize()
     team_kb_reviews = TeamKbReviewStore(config.job_queue.database_path)
     team_kb_reviews.initialize()
+    team_kb_questions = TeamKbQuestionStore(config.job_queue.database_path)
+    team_kb_questions.initialize()
     operation_planner = MuliuPlanner(
         ai_client=planning_ai_client,
         script_catalog=script_catalog,
@@ -136,6 +140,8 @@ def create_app(config_path: str | Path = "config/config.json") -> FastAPI:
             store=qa_store,
             knowledge_root=config.script_knowledge.path,
         ),
+        # Only a Gateway has the intranet team-kb service pulling questions.
+        team_kb_questions=team_kb_questions if config.runtime.role == "gateway" else None,
     )
     event_handler = FeishuEventHandler(config, job_store, job_queue, job_processor=job_processor)
 
@@ -146,7 +152,9 @@ def create_app(config_path: str | Path = "config/config.json") -> FastAPI:
         for job in expired:
             logger.warning("job expired message_id=%s", job.message_id)
         lease_task: asyncio.Task[None] | None = None
+        team_kb_task: asyncio.Task[None] | None = None
         if config.runtime.role == "gateway":
+            team_kb_task = asyncio.create_task(_watch_team_kb_questions(team_kb_questions, job_processor))
             await _deliver_expired_worker_leases(
                 job_store,
                 job_processor,
@@ -198,9 +206,10 @@ def create_app(config_path: str | Path = "config/config.json") -> FastAPI:
         finally:
             if admin_server is not None:
                 admin_server.stop()
-            if lease_task is not None:
-                lease_task.cancel()
-                await asyncio.gather(lease_task, return_exceptions=True)
+            for task in (lease_task, team_kb_task):
+                if task is not None:
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
             await job_processor.stop()
 
     app = FastAPI(title="Feishu Muliu Server Operations Bot", lifespan=lifespan)
@@ -217,6 +226,7 @@ def create_app(config_path: str | Path = "config/config.json") -> FastAPI:
         _add_gateway_worker_routes(
             app, config, job_store, job_processor, route_store, executable_contracts,
             feishu_client=feishu_client, judge_ai_client=interpretation_ai_client, team_kb_reviews=team_kb_reviews,
+            team_kb_questions=team_kb_questions,
         )
 
     return app
@@ -294,6 +304,7 @@ def _add_gateway_worker_routes(
     feishu_client: Any = None,
     judge_ai_client: Any = None,
     team_kb_reviews: Optional[TeamKbReviewStore] = None,
+    team_kb_questions: Optional[TeamKbQuestionStore] = None,
 ) -> None:
     """Expose a minimal authenticated pull protocol for the intranet worker."""
     delivered_followups: set[str] = set()
@@ -468,6 +479,53 @@ def _add_gateway_worker_routes(
         logger.warning("team kb review applied id=%s ok=%s", review_id, bool(payload.get("ok")))
         return {"status": "ok"}
 
+    # Feishu questions for the team knowledge base: the team-kb service long-polls and answers (design §5).
+    def require_team_kb_questions(authorization: str | None, worker_id: str | None) -> TeamKbQuestionStore:
+        require_worker(authorization, worker_id)
+        if team_kb_questions is None:
+            raise HTTPException(status_code=503, detail="team kb questions unavailable")
+        return team_kb_questions
+
+    @app.get("/internal/team-kb/questions", include_in_schema=False)
+    async def claim_team_kb_questions(
+        wait: float = 0,
+        authorization: Optional[str] = Header(default=None),
+        x_feishu_worker_id: Optional[str] = Header(default=None),
+    ) -> dict[str, Any]:
+        store = require_team_kb_questions(authorization, x_feishu_worker_id)
+        deadline = time.monotonic() + max(0.0, min(wait, TEAM_KB_MAX_WAIT_SECONDS))
+        while True:
+            items = store.claim()
+            if items:
+                logger.warning("team kb questions claimed ids=%s", [item["id"] for item in items])
+                return {"items": items}
+            if time.monotonic() >= deadline:
+                return {"items": []}
+            await asyncio.sleep(TEAM_KB_POLL_SECONDS)
+
+    @app.post("/internal/team-kb/questions/{question_id}/answer", include_in_schema=False)
+    async def answer_team_kb_question(
+        question_id: str,
+        payload: dict[str, Any],
+        authorization: Optional[str] = Header(default=None),
+        x_feishu_worker_id: Optional[str] = Header(default=None),
+    ) -> dict[str, str]:
+        store = require_team_kb_questions(authorization, x_feishu_worker_id)
+        try:
+            answer = parse_answer(payload)
+        except QuestionError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        question = store.finish(question_id, answer)
+        if question is None:
+            raise HTTPException(status_code=404, detail="question not found, already answered or timed out")
+        logger.warning("team kb answer received id=%s ok=%s model=%s sources=%s error=%s", question_id, answer["ok"],
+                       answer["model"], [s["title"] for s in answer["sources"]], answer["error"])
+        try:
+            await job_processor.deliver_team_kb_answer(question, format_reply(answer))
+        except Exception:  # noqa: BLE001 - the answer is stored; only the Feishu reply failed
+            logger.exception("team kb answer reply failed id=%s", question_id)
+        return {"status": "ok"}
+
     @app.post("/internal/worker/jobs/{message_id}/followup", include_in_schema=False)
     async def worker_job_followup(
         message_id: str,
@@ -515,6 +573,32 @@ def _add_gateway_worker_routes(
             message_id, followup["check_id"], followup["status"], len(image_keys),
         )
         return {"status": "accepted"}
+
+
+TEAM_KB_MAX_WAIT_SECONDS = 25.0
+TEAM_KB_POLL_SECONDS = 0.5
+TEAM_KB_SWEEP_SECONDS = 10.0
+
+
+async def _watch_team_kb_questions(store: TeamKbQuestionStore, job_processor: MessageJobProcessor) -> None:
+    while True:
+        await asyncio.sleep(TEAM_KB_SWEEP_SECONDS)
+        await _deliver_expired_team_kb_questions(store, job_processor)
+
+
+async def _deliver_expired_team_kb_questions(store: TeamKbQuestionStore, job_processor: MessageJobProcessor) -> None:
+    """Tell askers when the intranet team-kb service did not pick up or answer their question in time."""
+    try:
+        expired = store.expire()
+    except Exception:  # noqa: BLE001 - keep the watcher alive
+        logger.exception("team kb question expiry failed")
+        return
+    for question in expired:
+        logger.warning("team kb question expired id=%s error=%s", question["question_id"], question["error"])
+        try:
+            await job_processor.deliver_team_kb_answer(question, UNAVAILABLE_REPLY, kind="team_kb_unavailable")
+        except Exception:  # noqa: BLE001
+            logger.exception("team kb timeout reply failed id=%s", question["question_id"])
 
 
 def _expire_worker_leases(job_store: MessageJobStore, lease_timeout_seconds: float) -> list[Any]:

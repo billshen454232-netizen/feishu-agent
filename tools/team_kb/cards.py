@@ -120,7 +120,7 @@ def clean_card(content: str, title: str) -> Optional[str]:
 
 
 class CardAI:
-    """OpenAI-compatible chat models tried in order; errors never contain the key."""
+    """OpenAI-compatible chat models from ai.json, tried in order (cards and Feishu answers); errors never contain the key."""
 
     def __init__(self, models: List[Dict], timeout: float = 120.0) -> None:
         self.models, self.timeout = models, timeout
@@ -133,6 +133,20 @@ class CardAI:
         models = [m for m in data.get("models") or [] if isinstance(m, dict) and m.get("api_key") and m.get("model")
                   and str(m.get("base_url") or "").startswith(("http://", "https://"))]
         return cls(models, float(data.get("timeout_seconds") or 120)) if models else None
+
+    def complete(self, system: str, user: str, max_tokens: int = 800) -> Tuple[str, str]:
+        """``(reply text, model name)`` from the first model that answers; raises CardError when none does."""
+        problems = []
+        for model in self.models:
+            try:
+                text = self._chat(model, user, system=system, max_tokens=max_tokens).strip()
+            except CardError as exc:
+                problems.append("{}: {}".format(model["model"], exc))
+                continue
+            if text:
+                return text, model["model"]
+            problems.append("{}: 空回复".format(model["model"]))
+        raise CardError("；".join(problems))
 
     def generate(self, title: str, summary: str) -> Tuple[str, str]:
         """``(card text, model name)``; raises CardError when every model fails."""
@@ -148,9 +162,9 @@ class CardAI:
             problems.append("{}: 输出格式不符".format(model["model"]))
         raise CardError("；".join(problems))
 
-    def _chat(self, model: Dict, summary: str) -> str:
-        payload = {"model": model["model"], "temperature": 0.2, "max_tokens": 1500,
-                   "messages": [{"role": "system", "content": PROMPT}, {"role": "user", "content": summary}]}
+    def _chat(self, model: Dict, user: str, system: str = PROMPT, max_tokens: int = 1500) -> str:
+        payload = {"model": model["model"], "temperature": 0.2, "max_tokens": max_tokens,
+                   "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]}
         request = Request(
             str(model["base_url"]).rstrip("/") + "/chat/completions", method="POST",
             data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),

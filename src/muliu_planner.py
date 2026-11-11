@@ -358,9 +358,10 @@ class MuliuPlanner:
 
 “执行调用合同”是闭合白名单：它明确登记了每个允许模式的自然语言、唯一脚本路径、唯一参数数组模板、变量格式、runner 和风险。你只能精确使用其中一个允许模式，且只能替换模板中声明的变量；绝不能依据相近词义、脚本名称、历史经验或原始脚本可能存在的其他分支自创脚本、参数、别名、位置参数或额外步骤。
 
-你必须为所有请求先判断是否已存在可执行能力，不能因为“为什么”“能否”“如何”“关”“开”“清”“重置”等词直接放弃匹配。输出只有四种受限结果：
+你必须为所有请求先判断是否已存在可执行能力，不能因为“为什么”“能否”“如何”“关”“开”“清”“重置”等词直接放弃匹配。输出只有五种受限结果：
 - `kind:"operation"`：用户请求的每个动作都能精确匹配一个已登记合同。可拆成多个顺序步骤，但步骤总数不能超过注册表上限；每一步必须独立完整匹配一个合同。不得编造脚本、参数或额外动作，也不得省略用户明确要求的动作。
 - `kind:"knowledge"`：用户在询问当前能力、用途、风险、参数或是否可执行，而不是请求现在执行。summary 应简洁、准确说明已登记能力或缺少的能力；`steps` 必须是空数组。
+- `kind:"team_kb"`：用户在问**游戏功能本身或测试用例**（组内测试用例知识库），例如某功能有什么规则、之前谁测过、测某功能要注意什么、有没有类似功能可参考、某个用例的预期结果。summary 写一句简短的检索问题；`steps` 必须是空数组。它与 knowledge 的区别：knowledge 只回答机器人 / 脚本 / 测试服操作的能力、用途、参数和风险。
 - `kind:"clarify"`：用户有执行意图但缺少一个必要信息，例如服号、赛季或剧本；summary 只说明需要补充什么；`steps` 必须是空数组。
 - `kind:"reject"`：任一必要动作无法由已登记合同安全完成；summary 应说明未登记的具体能力；`steps` 必须是空数组。
 
@@ -387,7 +388,7 @@ class MuliuPlanner:
 严格结构要求：
 - 根对象只允许 `kind`、`summary`、`steps` 和可选的 `route_scope` 四个字段；
 - `route_scope` 只能是 `cn` 或 `overseas`，只能用于明确声明范围路由的 `kind:"operation"`；
-- `kind` 只能是 `operation`、`knowledge`、`clarify` 或 `reject`；
+- `kind` 只能是 `operation`、`knowledge`、`team_kb`、`clarify` 或 `reject`；
 - `steps` 必须是 JSON 数组，即使只有一个步骤也必须写成 `"steps":[{...}]`，绝不能写成 `"steps":{...}`；
 - 仅 `kind:"operation"` 可含步骤，且必须至少一个；其他 kind 必须为 `"steps":[]`；
 - 每个步骤只允许 `path`、`args`、`description` 三个字段；
@@ -439,6 +440,7 @@ class MuliuPlanner:
 - 如果候选决策能直接满足原始请求，返回语义等价的决策；
 - 如果注册表有更合适的已登记调用模式，改为那个模式；
 - 如果用户询问能力、用途、风险、参数或“能否执行”，返回 `kind:"knowledge"` 和空步骤，summary 只说明当前已登记能力/风险或缺少能力；
+- 如果用户问的是游戏功能本身或测试用例（规则、谁测过、要注意什么、有没有类似功能、用例预期等），返回 `kind:"team_kb"` 和空步骤，summary 写简短的检索问题；
 - 如果用户想执行但缺少必要信息，返回 `kind:"clarify"` 和空步骤；
 - 如果任一必要动作没有已登记调用能完成，返回 `kind:"reject"` 和空步骤，并在 summary 简述缺少的能力；
 - 可以把用户明确要求的多个已登记动作拆成按顺序执行的多个步骤；任一脚本、参数或额外动作未登记时，必须拒绝整个组合，不得只保留其中一部分。
@@ -460,7 +462,7 @@ class MuliuPlanner:
 %s
 ---
 
-只返回一个 JSON 对象，禁止 Markdown、解释文字或代码围栏。根对象只允许 `kind`、`summary`、`steps` 和可选的 `route_scope`；kind 只能为 operation、knowledge、clarify、reject；`route_scope` 只能为 cn 或 overseas，且只能用于注册表明确声明的范围只读查询；每个步骤只允许 `path`、`args`、`description`；非空步骤必须精确匹配注册表的一个调用合同。
+只返回一个 JSON 对象，禁止 Markdown、解释文字或代码围栏。根对象只允许 `kind`、`summary`、`steps` 和可选的 `route_scope`；kind 只能为 operation、knowledge、team_kb、clarify、reject；`route_scope` 只能为 cn 或 overseas，且只能用于注册表明确声明的范围只读查询；每个步骤只允许 `path`、`args`、`description`；非空步骤必须精确匹配注册表的一个调用合同。
 """ % (user_text, candidate_json, script_catalog)
 
     @classmethod
@@ -521,6 +523,7 @@ class MuliuPlanner:
 - 如果用户把环境标签和服号连写，例如 `HMT5000`，应将 `HMT` 视为环境描述，将尾部数字 `5000` 作为服务器编号；环境标签只能出现在 summary 或 description，绝不能放入 args；
 - 只要用户请求的每个动作都可精确映射到已登记模式，就按用户要求的顺序生成一个或多个 operation 步骤，进入一次群内确认；
 - 询问能力、用途、风险、参数或“能否执行”时，应生成 knowledge 空步骤决策，不进入确认；
+- 询问游戏功能本身或测试用例（谁测过、要注意什么、有没有类似功能等）时，应生成 team_kb 空步骤决策；
 - 对注册表明确声明范围路由的只读查询，用户明确指定国服或海外时必须使用对应 `route_scope`；未指定范围时必须 `clarify`；`route_scope` 绝不能写入 `args`。
 - 不得自行创造未登记脚本、参数、别名或额外操作；任一必要动作无法匹配时，拒绝整个组合。
 
@@ -535,7 +538,7 @@ class MuliuPlanner:
 必须满足：
 - 根对象只允许 `kind`、`summary`、`steps` 和可选的 `route_scope`；
 - `route_scope` 只能为 `cn` 或 `overseas`，且仅能用于注册表明确声明的范围只读查询；
-- `kind` 只能为 `operation`、`knowledge`、`clarify`、`reject`；
+- `kind` 只能为 `operation`、`knowledge`、`team_kb`、`clarify`、`reject`；
 - `steps` 必须是数组；即使只有一个步骤，也必须是 `"steps":[{...}]`；
 - `kind:"operation"` 必须有至少一个精确匹配合同的步骤，且总步数不得超过注册表上限；其他 kind 必须为 `"steps":[]`；
 - 每个步骤只允许 `path`、`args`、`description`；

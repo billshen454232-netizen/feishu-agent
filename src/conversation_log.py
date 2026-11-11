@@ -122,6 +122,8 @@ class ConversationLog:
     def _display_kind(kind: str) -> str:
         return {
             "script_knowledge": "脚本资料问答",
+            "team_kb": "组内知识库问答",
+            "team_kb_unavailable": "组内知识库不可用",
             "knowledge_base": "本地知识库问答",
             "general_question": "机器人问答",
             "operation_plan": "执行计划生成",
