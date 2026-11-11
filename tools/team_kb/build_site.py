@@ -20,7 +20,7 @@ from pathlib import Path
 
 GROUP_ORDER = ["系统组", "赛季组", "国服"]
 CARD_FIELDS = ("功能名", "一句话", "简介", "测试关注点", "关键词", "典型问题")
-KEEP_IN_SITE = {"_assets", "index.html", ".nojekyll"}
+KEEP_IN_SITE = {"_assets", "index.html", "upload.html", ".nojekyll"}
 WIKILINK = re.compile(r"\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|([^\]]+))?\]\]")  # Obsidian [[page#heading|label]]
 
 

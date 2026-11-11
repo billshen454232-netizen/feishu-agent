@@ -9,21 +9,108 @@
     .markdown-section { max-width: 1400px; }
     .markdown-section table { display: table; width: 100%; font-size: 13px; }
     .markdown-section td, .markdown-section th { vertical-align: top; }
+    .kb-search { padding: 6px 15px 10px; }
+    .kb-search input { width: 100%; box-sizing: border-box; padding: 7px 10px; border: 1px solid #ccc; border-radius: 4px; font-size: 14px; }
+    .kb-search .kb-meta { color: #888; font-size: 12px; margin: 6px 0 2px; }
+    .kb-results a { display: block; padding: 6px 4px; border-bottom: 1px solid #eee; color: #34495e; font-size: 13px; line-height: 1.5; text-decoration: none; }
+    .kb-results a:hover { background: #f3f7fa; }
+    .kb-results .kb-title { font-weight: 600; }
+    .kb-results .kb-sub { color: #7f8c8d; font-size: 12px; }
+    .kb-results h4 { margin: 10px 0 2px; font-size: 12px; color: #42b983; }
+    .kb-results mark, .kb-hit td { background: #fff3a8; }
+    .kb-upload { display: block; margin: 0 15px 8px; padding: 6px; text-align: center; border: 1px solid #42b983; border-radius: 4px; color: #42b983; font-size: 13px; text-decoration: none; }
   </style>
 </head>
 <body>
   <div id="app">加载中…</div>
   <script>
+    // Server-side search (/api/search): the browser no longer downloads and scans every page.
+    function kbSearch(hook) {
+      var timer = null, last = '', seq = 0;
+      function esc(s) { return String(s || '').replace(/[&<>"']/g, function (c) { return {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]; }); }
+      function mark(s, terms) {
+        var out = esc(s);
+        (terms || []).forEach(function (t) {
+          if (!t) return;
+          var e = esc(t).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          out = out.replace(new RegExp(e, 'gi'), function (m) { return '<mark>' + m + '</mark>'; });
+        });
+        return out;
+      }
+      function href(path) { return '#/' + encodeURI(path.replace(/\.md$/, '')); }
+      hook.mounted(function () {
+        var sidebar = document.querySelector('.sidebar');
+        var box = document.createElement('div');
+        box.className = 'kb-search';
+        box.innerHTML = '<input type="search" placeholder="搜索功能、模块、用例（空格分隔多个词）"><div class="kb-meta"></div><div class="kb-results"></div>';
+        var upload = document.createElement('a');
+        upload.className = 'kb-upload'; upload.href = 'upload.html'; upload.textContent = '上传 / 更新资料';
+        var anchor = sidebar.querySelector('.app-name');
+        sidebar.insertBefore(upload, anchor ? anchor.nextSibling : sidebar.firstChild);
+        sidebar.insertBefore(box, upload.nextSibling);
+        var input = box.querySelector('input'), meta = box.querySelector('.kb-meta'), results = box.querySelector('.kb-results');
+        function nav(show) { var n = sidebar.querySelector('.sidebar-nav'); if (n) n.style.display = show ? '' : 'none'; }
+        function run() {
+          var q = input.value.trim();
+          if (q === last) return;
+          last = q;
+          if (!q) { results.innerHTML = ''; meta.textContent = ''; nav(true); return; }
+          var mine = ++seq;
+          fetch('/api/search?q=' + encodeURIComponent(q)).then(function (r) { return r.json(); }).then(function (d) {
+            if (mine !== seq) return;
+            var html = '';
+            if (d.features.length) {
+              html += '<h4>功能</h4>';
+              d.features.forEach(function (f) {
+                html += '<a href="' + href(f.path) + '"><span class="kb-title">' + mark(f.title, d.terms) + '</span>'
+                  + '<div class="kb-sub">' + esc(f.group) + (f.owner ? ' · ' + esc(f.owner) : '') + ' · ' + f.cases + ' 条' + (f.summary ? ' · ' + mark(f.summary, d.terms) : '') + '</div></a>';
+              });
+            }
+            if (d.rows.length) {
+              html += '<h4>用例（共 ' + d.row_total + ' 条匹配' + (d.row_total > d.rows.length ? '，显示前 ' + d.rows.length + ' 条' : '') + '）</h4>';
+              d.rows.forEach(function (r) {
+                html += '<a href="' + href(r.path) + '" data-find="' + esc(r.find) + '"><span class="kb-title">' + esc(r.title) + '</span>'
+                  + (r.level ? ' <span class="kb-sub">[' + esc(r.level) + ']</span>' : '')
+                  + '<div class="kb-sub">' + mark(r.module, d.terms) + '</div>'
+                  + '<div>' + mark(r.item, d.terms) + '</div>'
+                  + (r.expected ? '<div class="kb-sub">预期：' + mark(r.expected, d.terms) + '</div>' : '') + '</a>';
+              });
+            }
+            meta.textContent = (d.features.length || d.rows.length) ? '用时 ' + d.ms + ' ms' : '没有找到';
+            results.innerHTML = html;
+            nav(false);
+          }).catch(function () { meta.textContent = '搜索服务暂不可用'; });
+        }
+        input.addEventListener('input', function () { clearTimeout(timer); timer = setTimeout(run, 250); });
+        results.addEventListener('click', function (e) {
+          var a = e.target.closest('a');
+          if (a && a.dataset.find) sessionStorage.setItem('kb-find', a.dataset.find);
+        });
+      });
+      hook.doneEach(function () {
+        var find = sessionStorage.getItem('kb-find');
+        if (!find) return;
+        sessionStorage.removeItem('kb-find');
+        var cells = document.querySelectorAll('.markdown-section td');
+        for (var i = 0; i < cells.length; i++) {
+          if (cells[i].textContent.indexOf(find) >= 0) {
+            var row = cells[i].parentNode;
+            row.classList.add('kb-hit');
+            row.scrollIntoView({block: 'center'});
+            break;
+          }
+        }
+      });
+    }
     window.$docsify = {
       name: '组内项目知识库',
       loadSidebar: true,
       subMaxLevel: 0,
       auto2top: true,
-      search: { paths: 'auto', depth: 3, placeholder: '搜索功能、模块、用例', noData: '没有找到', maxAge: 600000 }
+      plugins: [kbSearch]
     };
   </script>
   <!-- docsify 4.13.1 (MIT), vendored under _assets: works without internet access from the browser -->
   <script src="_assets/docsify.min.js"></script>
-  <script src="_assets/search.min.js"></script>
 </body>
 </html>
