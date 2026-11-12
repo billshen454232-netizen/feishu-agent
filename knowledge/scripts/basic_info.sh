@@ -111,6 +111,11 @@ if [[ ${#positionals[@]} -gt 0 ]]; then
     [[ ${#positionals[@]} -le 2 ]] || die "位置参数过多（使用 -h 查看帮助）"
     server_id=${positionals[0]}
     user_id=${positionals[1]:-}
+    # 旧用法 basic_info.sh <服务器ID> ctime：第二个参数是查询方法，不是玩家 ID（机器人注册表也这样调用）。
+    if [[ $user_id == ctime ]]; then
+        method=ctime
+        user_id=""
+    fi
 fi
 
 validate_server_id() {
