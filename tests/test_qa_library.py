@@ -251,6 +251,19 @@ def test_team_kb_lookup_returns_the_identical_question_or_similar_references(tmp
     assert store.get_archive(kb_id)["hit_count"] == 2
 
 
+def test_exact_reuse_also_matches_the_original_question_when_the_canonical_one_was_rewritten(tmp_path):
+    store = _store(tmp_path)
+    store.record("om_kb", "安全锁是什么功能 在哪打开", "AI 回答", sources={"team_kb": [{"title": "安全锁"}]}, model="m",
+                 elapsed_ms=5, domain="team_kb")
+    kb_id = store.add_archive(source_message_id="om_kb", canonical_question="安全锁功能的位置、开启方式及忘记密码处理流程",
+                              answer="安全锁在个人信息-设置-隐私-安全锁页签", category="知识库", keywords="安全锁", scripts="安全锁",
+                              catalog_digest="", operator="me", domain="team_kb")
+    service = _service(tmp_path, FakeAI(), store=store)
+    assert service.team_kb_lookup("安全锁是什么功能，在哪打开？")[0]["archive_id"] == kb_id
+    assert service.team_kb_lookup("安全锁功能的位置、开启方式及忘记密码处理流程")[0]["archive_id"] == kb_id
+    assert service.team_kb_lookup("安全锁忘记密码怎么办")[0] is None
+
+
 @pytest.mark.asyncio
 async def test_team_kb_correction_and_archive_draft_use_their_own_prompts(tmp_path):
     ai = FakeAI(["修正后：浮桥是唐黎艳测的", '{"canonical_question": "浮桥由谁测试", "keywords": ["浮桥", "测试人"]}'])

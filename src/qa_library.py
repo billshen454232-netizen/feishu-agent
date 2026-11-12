@@ -366,9 +366,12 @@ class QaStore:
         return dict(row) if row else None
 
     def active_archive(self, domain: str = DOMAIN_SCRIPT) -> list[dict[str, Any]]:
+        """Active archives of one domain; ``source_question`` is the asker's original wording (exact reuse matches it)."""
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT * FROM qa_archive WHERE status = ? AND domain = ?", (ARCHIVE_ACTIVE, domain)
+                "SELECT a.*, r.question AS source_question FROM qa_archive a "
+                "LEFT JOIN qa_records r ON r.message_id = a.source_message_id "
+                "WHERE a.status = ? AND a.domain = ?", (ARCHIVE_ACTIVE, domain)
             ).fetchall()
         return [dict(row) for row in rows]
 
@@ -581,8 +584,9 @@ def exact_archive(question: str, archive: list[dict[str, Any]]) -> dict[str, Any
     normalized = text_match.normalize(question)
     if not normalized:
         return None
-    for item in archive:
-        if text_match.normalize(item.get("canonical_question", "")) == normalized:
+    for item in archive:  # the reviewer's 标准问法 or the original question the archive was built from
+        if normalized in (text_match.normalize(item.get("canonical_question", "")),
+                          text_match.normalize(item.get("source_question") or "")):
             return item
     return None
 
