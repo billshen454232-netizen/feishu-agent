@@ -196,6 +196,18 @@ Excel 原件转换器（处理合并单元格、单元格内换行）是后续�
    - 自动生效（用户选择），同时生成合并报告（运维页 + 飞书通知管理员）；回滚 = revert 该提交 + 归档恢复为有效；
    - 没有涉及功能的补丁保留为补丁。
 
+### 5.10 Jenkins Excel → TAPD 任务的 AI 测试建议（2026-11-13 确认）
+
+目标：`excel_to_tapdTask` 将 Excel 行转换成 TAPD 任务时，结合组内知识库自动生成**测试重点与测试环境准备建议**，追加在任务描述末尾；不自动执行服务器操作，也不替换人工填写的测试说明。
+
+- **输入**：Excel 每个需要新建任务的「主题、测试说明、跟踪、组别、更新类型、是否需要全用例回归」。目前不另行获取 TAPD 需求正文；如果后续需要可独立增加需求详情获取。
+- **Worker 本地接口**：team-kb 新增 `POST http://127.0.0.1:8091/internal/advise`，从 `QAIndex.retrieve` 取前 3 个相关功能与代表用例，复用现有 `CardAI`、AI 打码与来源标记；返回 `{ok, hit, text, sources, model, elapsed_ms}`。nginx 仅代理 `/api/`，`/internal/` 不暴露给 8090 浏览站。
+- **建议内容**：相关历史功能（功能名和测试人）、测试重点/回归与边界、测试环境准备（服务器/赛季/账号/数据）。没有可信关联时输出「知识库无相似功能」，不生造历史资料；更改服务器时间、开服、清档等高影响操作仅在资料明确要求时建议，并提示审批。
+- **Excel 转换器**：`D:/PyPrograms/excel_to_tapd/script/excel_to_tapd_sig.py`，跳过已有单号任务；开启 AI 后对新任务最多 3 个并发取建议，追加 `【AI 测试建议】组内知识库生成，仅供参考` 的 HTML（转义 AI 文本），失败只记录「建议生成失败」且继续建任务。**开关 `TEAM_KB_ADVICE` 默认关闭**；只有设为 `true` / `1` / `yes` / `on` 才启用，未开启则完全跳过 AI 调用和附加段落，照常创建 TAPD 任务。
+- **Jenkins 构建页开关（待部署配置）**：现有 `excel_to_tapdTask` 使用 Jenkins 内嵌 Pipeline，只有 `story_id` 字符串参数；需要为 Pipeline 新增 `booleanParam(name: 'TEAM_KB_ADVICE', defaultValue: false, description: '启用组内知识库 AI 测试建议')`，并**保留** `string(name: 'story_id', ..., description: '需求ID')`，否则会把现有需求 ID 参数覆盖掉。勾选一次只对当次构建生效，下次可取消；不勾选时不产生 AI 请求。生产 Jenkins job 配置尚未修改。
+- **部署约束**：Jenkins 在 Worker 以 Python 3.9 运行（已有依赖）；Worker 服务需先部署接口并重启，再由 Jenkins 构建脚本使用。部署前先模拟测试，不能对真实 TAPD 建任务。当前仅本地修改与 Worker `/tmp/teamkb-try` 模拟，**尚未上线**。
+- **验证（2026-11-14）**：Worker 模拟真实 Excel 前 5 行生成 5 个描述，3 条有建议、2 条无相似功能、0 失败，所有 TAPD 请求已 mock；team-kb 全量测试 729 通过/3 跳过；Excel 转换器专项测试 3 通过。
+
 ## 6. 浏览与搜索（内网）
 
 - nginx 8090：根目录 `/opt/team-kb/site`（docsify 4.13.1，资源随站点存放，不依赖外网）；`/api/` 转发到 team-kb 服务。

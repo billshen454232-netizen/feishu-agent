@@ -7,6 +7,7 @@ a masked context. Questions naming a tester list that tester's features without 
 
     qa.py --root /opt/team-kb --eval                       # retrieval hit rate on the cards' 典型问题
     qa.py --root /opt/team-kb --ask "亲卫队是谁测的" [--ai-config /opt/team-kb/ai.json]
+    qa.py --root /opt/team-kb --advise "【S18】三国谋弈弃牌报错" --ai-config /opt/team-kb/ai.json   # TAPD test advice
 
 Standard library only, Python 3.9+.
 """
@@ -52,6 +53,26 @@ ANSWER_PROMPT = """你是游戏测试组的组内知识库助手，根据「资�
 7. 资料开头的「已审核答案」是人工确认过的标准答案：与问题相关时优先依据它，与用例资料冲突时以它为准；不相关就忽略。"""
 
 NOT_FOUND = "组内知识库里没有找到和这个问题相关的功能。可以换个说法（带上功能名会更准），或到内网知识库站点搜索。"
+
+ADVISE_PROMPT = """你是游戏测试组的测试顾问。根据「需求」和组内知识库「资料」（历史功能的测试关注点与用例），为负责测试的同学写一份测试建议。
+
+只输出下面三段，每段 2-5 条，列表用「- 」开头；不要表格、不要 Markdown 标题和加粗；总共 450 字以内：
+相关历史功能：
+- 功能名（测试人）：和本需求的关系
+测试重点：
+- ……
+测试环境准备：
+- ……
+
+规则：
+1. 只依据需求和资料。「相关」指同一玩法、同一系统或同一界面（如需求改成就，资料是成就）；只是同属「活动」「界面」「战斗」这类大类、或只有个别词相同的，算无关，直接忽略，不要硬凑。所有功能都无关时，只输出一行「知识库无相似功能」；部分相关时只写相关的那些。
+2. 测试重点要落到本需求：改动点本身、历史用例里相关的易错点和边界、需要顺带回归的周边功能；引用资料时在句末注明「（功能名 · 测试人）」。
+3. 测试环境准备写清需要的服务器/剧本/赛季阶段、账号与数据（等级、资源、城池、同盟等）。只有需求或历史用例明确要求时才建议改服务器时间、开新服或清档；不要为了准备测试数据而擅自建议高影响操作。需要这些操作时写明必须由测试负责人审批后执行。资料里没有依据的具体数值不要编。
+4. 资料里的 *** 是打码，不要还原或猜测。"""
+
+NO_SIMILAR = "知识库无相似功能"
+# 【10.23完成】【提交到ob】 are process notes, not feature words; they only add noise to retrieval.
+PROCESS_TAG = re.compile(r"【[^】]*(?:完成|提交|合入|ob|OB)[^】]*】")
 
 
 def grams(text: str) -> List[str]:
@@ -252,6 +273,44 @@ def answer(question: str, index: QAIndex, ai: Optional["cards.CardAI"], referenc
     return result
 
 
+def advise(requirement: Dict, index: QAIndex, ai: Optional["cards.CardAI"]) -> Dict:
+    """Test advice for one requirement row (excel_to_tapd): ``{ok, hit, text, sources, model, elapsed_ms[, error]}``.
+
+    ``requirement`` keys: title (主题, required), note (测试说明), track (跟踪), group (组别), update_type (更新类型),
+    regression (是否需要全用例回归). ``hit`` is False when the knowledge base has nothing related (no AI call, or the AI
+    judged every retrieved feature unrelated). ``ok`` is False only when the AI was needed but failed.
+    """
+    started = time.perf_counter()
+    field = lambda key, limit: str(requirement.get(key) or "").strip()[:limit]  # noqa: E731
+    title, note = field("title", 300), field("note", 500)
+    result: Dict = {"ok": True, "hit": False, "text": NO_SIMILAR, "sources": [], "model": ""}
+    retrieval = index.retrieve(PROCESS_TAG.sub(" ", "{} {}".format(title, note)).strip()[:500]) if title else {"kind": "none"}
+    if retrieval["kind"] == "features":
+        result["sources"] = [source(f) for f in retrieval["features"]]
+        need = "\n".join("{}：{}".format(label, value) for label, value in (
+            ("主题", title), ("测试说明", note), ("跟踪类型", field("track", 40)), ("组别", field("group", 40)),
+            ("更新类型", field("update_type", 60)), ("是否需要全用例回归", field("regression", 20))) if value)
+        text = ""
+        if ai is None:
+            result["error"] = "AI 未配置"
+        else:
+            try:
+                text, result["model"] = ai.complete(ADVISE_PROMPT, "需求：\n{}\n\n资料：\n{}".format(
+                    normalize.mask_text(need), build_context(retrieval)), max_tokens=1200)
+            except cards.CardError as exc:
+                result["error"] = str(exc)[:300]
+        text = (text or "").strip()
+        if not text:
+            result.update(ok=False, text="", sources=[])
+        elif NO_SIMILAR in text and len(text) < 40:
+            result["sources"] = []
+        else:
+            used = [s for s in result["sources"] if s["title"].replace("用例集", "").strip() in text]
+            result.update(hit=True, text=normalize.mask_text(text)[:3000], sources=used or result["sources"])
+    result["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
+    return result
+
+
 def evaluate(index: QAIndex) -> Dict:
     total = top1 = top3 = 0
     misses = []
@@ -272,6 +331,7 @@ def main() -> None:
     parser.add_argument("--root", required=True)
     parser.add_argument("--eval", action="store_true")
     parser.add_argument("--ask", action="append", default=[])
+    parser.add_argument("--advise", action="append", default=[], help="requirement title (主题) to write test advice for")
     parser.add_argument("--ai-config", default="")
     args = parser.parse_args()
     import server  # noqa: E402 - the same loader the service uses
@@ -288,6 +348,13 @@ def main() -> None:
         print("Q:", question)
         print(result["text"])
         print("sources:", [s["title"] for s in result["sources"]], "model:", result["model"], "ms:", result["elapsed_ms"])
+        print()
+    for title in args.advise:
+        result = advise({"title": title}, search.qa, ai)
+        print("REQ:", title)
+        print(result["text"] or "（失败）{}".format(result.get("error", "")))
+        print("hit:", result["hit"], "sources:", [s["title"] for s in result["sources"]], "model:", result["model"],
+              "ms:", result["elapsed_ms"])
         print()
 
 

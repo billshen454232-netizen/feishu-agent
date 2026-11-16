@@ -43,6 +43,7 @@ FILE_NAME = re.compile(r'^[^/\\:*?"<>|]{1,80}\.md$')
 MAX_FILE_BYTES = 3 * 1024 * 1024
 MAX_FILES = 20
 MAX_BODY_BYTES = 45 * 1024 * 1024
+MAX_ADVISE_BYTES = 64 * 1024
 MAX_QUERY = 50
 REVIEW_ID = re.compile(r"[0-9]{8}-[0-9]{6}-[0-9a-f]{8}")
 SYNC_INTERVAL_SECONDS = 15
@@ -375,7 +376,10 @@ class Handler(BaseHTTPRequestHandler):
         return self._json(404, {"error": "not found"})
 
     def do_POST(self) -> None:  # noqa: N802
-        if urlparse(self.path).path != "/api/upload":
+        path = urlparse(self.path).path
+        if path == "/internal/advise":
+            return self._advise()
+        if path != "/api/upload":
             return self._json(404, {"error": "not found"})
         length = int(self.headers.get("Content-Length") or 0)
         if length <= 0 or length > MAX_BODY_BYTES:
@@ -391,6 +395,26 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(500, {"ok": False, "errors": ["服务器处理失败，请联系管理员"]})
         logger.warning("upload uploader=%s files=%s", payload.get("uploader"),
                        [(f["name"], f["status"]) for f in result.get("files", [])])
+        return self._json(200, result)
+
+    def _advise(self) -> None:
+        """Test advice for a TAPD requirement row (excel_to_tapd on this host). nginx only forwards /api/, so
+        /internal/ stays local and the intranet site cannot spend AI calls through it."""
+        length = int(self.headers.get("Content-Length") or 0)
+        if length <= 0 or length > MAX_ADVISE_BYTES:
+            return self._json(413, {"ok": False, "error": "请求为空或过大"})
+        try:
+            payload = json.loads(self.rfile.read(length).decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            return self._json(400, {"ok": False, "error": "请求格式不对"})
+        if not isinstance(payload, dict) or not str(payload.get("title") or "").strip():
+            return self._json(400, {"ok": False, "error": "缺少 title（需求主题）"})
+        try:
+            result = qa.advise(payload, self.kb.index.qa, self.kb.ai)
+        except Exception:  # noqa: BLE001
+            logger.exception("advise failed")
+            return self._json(500, {"ok": False, "error": "服务器处理失败"})
+        logger.info("advise hit=%s ok=%s model=%s ms=%s", result["hit"], result["ok"], result["model"], result["elapsed_ms"])
         return self._json(200, result)
 
 

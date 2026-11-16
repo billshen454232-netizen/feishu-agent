@@ -396,3 +396,58 @@ def test_an_old_gateway_without_the_feature_endpoint_does_not_block_reviews(tmp_
     sync.sync_once()
     assert calls == ["/internal/team-kb/features", "/internal/team-kb/reviews", "/internal/team-kb/decisions"]
     assert kb.unreported() == [] and review_id
+
+
+def test_advise_writes_masked_test_advice_from_related_features(tmp_path):
+    index = _qa_kb(tmp_path).index.qa
+    ai = FakeAnswerAI(reply="相关历史功能：\n- 浮桥（唐黎艳）：同一建筑\n测试重点：\n- 无同盟时建造提示（浮桥 用例集 · 唐黎艳）\n"
+                            "测试环境准备：\n- 准备有同盟的账号，服务器 10.20.30.40")
+    result = qa.advise({"title": "【10.23完成】【提交到ob】浮桥建造需要同盟", "note": "预期：无同盟时提示", "group": "赛季组",
+                        "update_type": "BUG修复"}, index, ai)
+    assert result["ok"] and result["hit"] and result["model"] == "fake-model"
+    assert [s["title"] for s in result["sources"]] == ["浮桥 用例集"] and "10.20.30.40" not in result["text"]
+    prompt = ai.calls[0]
+    assert prompt.startswith("需求：\n主题：【10.23完成】") and "更新类型：BUG修复" in prompt and "浮桥 用例集" in prompt
+
+
+def test_advise_skips_the_ai_without_related_features_and_reports_ai_failures(tmp_path):
+    index = _qa_kb(tmp_path).index.qa
+    ai = FakeAnswerAI()
+    nothing = qa.advise({"title": "帮我重启5000服"}, index, ai)
+    assert nothing == {"ok": True, "hit": False, "text": qa.NO_SIMILAR, "sources": [], "model": "",
+                       "elapsed_ms": nothing["elapsed_ms"]} and ai.calls == []
+    unrelated = qa.advise({"title": "浮桥文本重叠"}, index, FakeAnswerAI(reply="知识库无相似功能"))
+    assert unrelated["ok"] and not unrelated["hit"] and unrelated["sources"] == [] and unrelated["text"] == qa.NO_SIMILAR
+    failed = qa.advise({"title": "浮桥建造"}, index, FakeAnswerAI(error="a: HTTP 502"))
+    assert not failed["ok"] and failed["text"] == "" and failed["error"] == "a: HTTP 502"
+
+
+def test_advise_endpoint_is_internal_only(tmp_path):
+    import threading
+    import urllib.error
+    import urllib.request
+
+    kb = _qa_kb(tmp_path)
+    kb.ai = FakeAnswerAI(reply="测试重点：\n- 建造需要同盟（浮桥 用例集 · 唐黎艳）")
+    server.Handler.kb = kb
+    httpd = server.ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    base = "http://127.0.0.1:{}".format(httpd.server_address[1])
+
+    def post(path, payload):
+        request = urllib.request.Request(base + path, data=json.dumps(payload).encode("utf-8"), method="POST",
+                                         headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(request, timeout=5) as response:
+                return response.status, json.loads(response.read())
+        except urllib.error.HTTPError as exc:
+            return exc.code, json.loads(exc.read())
+
+    try:
+        status, body = post("/internal/advise", {"title": "浮桥建造"})
+        assert status == 200 and body["hit"] and body["sources"][0]["title"] == "浮桥 用例集"
+        assert post("/internal/advise", {"note": "没有主题"})[0] == 400
+        assert post("/api/advise", {"title": "浮桥建造"})[0] == 404  # nginx forwards /api/ only
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
