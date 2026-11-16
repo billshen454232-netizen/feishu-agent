@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
@@ -73,6 +74,13 @@ class MuliuPlanner:
     """
 
     _MAX_REPAIR_INPUT_CHARS = 12000
+    _BASIC_INFO_PATH = "/home/serverGeneralScript/basic_info.sh"
+    # A supplied server ID plus one of these read-only phrases is already actionable. The semantic reviewer may
+    # improve a plan, but must never turn this unambiguous query into an unnecessary clarification.
+    _DIRECT_BASIC_INFO = re.compile(
+        r"(?:服务器?|服)(?:信息|基础信息|状态|开服信息)|(?:查询|查看|检查).{0,12}(?:服务器?|服)(?:信息|基础信息|状态|版本|开服|剧本|进程)"
+    )
+    _SERVER_ID = re.compile(r"(?<!\d)(\d{3,8})(?!\d)")
 
     def __init__(
         self,
@@ -171,6 +179,15 @@ class MuliuPlanner:
                 first_error=first_error,
             )
 
+        if self._must_keep_direct_basic_info(user_text, candidate_plan, reviewed_plan):
+            logger.warning("semantic review downgraded an unambiguous basic-info query; keeping candidate plan")
+            return MuliuPlanGeneration(
+                plan=candidate_plan,
+                raw_responses=(candidate_response, reviewed_response),
+                validation_errors=(None, None),
+                response_stages=(candidate_stage, "semantic_review_overridden"),
+                normalized_single_step=normalized_single_step,
+            )
         return MuliuPlanGeneration(
             plan=reviewed_plan,
             raw_responses=(candidate_response, reviewed_response),
@@ -178,6 +195,28 @@ class MuliuPlanner:
             response_stages=(candidate_stage, "semantic_review"),
             normalized_single_step=normalized_single_step or reviewed_normalized,
         )
+
+    @classmethod
+    def _must_keep_direct_basic_info(
+        cls,
+        user_text: str,
+        candidate: MuliuPlan,
+        reviewed: MuliuPlan,
+    ) -> bool:
+        """Protect an explicit read-only basic-info request from reviewer hesitation.
+
+        The candidate remains subject to the full JSON and call-contract checks before this method runs.  This is
+        intentionally narrow: it only preserves an exact ``basic_info.sh <server_id>`` candidate when the user
+        supplied the same ID and plainly asked for that server's information/status.  It never promotes a plan.
+        """
+        if candidate.kind is not MuliuPlanKind.OPERATION or reviewed.kind is MuliuPlanKind.OPERATION:
+            return False
+        if len(candidate.steps) != 1:
+            return False
+        step = candidate.steps[0]
+        if step.path != cls._BASIC_INFO_PATH or len(step.args) != 1 or not step.args[0].isdigit():
+            return False
+        return step.args[0] in cls._SERVER_ID.findall(user_text) and bool(cls._DIRECT_BASIC_INFO.search(user_text))
 
     async def _repair_reviewed_plan(
         self,
@@ -367,6 +406,11 @@ class MuliuPlanner:
 
 当用户请求精确匹配已登记模式时，必须使用该模式模板。例如“查询 / 查看 / 检查 <server_id> 服 Patch 列表或 Patch 状态”匹配单服 Patch 查询模式，必须生成 `path` 为 `/home/serverGeneralScript/cc_patch.py` 且 `args` 为 `["-s","<server_id>","-ck"]`，不能误判为“资料没有查询能力”。
 
+合服规则：
+- 合服的来源服、每个目标服、赛季、剧本都必须从用户原话中取得；不能猜测或省略。
+- 用户明确说一个来源服合到两个目标服时，且给出赛季和剧本，必须匹配注册表的“双目标服”模板：`["<source>","<target1>","<target2>","<season>","<scenario>"]`。这是一条合服步骤，不是两次合服；目标服保持用户给出的顺序。
+- 两个来源服的 `--also` 模板与双目标服模板不能混用；当前不支持两个来源服同时合到多个目标服，也不支持三个及以上目标服。用户请求超出这两种登记形状时，必须 reject，不能只执行其中一部分。
+
 范围查询规则：
 - 仅当注册表明确声明范围路由的只读模式、且用户明确指定“国服”或“海外”时，根对象必须加入 `route_scope:"cn"` 或 `route_scope:"overseas"`；它只选择 Worker，绝不是脚本参数，不能写入 `args`。
 - 当前 `basic_info.sh ssinfo <scenario>` 是该类模式。例如“查询国服所有剧本为 1000 的服务器”必须生成 `args:["ssinfo","1000"]` 与 `route_scope:"cn"`；海外同理为 `overseas`。用户未指定国服或海外时，必须使用 `kind:"clarify"`，不能自行选择。
@@ -438,7 +482,9 @@ class MuliuPlanner:
 
 你的任务：
 - 如果候选决策能直接满足原始请求，返回语义等价的决策；
+- 用户已给出明确服号，并直接说“<服号>服信息 / 服务器信息 / 基础信息 / 状态”，且候选是对应的 `basic_info.sh ["<服号>"]` 只读查询时，**必须保留 operation**，不得改成 clarify，也不需要额外确认；
 - 如果注册表有更合适的已登记调用模式，改为那个模式；
+- 用户明确给出一个来源服、两个不同目标服、赛季、剧本并请求合服时，候选必须使用双目标服合服模板 `["<source>","<target1>","<target2>","<season>","<scenario>"]`；不得将第二个目标服当作未登记能力而 reject，也不得只保留第一个目标服；
 - 如果用户询问能力、用途、风险、参数或“能否执行”，返回 `kind:"knowledge"` 和空步骤，summary 只说明当前已登记能力/风险或缺少能力；
 - 如果用户问的是游戏功能本身或测试用例（规则、谁测过、要注意什么、有没有类似功能、用例预期等），返回 `kind:"team_kb"` 和空步骤，summary 写简短的检索问题；
 - 如果用户想执行但缺少必要信息，返回 `kind:"clarify"` 和空步骤；

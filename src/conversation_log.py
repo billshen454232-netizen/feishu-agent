@@ -106,6 +106,7 @@ class ConversationLog:
             "initial": "（初始决策）",
             "initial_repair": "（初始决策格式修复）",
             "semantic_review": "（独立语义复核）",
+            "semantic_review_overridden": "（语义复核已被本地只读保护纠正）",
             "semantic_review_repair": "（语义复核格式修复）",
         }
         if stage:

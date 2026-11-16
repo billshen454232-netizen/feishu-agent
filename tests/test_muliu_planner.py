@@ -509,6 +509,75 @@ async def test_semantic_review_replaces_legal_but_inadequate_basic_info_plan():
 
 
 @pytest.mark.asyncio
+async def test_planner_accepts_two_target_merge_and_keeps_both_targets_through_review():
+    catalog = """<!-- MULIU_CALL_CONTRACTS
+    {
+      "max_plan_steps": 4,
+      "contracts": [
+        {"name":"shutdown","path":"/home/serverGeneralScript/shutdown","args":["{server_id}"],"variables":{"server_id":"[0-9]{3,8}"},"runner":"bash","risk":"write"},
+        {"name":"merge-single-source-two-targets","path":"/home/serverGeneralScript/exc_server_merge.sh","args":["{source_server_id}","{first_target_server_id}","{second_target_server_id}","{season}","{scenario}"],"variables":{"source_server_id":"[0-9]{3,8}","first_target_server_id":"[0-9]{3,8}","second_target_server_id":"[0-9]{3,8}","season":"[0-9]{1,8}","scenario":"[0-9]{1,8}"},"runner":"bash","risk":"write"},
+        {"name":"stop-combine-tool","path":"/home/serverGeneralScript/stop_combine_tool.sh","args":["{source_server_id}"],"variables":{"source_server_id":"[0-9]{3,8}"},"runner":"bash","risk":"write"},
+        {"name":"start","path":"/home/serverGeneralScript/start","args":["{server_id}"],"variables":{"server_id":"[0-9]{3,8}"},"runner":"bash","risk":"write"}
+      ]
+    }
+    MULIU_CALL_CONTRACTS -->"""
+
+    class MergeCatalog:
+        def read(self):
+            return catalog
+
+        def read_call_contracts(self):
+            return parse_call_contracts(catalog)
+
+    plan = {
+        "kind": "operation", "summary": "国服 2010 合到 2018、2016 后启动 2018",
+        "steps": [
+            {"path": "/home/serverGeneralScript/shutdown", "args": ["2010"], "description": "关闭 2010"},
+            {"path": "/home/serverGeneralScript/exc_server_merge.sh", "args": ["2010", "2018", "2016", "1", "3001"], "description": "2010 合到 2018、2016"},
+            {"path": "/home/serverGeneralScript/stop_combine_tool.sh", "args": ["2010"], "description": "关闭 2010 合服工具"},
+            {"path": "/home/serverGeneralScript/start", "args": ["2018"], "description": "启动 2018"},
+        ],
+    }
+    ai = FakeAIClient([json.dumps(plan, ensure_ascii=False), json.dumps(plan, ensure_ascii=False)])
+
+    result = await MuliuPlanner(ai, MergeCatalog(), max_steps=4).create_plan(
+        "国服 2010 关服，合服：起始服 2010 剧本3001 赛季1，目标服 2018 2016；合服后关闭2010合服进程，2018启服"
+    )
+
+    assert result.steps[1].args == ["2010", "2018", "2016", "1", "3001"]
+    assert len(result.steps) == 4
+    assert "双目标服" in ai.prompts[0][1] and "不得将第二个目标服" in ai.prompts[1][1]
+
+
+@pytest.mark.asyncio
+async def test_semantic_review_cannot_downgrade_explicit_basic_info_query_to_clarify():
+    candidate_plan = json.dumps({
+        "kind": "operation",
+        "summary": "查询 2003 服基础信息",
+        "steps": [{
+            "path": "/home/serverGeneralScript/basic_info.sh",
+            "args": ["2003"],
+            "description": "查询 2003 服基础信息、版本、开服时间和进程状态",
+        }],
+    }, ensure_ascii=False)
+    improper_review = json.dumps({
+        "kind": "clarify",
+        "summary": "请确认要查询 2003 服的基础信息吗？",
+        "steps": [],
+    }, ensure_ascii=False)
+    ai = FakeAIClient([candidate_plan, improper_review])
+    planner = MuliuPlanner(ai, FakeCatalog(), max_steps=1)
+
+    generation = await planner.create_plan_with_trace("2003服信息")
+
+    assert generation.plan.kind.value == "operation"
+    assert generation.plan.steps[0].path == "/home/serverGeneralScript/basic_info.sh"
+    assert generation.plan.steps[0].args == ["2003"]
+    assert generation.response_stages == ("initial", "semantic_review_overridden")
+    assert "不得改成 clarify" in ai.prompts[1][1]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("user_text", "kind", "summary"),
     [
