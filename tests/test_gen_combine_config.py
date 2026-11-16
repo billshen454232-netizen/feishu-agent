@@ -113,5 +113,22 @@ def test_cn_version_reads_hosts_from_config_host_ini_for_every_source(monkeypatc
     assert 'connectDbList = {"nslg_common", "nslg_game_common", "nslg_combine", 2110, 211001, 2111, 2212}' in lua
 
 
+def test_cn_version_generates_two_targets_with_source_season_and_scenario(monkeypatch):
+    """The deployed CN generator receives argv: source, target1, target2, season, scenario."""
+    values = {
+        "2010_game_host": "h-source-1", "2010_game_host2": "h-source-2",
+        "2010_zone_host": "h-zone-1", "2010_zone_host2": "h-zone-2", "2010_game": "10.0.0.1",
+        "2018_game_host": "h-target-1", "2018_game_host2": "h-target-2",
+        "2016_game_host": "h-target-3", "2016_game_host2": "h-target-4",
+    }
+    monkeypatch.setattr(gen_cn, "read_config_value", lambda path, key: values.get(key, ""))
+    lua = gen_cn.generate_lua_config("2010", ["2018", "2016"], "1", "3001")
+    assert "src_server_id = {2010}," in lua
+    assert "des_server_id = {2018, 2016}," in lua
+    assert "all_des_server_id = {2018, 2016}," in lua
+    assert "scenario = 3001, season = 1" in lua
+    assert "authdb = 'nslg_game_2018'" in lua and "authdb = 'nslg_game_2016'" in lua
+
+
 def test_cn_and_hk_versions_share_the_combine_logic():
     assert gen_cn.season_scenario_lines([("1", "3001"), ("2", "3002")]) == gen.season_scenario_lines([("1", "3001"), ("2", "3002")])

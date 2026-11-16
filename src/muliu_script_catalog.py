@@ -139,12 +139,26 @@ class MuliuCallContracts:
                 .format(step_number)
             )
 
+        self._validate_contract_semantics(matched_contracts, plan.steps)
         if plan.route_scope is None:
             if any(contract.route_scopes for contract in matched_contracts):
                 raise MuliuCallContractError("该已登记范围查询必须声明 cn 或 overseas 路由范围")
             return
         if len(matched_contracts) != 1 or not self.permits_route_scope(plan, plan.route_scope):
             raise MuliuCallContractError("计划声明的范围路由未由已登记只读调用合同允许")
+
+    @staticmethod
+    def _validate_contract_semantics(
+        matched_contracts: list[MuliuCallContract],
+        steps: list[MuliuStep],
+    ) -> None:
+        """Validate constraints that shape matching cannot express (such as distinct merge servers)."""
+        for contract, step in zip(matched_contracts, steps):
+            if contract.name != "merge-single-source-two-targets":
+                continue
+            source, first_target, second_target = step.args[:3]
+            if len({source, first_target, second_target}) != 3:
+                raise MuliuCallContractError("双目标合服的来源服与两个目标服必须互不相同")
 
     def is_read_only(self, plan: MuliuPlan) -> bool:
         """True only when every step matches exactly one ``risk=read`` contract."""

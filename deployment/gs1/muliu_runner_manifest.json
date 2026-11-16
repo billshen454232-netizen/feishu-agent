@@ -249,6 +249,28 @@
       "risk": "write"
     },
     {
+      "name": "merge-single-source-two-targets",
+      "path": "/home/serverGeneralScript/exc_server_merge.sh",
+      "args": [
+        "{source_server_id}",
+        "{first_target_server_id}",
+        "{second_target_server_id}",
+        "{season}",
+        "{scenario}"
+      ],
+      "variables": {
+        "first_target_server_id": "[0-9]{3,8}",
+        "scenario": "[0-9]{1,8}",
+        "season": "[0-9]{1,8}",
+        "second_target_server_id": "[0-9]{3,8}",
+        "source_server_id": "[0-9]{3,8}"
+      },
+      "runner": [
+        "bash"
+      ],
+      "risk": "write"
+    },
+    {
       "name": "merge-two-sources-single-target",
       "path": "/home/serverGeneralScript/exc_server_merge.sh",
       "args": [

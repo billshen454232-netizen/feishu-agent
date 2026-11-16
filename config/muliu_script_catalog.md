@@ -276,18 +276,19 @@
 
   三项均为高影响写操作，必须经群内确认；配置脚本返回成功不等于运行中的服务已经重新读取配置，也不等于游戏内状态已生效。
 
-### 模式 N：执行单目标服合服（exc_server_merge.sh）
+### 模式 N：执行受控合服（exc_server_merge.sh）
 
 - **用途**：在一个明确指定的来源服节点上生成合服配置，覆盖该节点的合服工具配置，并启动合服工具。
-- **匹配的自然语言**：`将 5000 服合到 5001 服，赛季 4、剧本 9`、`5000 合服到 5001，赛季 4 剧本 9`；两个起始服：`5010（赛季 4 剧本 9）和 5011（赛季 5 剧本 10）合到 5012`。
+- **匹配的自然语言**：`将 5000 服合到 5001 服，赛季 4、剧本 9`、`5000 合服到 5001，赛季 4 剧本 9`；双目标服：`2010 合服到 2018、2016，赛季 1、剧本 3001`；两个起始服：`5010（赛季 4 剧本 9）和 5011（赛季 5 剧本 10）合到 5012`。
 - **精确脚本路径**：`/home/serverGeneralScript/exc_server_merge.sh`
-- **精确参数数组模板**：单起始服 `["<source_server_id>", "<target_server_id>", "<season>", "<scenario>"]`；同一战区的两个起始服 `["<source_server_id>", "<target_server_id>", "<season>", "<scenario>", "--also", "<second_source_server_id>", "<second_season>", "<second_scenario>"]`（第一个起始服 = 用户先说的那个，它决定执行节点与战区 `<第一个起始服>01`；两个起始服的赛季、剧本可以不同，也可以相同，都要原样写出）。**不要自行判断两个起始服是否属于同一战区**——你没有战区数据，战区归属由合服工具第 1 步按 ServerInfo 子服列表校验，不一致会以失败返回；不要因此拒绝或要求澄清。
-- **参数顺序**：
-  1. `<source_server_id>`：来源服，也是脚本定位执行节点和生成配置中的来源服；
-  2. `<target_server_id>`：合服目标服；
-  3. `<season>`：合服来源的赛季编号；
-  4. `<scenario>`：合服来源的剧本编号。
-- **边界**：最多两个起始服、一个目标服；脚本虽然支持多个目标服，但本合同不接受额外服号。起始服之间、起始服与目标服之间不能重复。所有服号必须属于同一受控路由区域；国服与海外服不能混合。缺少任一参数时必须要求补充，不能猜测。
+- **精确参数数组模板**：
+  - 单起始服、单目标服：`["<source_server_id>", "<target_server_id>", "<season>", "<scenario>"]`；
+  - 单起始服、**双目标服**：`["<source_server_id>", "<first_target_server_id>", "<second_target_server_id>", "<season>", "<scenario>"]`；
+  - 同一战区的两个起始服、单目标服：`["<source_server_id>", "<target_server_id>", "<season>", "<scenario>", "--also", "<second_source_server_id>", "<second_season>", "<second_scenario>"]`。
+
+  第一个起始服 = 用户先说的那个，它决定执行节点与战区 `<第一个起始服>01`；两个起始服的赛季、剧本可以不同，也可以相同，都要原样写出。**不要自行判断两个起始服是否属于同一战区**——你没有战区数据，战区归属由合服工具第 1 步按 ServerInfo 子服列表校验，不一致会以失败返回；不要因此拒绝或要求澄清。
+- **参数顺序**：来源服在第 1 项；随后是 1 或 2 个目标服；最后依次是来源服的赛季、剧本。双目标服不是两次合服：它是一条脚本调用，配置会将两个目标服同时写入 `des_server_id` / `all_des_server_id`。
+- **边界**：受控合同只允许以下两种目标结构：一个来源服 → 一个目标服，或一个来源服 → **两个目标服**；两个起始服时只允许一个目标服。暂不开放 3 个及以上目标服、两个起始服加多个目标服。起始服之间、起始服与目标服之间、两个目标服之间均不能重复。所有服号必须属于同一受控路由区域；国服与海外服不能混合。缺少任一参数时必须要求补充，不能猜测。
 - **远端影响**：脚本先检查来源服所在机器是否已有合服工具进程（`GROUP=<编号>combine`），**已有则直接停止（exit 2，不生成、不覆盖、不启动）**并提示先确认上一次合服已结束；否则生成配置（生成失败立即停止）、覆盖来源服节点上的 `combine_tool_cluster_config.lua`，再以后台模式（`start_combine_tool.sh -b 1`）启动合服工具，随后每 5 秒用 `combine_status.sh`（与 Server Manager 相同的日志关键字）判定结果，最多等 90 秒（测试服合服通常 20–30 秒）：命中完成关键字返回成功（exit 0），命中失败关键字返回失败（exit 1），超时按异常返回（exit 3）；失败与超时会附带合服进度摘要（停在第几个流程、本次合服的失败记录）、命中的关键字、主控日志结尾（已过滤心跳）、trace 报错行与 nohup 输出，供解读；超时前合服工具已报告失败时首行为「合服卡住」——合服工具遇到失败通常不退出，只会停在当前流程一直等待，这类失败多为数据问题，需人工处理。合服工具合完**不会自动退出**，下一次合服前需先「关闭 X 服的合服工具」（否则合服前检查会拦下）。脚本成功表示合服日志出现了完成标记，数据正确性仍需人工核对。
 - **组合请求**：`越南合服，起始服 7001，剧本 4001，赛季 1，目标服 7002，合服结束后关闭 7001 合服进程，7002 起服` 生成按顺序的三步：`exc_server_merge.sh ["7001","7002","1","4001"]` → `stop_combine_tool.sh ["7001"]`（模式 N2，起始服）→ `start ["7002"]`。合服步骤失败（含超时）时后续步骤不会执行。
 - **合服日志位置**（来源服所在机器）：`/data/app/game-server` 是指向 `/data/publish/qa-game-server/code/<构建号>/qa-game-server` 的软链接，合服日志在其上一级的 `log/`，即 `readlink -f /data/app/game-server/../log`（构建号随发布变化，不要写死）。主控 `combine_server_gamemanager_<月日时>.log`、报错堆栈 `combine_trace_server_*.log`、进程输出 `nohup.log`；`bak/` 只保留上一次合服的日志。
@@ -608,6 +609,26 @@
       "variables": {
         "source_server_id": "[0-9]{3,8}",
         "target_server_id": "[0-9]{3,8}",
+        "season": "[0-9]{1,8}",
+        "scenario": "[0-9]{1,8}"
+      },
+      "runner": "bash",
+      "risk": "write"
+    },
+    {
+      "name": "merge-single-source-two-targets",
+      "path": "/home/serverGeneralScript/exc_server_merge.sh",
+      "args": [
+        "{source_server_id}",
+        "{first_target_server_id}",
+        "{second_target_server_id}",
+        "{season}",
+        "{scenario}"
+      ],
+      "variables": {
+        "source_server_id": "[0-9]{3,8}",
+        "first_target_server_id": "[0-9]{3,8}",
+        "second_target_server_id": "[0-9]{3,8}",
         "season": "[0-9]{1,8}",
         "scenario": "[0-9]{1,8}"
       },

@@ -176,6 +176,36 @@ def test_contract_extracts_all_merge_source_and_target_server_ids():
     assert contracts.extract_server_ids(plan) == ("5000", "5001")
 
 
+def test_production_catalog_accepts_single_source_two_target_merge_and_extracts_all_servers():
+    catalog_path = Path(__file__).parents[1] / "config" / "muliu_script_catalog.md"
+    contracts = parse_call_contracts(catalog_path.read_text(encoding="utf-8"))
+    plan = make_plan(
+        "/home/serverGeneralScript/exc_server_merge.sh",
+        ["2010", "2018", "2016", "1", "3001"],
+    )
+
+    contracts.validate(plan)
+    assert contracts.extract_server_ids(plan) == ("2010", "2018", "2016")
+
+
+def test_production_catalog_rejects_duplicate_servers_in_two_target_merge():
+    catalog_path = Path(__file__).parents[1] / "config" / "muliu_script_catalog.md"
+    contracts = parse_call_contracts(catalog_path.read_text(encoding="utf-8"))
+    with pytest.raises(MuliuCallContractError, match="必须互不相同"):
+        contracts.validate(
+            make_plan("/home/serverGeneralScript/exc_server_merge.sh", ["2010", "2018", "2018", "1", "3001"])
+        )
+
+
+def test_production_catalog_contract_does_not_allow_three_target_merge():
+    catalog_path = Path(__file__).parents[1] / "config" / "muliu_script_catalog.md"
+    contracts = parse_call_contracts(catalog_path.read_text(encoding="utf-8"))
+    with pytest.raises(MuliuCallContractError, match="不符合任何已登记调用合同"):
+        contracts.validate(
+            make_plan("/home/serverGeneralScript/exc_server_merge.sh", ["2010", "2018", "2016", "2017", "1", "3001"])
+        )
+
+
 def test_production_catalog_allows_only_a_target_server_for_stopping_combine_tool():
     catalog_path = Path(__file__).parents[1] / "config" / "muliu_script_catalog.md"
     contracts = parse_call_contracts(catalog_path.read_text(encoding="utf-8"))
@@ -242,6 +272,7 @@ def test_production_catalog_accepts_ordered_registered_steps():
         ("/home/serverGeneralScript/start", ["5000"]),
         ("/home/serverGeneralScript/start", ["5000", "noz"]),
         ("/home/serverGeneralScript/exc_server_merge.sh", ["5000", "5001", "4", "9"]),
+        ("/home/serverGeneralScript/exc_server_merge.sh", ["2010", "2018", "2016", "1", "3001"]),
         ("/home/serverGeneralScript/stop_combine_tool.sh", ["5000"]),
         ("/home/serverGeneralScript/control_is_pub.sh", ["5000", "k"]),
         ("/home/serverGeneralScript/control_is_pub.sh", ["5000", "re"]),
@@ -409,19 +440,20 @@ def test_contract_rejects_missing_contract_block():
         parse_call_contracts("# 只有说明，没有机器合同")
 
 
-def test_merge_then_stop_combine_on_source_then_start_target_is_one_valid_plan():
-    """The combine tool runs on the merge source machine, so it is stopped with the source server ID."""
+def test_two_target_merge_then_stop_combine_on_source_then_start_target_is_one_valid_plan():
+    """The combine tool runs on the source machine, so it is stopped with the source ID after the two-target merge."""
     from pathlib import Path
 
     contracts = parse_call_contracts((Path(__file__).parents[1] / "config" / "muliu_script_catalog.md").read_text(encoding="utf-8"))
     plan = MuliuPlan(
-        summary="越南 7001 合服到 7002，合服后关闭 7001 合服进程并起 7002",
+        summary="国服 2010 合到 2018、2016，合服后关闭 2010 合服进程并起 2018",
         steps=[
-            MuliuStep("/home/serverGeneralScript/exc_server_merge.sh", ["7001", "7002", "1", "4001"], "合服"),
-            MuliuStep("/home/serverGeneralScript/stop_combine_tool.sh", ["7001"], "关闭 7001 合服工具"),
-            MuliuStep("/home/serverGeneralScript/start", ["7002"], "7002 起服"),
+            MuliuStep("/home/serverGeneralScript/shutdown", ["2010"], "关闭 2010 服"),
+            MuliuStep("/home/serverGeneralScript/exc_server_merge.sh", ["2010", "2018", "2016", "1", "3001"], "2010 合到 2018、2016"),
+            MuliuStep("/home/serverGeneralScript/stop_combine_tool.sh", ["2010"], "关闭 2010 合服工具"),
+            MuliuStep("/home/serverGeneralScript/start", ["2018"], "2018 起服"),
         ],
     )
 
     contracts.validate(plan)
-    assert contracts.extract_server_ids(plan) == ("7001", "7002", "7001", "7002")
+    assert contracts.extract_server_ids(plan) == ("2010", "2010", "2018", "2016", "2010", "2018")
