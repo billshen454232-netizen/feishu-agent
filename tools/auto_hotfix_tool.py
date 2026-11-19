@@ -27,8 +27,8 @@ logger = logging.getLogger("auto_hotfix")
 
 # 本工具不内置任何阈值定义：唯一真源是 Gateway 的 SQLite 热更阈值注册表
 # （网页 /thresholds）。调用方必须显式给出 Lua 表名与字段名，工具只负责生成
-# Patch、挂载清单和触发热更。曾经内嵌的 auto_hotfix_registry.py 已移除，避免
-# 同一份定义在 GS-1 与 Gateway 两处漂移。
+# Patch、挂载清单和触发热更。曾经内嵌的字段表已整体移除，避免同一份定义在
+# GS-1 与 Gateway 两处漂移。
 
 
 # 仅允许目标服已有的、经人工确认的 Patch 类型；不可把用户输入直接拼入远端路径。
@@ -777,7 +777,8 @@ end
 
 def main():
     parser = argparse.ArgumentParser(description="游戏测试服阈值配置一键免重启热更工具")
-    parser.add_argument("-s", "--server", required=True, help="目标服务器编号（如 5010）")
+    # 不在 parser 层设 required：--list-supported 不需要服号，必须在用法处按需校验。
+    parser.add_argument("-s", "--server", help="目标服务器编号（如 5010）")
     parser.add_argument("-k", "--key", help="配置项别名或真实字段名（如 union_impeach_min）")
     parser.add_argument("-v", "--value", help="要设定的新数值（如 1）")
     parser.add_argument("--scenario", type=int, help="限定剧本编号（可选，默认自动探测当前剧本）")
@@ -829,6 +830,10 @@ def main():
 
     tool = AutoHotfixTool(ini_file=args.config_ini, dry_run=args.dry_run)
 
+    # 除 --list-supported 外都必须明确目标服号。
+    if not args.server:
+        parser.error("除 --list-supported 外必须提供 -s/--server 目标服务器编号")
+
     if args.list:
         patches = tool.list_installed_patches(args.server)
         print(f"\n=== 服务器 {args.server} 当前已挂载补丁列表 (共 {len(patches)} 个) ===")
@@ -848,9 +853,10 @@ def main():
         success = tool.rollback_patch(args.server, args.rollback)
         sys.exit(0 if success else 1)
 
-    if not args.key or args.value is None:
+    if not args.key or args.value is None or not args.table:
         parser.error(
-            "打补丁模式必须同时提供 --key 和 --value 参数，或使用 --list / --rollback / --cleanup-legacy / --restore-auto"
+            "打补丁模式必须同时提供 --key、--table 和 --value 参数"
+            "（本工具不内置字段定义），或使用 --list / --rollback / --cleanup-legacy / --restore-auto"
         )
 
     success = tool.apply_patch(
