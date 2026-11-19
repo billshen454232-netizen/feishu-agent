@@ -30,7 +30,7 @@ Gateway SQLite 热更阈值注册表（网页 /thresholds 编辑，src/hotfix_th
 
 - 机器人只可生成 catalog 中精确登记的 `path + args` 合同；热更工具当前对应 `/home/serverGeneralScript/auto_hotfix_tool.py`。
 - 阈值真源是 Gateway SQLite 热更阈值注册表（网页 `/thresholds`）；Planner 只看到 key 与中文名 / 别名，Lua 表名与字段名由 Gateway 确定性展开，AI 不能直接写。
-- [tools/auto_hotfix_registry.py](../tools/auto_hotfix_registry.py) 仅是 GS-1 工具导入的旧字段表，机器人不再读取。
+- ~~`tools/auto_hotfix_registry.py`~~ **2026-11-19 已删除**：GS-1 `auto_hotfix_tool.py` 不再导入任何注册表，表名与字段名一律由调用方用 `--table` / `-k` 显式给出。阈值定义的唯一真源是 Gateway SQLite 注册表；GS-1 侧不再保存阈值数据的第二份副本，避免两处漂移。
 - `config/hotfix_thresholds.json` 与 `tools/hotfix_threshold_registry.py` 是已否决的旧 JSON 资料模型遗留物（仅原开发机本地存在、已被 `.gitignore` 忽略、不在仓库中），未接入当前 catalog 同步主链；不应被称为当前唯一运行时来源或唯一执行白名单。
 - [deployment/gs1/muliu_runner_manifest.json](../deployment/gs1/muliu_runner_manifest.json) 是 catalog 派生的候选部署资料；本仓库运行期不读取它，也不能证明 GS-1 存在或消费它。
 

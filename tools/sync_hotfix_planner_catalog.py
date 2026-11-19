@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """同步环境映射到 Planner 静态资料，并派生候选部署产物。
 
-热更阈值不再经过本工具：中文路由与 key 白名单由 Gateway 热更阈值注册表
+热更阈值不经过本工具：中文路由与 key 白名单由 Gateway 热更阈值注册表
 （``src/hotfix_thresholds.py``，网页 ``/thresholds``）在每次规划时实时生成。
-``tools/auto_hotfix_registry.py`` 只作为 GS-1 部署件镜像到 ``knowledge/scripts/``。
+
+GS-1 侧也不再需要阈值定义：``auto_hotfix_tool.py`` 已移除内置注册表，
+表名与字段名一律由调用方用 ``--table`` / ``-k`` 显式给出。因此本工具不再
+派生任何注册表镜像产物，唯一真源只有 Gateway。
 """
 
 from __future__ import print_function
@@ -23,8 +26,6 @@ from src.server_environments import ServerEnvironments, ServerEnvironmentsError
 
 DEFAULT_CATALOG_PATH = REPOSITORY_ROOT / "config" / "muliu_script_catalog.md"
 DEFAULT_ENVIRONMENT_PATH = REPOSITORY_ROOT / "config" / "server_environments.json"
-DEFAULT_REGISTRY_PATH = REPOSITORY_ROOT / "tools" / "auto_hotfix_registry.py"
-DEFAULT_REGISTRY_MIRROR_PATH = REPOSITORY_ROOT / "knowledge" / "scripts" / "auto_hotfix_registry.py"
 DEFAULT_MANIFEST_PATH = REPOSITORY_ROOT / "deployment" / "gs1" / "muliu_runner_manifest.json"
 
 ENVIRONMENT_BEGIN = "<!-- ENVIRONMENT_MAPPING:BEGIN -->"
@@ -116,10 +117,8 @@ def expected_artifacts(catalog_path=DEFAULT_CATALOG_PATH, environment_path=DEFAU
         ensure_ascii=False,
         indent=2,
     ) + "\n"
-    registry_source = DEFAULT_REGISTRY_PATH.read_text(encoding="utf-8")
     return {
         Path(catalog_path): rendered_catalog,
-        DEFAULT_REGISTRY_MIRROR_PATH: registry_source,
         DEFAULT_MANIFEST_PATH: rendered_manifest,
     }
 

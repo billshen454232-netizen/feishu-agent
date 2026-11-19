@@ -25,20 +25,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger("auto_hotfix")
 
-# 对外继续暴露既有注册表符号，保证既有脚本和调用方的导入路径不变。
-# 部署为独立脚本时，注册表文件与本脚本同目录。
-if __package__:
-    from tools.auto_hotfix_registry import (
-        FIELD_NAME_TO_DEFINITION,
-        KNOWN_THRESHOLDS,
-        ThresholdDefinition,
-    )
-else:
-    from auto_hotfix_registry import (
-        FIELD_NAME_TO_DEFINITION,
-        KNOWN_THRESHOLDS,
-        ThresholdDefinition,
-    )
+# 本工具不内置任何阈值定义：唯一真源是 Gateway 的 SQLite 热更阈值注册表
+# （网页 /thresholds）。调用方必须显式给出 Lua 表名与字段名，工具只负责生成
+# Patch、挂载清单和触发热更。曾经内嵌的 auto_hotfix_registry.py 已移除，避免
+# 同一份定义在 GS-1 与 Gateway 两处漂移。
 
 
 # 仅允许目标服已有的、经人工确认的 Patch 类型；不可把用户输入直接拼入远端路径。
@@ -58,6 +48,10 @@ SUPPORTED_PATCH_TYPES = frozenset((
     "unionmirror",
 ))
 DEFAULT_PATCH_TYPE = "common"
+# 表名会直接写进 Lua 赋值语句，只允许裸标识符，避免拼接出非预期代码。
+TABLE_NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# 字段名同样会写进 Lua，且会成为补丁文件名的一部分。
+FIELD_NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
 class AutoHotfixTool(object):
@@ -151,6 +145,28 @@ class AutoHotfixTool(object):
         checks = " or ".join("{} == {}".format(scenario_var, s) for s in scenarios)
         return "if {} then".format(checks)
 
+    @staticmethod
+    def normalize_tables(table_name):
+        """单表或多个表统一成有序元组；保持传入顺序并去掉重复，拒绝非法标识符."""
+        if isinstance(table_name, str):
+            candidates = [table_name]
+        else:
+            candidates = list(table_name or [])
+        tables = []
+        for item in candidates:
+            if not isinstance(item, str) or not item.strip():
+                raise ValueError("表名必须是非空字符串")
+            name = item.strip()
+            if TABLE_NAME_PATTERN.fullmatch(name) is None:
+                raise ValueError(
+                    "表名只能包含字母、数字和下划线，且不能以数字开头: {}".format(name)
+                )
+            if name not in tables:
+                tables.append(name)
+        if not tables:
+            raise ValueError("至少需要一个表名")
+        return tuple(tables)
+
     def generate_lua_patch_content(
         self,
         table_name,
@@ -163,22 +179,36 @@ class AutoHotfixTool(object):
         内容对两侧完全通用：同时保留 IS_CLIENT / IS_SERVER 双 guard，靠文件
         落位（common / client_avatar）决定哪一侧加载。这是服务端开发“写一份
         脚本、放到两个文件、只改文件名”的做法，比为每侧裁剪不同内容更不易出错。
+
+        ``table_name`` 可以是单个表名，也可以是多个表名：同字段需要多表一起
+        生效时，把它们写进同一个补丁文件，避免同名补丁互相覆盖。
         """
+        tables = self.normalize_tables(table_name)
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         guard = self._scenario_condition(scenarios)
-        inner = "{table}[ [=[{field}]=] ].content = [=[{value}]=]".format(
-            table=table_name, field=field_name, value=value
-        )
+        assignments = [
+            "{table}[ [=[{field}]=] ].content = [=[{value}]=]".format(
+                table=table, field=field_name, value=value
+            )
+            for table in tables
+        ]
         if guard:
-            client_body = "\t{}\n\t\t\t{}\n\t\tend".format(guard, inner)
-            server_body = "\t{}\n\t\t\t{}\n\t\tend".format(guard, inner)
+            body_lines = ["\t{}".format(guard)]
+            body_lines.extend("\t\t\t{}".format(line) for line in assignments)
+            body_lines.append("\t\tend")
+            body = "\n".join(body_lines)
         else:
-            client_body = "\t{}".format(inner)
-            server_body = "\t{}".format(inner)
+            body = "\n".join("\t{}".format(line) for line in assignments)
+        # 两侧内容完全相同，只有落位文件不同。
+        client_body = body
+        server_body = body
+        target_lines = "\n".join(
+            "-- Target Field : {}.{} = {}".format(table, field_name, value) for table in tables
+        )
 
         return """-- ======================================================================
 -- [Auto-Generated Hotfix Patch]
--- Target Field : {table_name}.{field_name} = {value}
+{target_lines}
 -- Generated At : {now_str}
 -- Patch Types  : {types_hint}
 -- 说明：内容对客户端 / 服务端通用；文件类型决定哪一侧加载。
@@ -200,9 +230,7 @@ if IS_SERVER then
     end
 end
 """.format(
-            table_name=table_name,
-            field_name=field_name,
-            value=value,
+            target_lines=target_lines,
             now_str=now_str,
             types_hint="common(服务端) / client_avatar(客户端)",
             client_body=client_body,
@@ -218,31 +246,38 @@ end
         custom_table=None,
         patch_type=None,
     ):
-        """主入口：生成补丁 -> 上传 -> 挂载 -> 热更验证."""
-        # 1. 查找定义
-        definition = KNOWN_THRESHOLDS.get(key_or_field) or FIELD_NAME_TO_DEFINITION.get(key_or_field)
-        if definition:
-            table_name = custom_table or definition.table_name
-            field_name = definition.field_name
-            desc = definition.name
-        else:
-            if not custom_table:
-                raise ValueError(
-                    f"未知的配置项 '{key_or_field}'。如果是自定义字段，请同时指定 --table 参数（如 --table game_config_common_config）"
-                )
-            table_name = custom_table
-            field_name = key_or_field
-            desc = f"自定义配置 {table_name}.{field_name}"
+        """主入口：生成补丁 -> 上传 -> 挂载 -> 热更验证.
+
+        ``--table`` 是必填项：本工具不再内置任何阈值定义，表名与字段名一律由
+        调用方给出（机器人一侧来自 Gateway 热更阈值注册表）。
+
+        ``custom_table`` 可以是单个表名、多个表名的列表或元组。同字段需要多表
+        一起生效时全部写进同一个补丁文件：文件名只按字段和服号生成，分两次
+        调用会复用同一文件，后一次会覆盖前一次的赋值。
+        """
+        # 1. 校验调用参数：不再回退到任何内置定义。
+        if not custom_table:
+            raise ValueError(
+                "必须用 --table 指定 Lua 全局表名（可重复传入多张表）。"
+                "本工具不再内置阈值定义，唯一真源是 Gateway 的 /thresholds 注册表。"
+            )
+        if not key_or_field:
+            raise ValueError("必须用 -k 指定真实字段名")
+        field_name = key_or_field
+        if FIELD_NAME_PATTERN.fullmatch(field_name) is None:
+            raise ValueError(
+                "字段名只能包含字母、数字和下划线，且不能以数字开头: {}".format(field_name)
+            )
+
+        tables = self.normalize_tables(custom_table)
+        table_desc = "、".join(tables)
+        desc = "自定义配置 {}.{}".format(table_desc, field_name)
 
         # 2. 确定需要写入的 Patch 类型。类型决定哪一侧加载文件：
         #    common 由服务端加载，client_avatar 由客户端加载。两侧都要改的阈值
-        #    生成两份内容完全相同的补丁，仅文件名前缀不同。
-        if patch_type is not None:
-            patch_types = (patch_type,)
-        elif definition is not None:
-            patch_types = definition.derived_patch_types()
-        else:
-            patch_types = (DEFAULT_PATCH_TYPE,)
+        #    生成两份内容完全相同的补丁，仅文件名前缀不同。未显式指定时只写
+        #    common，调用方需要双端时必须显式给出两个 --patch-type。
+        patch_types = (patch_type,) if patch_type is not None else (DEFAULT_PATCH_TYPE,)
         for item in patch_types:
             if item not in SUPPORTED_PATCH_TYPES:
                 raise ValueError(
@@ -254,20 +289,19 @@ end
         # 3. 解析服务器 IP
         host = self.resolve_server_ip(server_id)
         logger.info(
-            "准备对服务器 %s (%s) 打 %s 类型补丁: %s = %s",
+            "准备对服务器 %s (%s) 打 %s 类型补丁: %s = %s（目标表: %s）",
             server_id,
             host,
             " + ".join(patch_types),
             field_name,
             value,
+            table_desc,
         )
 
-        # 4. 确定剧本限制
+        # 4. 确定剧本限制：显式 --scenario 优先，否则探测目标服当前剧本。
         scenarios = ()
         if scenario is not None:
             scenarios = (scenario,)
-        elif definition and definition.default_scenarios:
-            scenarios = definition.default_scenarios
         else:
             detected = self.detect_server_scenario(host)
             if detected > 0:
@@ -276,7 +310,7 @@ end
         # 5. 补丁内容只生成一次：两侧用同一份通用脚本（含 IS_CLIENT / IS_SERVER
         #    双 guard），靠文件落位区分谁加载。这与服务端开发的实践一致。
         patch_content = self.generate_lua_patch_content(
-            table_name=table_name,
+            table_name=tables,
             field_name=field_name,
             value=value,
             scenarios=scenarios,
@@ -356,12 +390,9 @@ end
         return code == 0
 
     def _resolve_auto_patch_field(self, key_or_field):
-        """将别名或字段名转为受控的真实字段名与展示名称。"""
-        definition = KNOWN_THRESHOLDS.get(key_or_field) or FIELD_NAME_TO_DEFINITION.get(key_or_field)
-        if definition:
-            return definition.field_name, definition.name
-        if not re.fullmatch(r"[A-Za-z0-9_]{1,64}", key_or_field):
-            raise ValueError("配置字段只能包含字母、数字或下划线")
+        """校验并返回真实字段名；不再解析任何内置别名。"""
+        if not isinstance(key_or_field, str) or FIELD_NAME_PATTERN.fullmatch(key_or_field) is None:
+            raise ValueError("配置字段只能包含字母、数字或下划线，且不能以数字开头")
         return key_or_field, key_or_field
 
     def _get_auto_patch_matches(self, host, server_id, field_name, patch_type=None):
@@ -750,7 +781,15 @@ def main():
     parser.add_argument("-k", "--key", help="配置项别名或真实字段名（如 union_impeach_min）")
     parser.add_argument("-v", "--value", help="要设定的新数值（如 1）")
     parser.add_argument("--scenario", type=int, help="限定剧本编号（可选，默认自动探测当前剧本）")
-    parser.add_argument("--table", help="自定义 Lua 全局表名（如修改未收录字段时必填）")
+    parser.add_argument(
+        "--table",
+        action="append",
+        help=(
+            "自定义 Lua 全局表名（修改未收录字段时必填）。"
+            "同字段需要多张表一起生效时重复传入：--table a --table b，"
+            "它们会写进同一个补丁文件"
+        ),
+    )
     parser.add_argument(
         "--patch-type",
         choices=sorted(SUPPORTED_PATCH_TYPES),
@@ -766,16 +805,26 @@ def main():
     )
     parser.add_argument("--rollback", help="兼容旧用法：回滚字段或卸载指定补丁文件名")
     parser.add_argument("--list", action="store_true", help="列出目标服务器当前已挂载的全部补丁")
-    parser.add_argument("--list-supported", action="store_true", help="查看所有已内置收录的常用阈值别名")
+    parser.add_argument(
+        "--list-supported",
+        action="store_true",
+        help="说明阈值定义的真源位置（本工具不再内置定义）",
+    )
     parser.add_argument("--dry-run", action="store_true", help="演练模式，仅打印将要执行的命令而不实际连接")
     parser.add_argument("--config-ini", default="config.ini", help="服务器 IP 配置文件路径 (默认 ./config.ini)")
 
     args = parser.parse_args()
 
     if args.list_supported:
-        print("\n=== 已收录的高频热更阈值列表 ===")
-        for key, item in sorted(KNOWN_THRESHOLDS.items()):
-            print(f"- {key:<30} [{item.name}] 表: {item.table_name}.{item.field_name}")
+        print("\n本工具不再内置任何阈值定义。")
+        print("唯一真源：Gateway 热更阈值注册表（运维网页 /thresholds，SQLite）。")
+        print("本机只负责按 --table / -k / -v 生成 Patch、挂载清单并触发热更。")
+        print("\n示例：")
+        print("  python3 auto_hotfix_tool.py -s 2016 \\")
+        print("      -k champion_badge_need_member \\")
+        print("      --table activity_champion_server_define_config \\")
+        print("      --table activity_champion_server_define_config2 \\")
+        print("      -v 1 --patch-type common")
         return
 
     tool = AutoHotfixTool(ini_file=args.config_ini, dry_run=args.dry_run)
@@ -809,7 +858,7 @@ def main():
         key_or_field=args.key,
         value=args.value,
         scenario=args.scenario,
-        custom_table=args.table,
+        custom_table=args.table,  # action="append"：None / 单个表名列表
         patch_type=args.patch_type,
     )
     sys.exit(0 if success else 1)

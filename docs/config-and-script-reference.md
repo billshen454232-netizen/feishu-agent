@@ -313,9 +313,9 @@ worker  = 主动连 Gateway 领任务 + 本地 Muliu 执行（无飞书/AI 凭�
 
 | 工具 | 作用 | 输入 | 输出 | 是否改写仓库文件 | 是否运行期依赖 |
 | --- | --- | --- | --- | --- | --- |
-| [auto_hotfix_registry.py](../tools/auto_hotfix_registry.py) | GS-1 侧 `auto_hotfix_tool.py` 导入的旧版字段表（24 条）。机器人**不再读取**；新阈值走 Gateway 注册表，靠 `--table` 传生效路径，不需要改它。 | 无外部输入（代码即数据）。 | 镜像到 `knowledge/scripts/`，供 GS-1 部署参考。 | 否 | 否。 |
-| [auto_hotfix_tool.py](../tools/auto_hotfix_tool.py) | 游戏服阈值免重启热更工具：生成 Lua Patch、写入 `patch_order_list.json`、调用 `run_patch_game.sh`。 | `config.ini`（服号 → IP）、命令行参数。 | Patch / 热更执行结果。 | 否 | 否（独立 CLI；catalog 期望远端同路径脚本，但仓库不能证明其已部署）。 |
-| [sync_hotfix_planner_catalog.py](../tools/sync_hotfix_planner_catalog.py) | 把 `config/server_environments.json` 的环境映射同步进 catalog 静态资料，并生成候选 manifest、镜像 `auto_hotfix_registry.py`。热更阈值不经过它。 | `config/server_environments.json`。 | **改写** `config/muliu_script_catalog.md` 环境区块、候选 manifest。 | **是** | 否（开发期工具）。 |
+| ~~auto_hotfix_registry.py~~ | **2026-11-19 已删除**。曾为 GS-1 侧 `auto_hotfix_tool.py` 导入的旧字段表（24 条）。 | — | — | — | — |
+| [auto_hotfix_tool.py](../tools/auto_hotfix_tool.py) | 游戏服阈值免重启热更工具：生成 Lua Patch、写入 `patch_order_list.json`、调用 `run_patch_game.sh`。**不内置任何阈值定义**：表名 / 字段名一律由调用方用 `--table` / `-k` 显式给出；`--table` 可重复传多张表并写进同一个补丁文件；未给 `--patch-type` 时只写 `common`。 | `config.ini`（服号 → IP）、命令行参数。 | Patch / 热更执行结果。 | 否 | 否（独立 CLI；catalog 期望远端同路径脚本，但仓库不能证明其已部署）。 |
+| [sync_hotfix_planner_catalog.py](../tools/sync_hotfix_planner_catalog.py) | 把 `config/server_environments.json` 的环境映射同步进 catalog 静态资料，并生成候选 manifest。热更阈值不经过它；2026-11-19 起也不再派生注册表镜像。 | `config/server_environments.json`。 | **改写** `config/muliu_script_catalog.md` 环境区块、候选 manifest。 | **是** | 否（开发期工具）。 |
 | [plan_board.py](../tools/plan_board.py) | 项目计划快照：`export` 导出 JSON、`import` 恢复、`summary` 文字概览。 | Gateway SQLite。 | 否（export 输出到标准输出）。 | 否 | 否（运维工具）。 |
 | [doc_fixes.py](../tools/doc_fixes.py) | 已采纳的资料修改建议回写仓库：Gateway 上 `export` 导出 JSON；开发机 `apply` 修改 `knowledge/index.md`、`knowledge/docs/*.md`（原文需恰好出现 1 次，保留换行风格）；Gateway `git pull` 后 `mark-applied`。 | Gateway SQLite、导出的 JSON。 | 改写 `knowledge/` 下的 MD。 | **是**（apply） | 否（运维工具）。 |
 | [generate_runner_manifest.py](../tools/generate_runner_manifest.py) | 从 catalog 派生**候选** GS-1 runner manifest。 | `config/muliu_script_catalog.md`。 | `deployment/gs1/muliu_runner_manifest.json`。 | **是** | 否（开发期工具）。 |
@@ -369,7 +369,7 @@ Gateway SQLite 热更阈值注册表（网页 /thresholds 编辑，src/hotfix_th
 | `start_combine_tool.sh` | 启动合服进程。 | 由 `exc_server_merge.sh` 链路使用；catalog 未单独登记。 |
 | `gen_combine_config.py`、`combine_demo_new.lua` | 合服配置生成与其 Lua 模板。 | 被 `exc_server_merge.sh` 调用；非独立入口。 |
 | `config.ini` | 服号 → 目标主机的映射配置。 | **敏感**：含内网主机标识。由脚本读取，不进入模型 / 飞书 / Git。 |
-| `auto_hotfix_registry.py` | `tools/` 同名文件的镜像副本。 | 供 GS-1 侧 `auto_hotfix_tool.py` 导入；以 `tools/` 为准。 |
+| ~~`auto_hotfix_registry.py`~~ | **2026-11-19 已删除**：GS-1 工具不再导入任何注册表，值定义真源只剩 Gateway `/thresholds`。GS-1 上残留的旧文件已无代码加载，可保留或删除。 | — |
 
 ---
 

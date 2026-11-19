@@ -74,11 +74,12 @@ GS-1 上被调用的脚本改动后需要**手动覆盖**（仓库 git push 不�
 
 ```bash
 cd D:\otherPrograms\feishu_agent\tools
-scp auto_hotfix_tool.py     root@<GS-1>:/home/serverGeneralScript/
-scp auto_hotfix_registry.py root@<GS-1>:/home/serverGeneralScript/
+scp auto_hotfix_tool.py root@<GS-1>:/home/serverGeneralScript/
 ```
 
-**两个文件必须同时覆盖且在同一目录**：`auto_hotfix_tool.py` 靠同目录的 `auto_hotfix_registry.py` 找字段定义，只换一个会退回旧行为。
+**只需覆盖 `auto_hotfix_tool.py` 一个文件**（2026-11-19 起）。工具已不再导入 `auto_hotfix_registry.py`：阈值定义的真源只有 Gateway 的 SQLite 注册表（网页 `/thresholds`），表名和字段名由调用方用 `--table` / `-k` 显式给出。
+
+GS-1 上残留的 `auto_hotfix_registry.py` 不再被任何代码加载，可以保留不动，也可以删除。
 
 ### 为什么不能手动复制
 
@@ -94,7 +95,9 @@ python3 -c "import ast; ast.parse(open('/home/serverGeneralScript/auto_hotfix_to
 
 # 2. 确认无 ESC 污染（应输出 0）
 grep -c $'\x1b' /home/serverGeneralScript/auto_hotfix_tool.py
-grep -c $'\x1b' /home/serverGeneralScript/auto_hotfix_registry.py
+
+# 3. 确认已不带内置注册表（应输出 0）
+grep -c 'auto_hotfix_registry' /home/serverGeneralScript/auto_hotfix_tool.py
 ```
 
 国内 GS-1 与海外 GS-1 都要覆盖并验证。
