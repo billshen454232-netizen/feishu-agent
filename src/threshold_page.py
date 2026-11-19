@@ -345,7 +345,10 @@ $("#content").addEventListener("keydown", (e) => {
 });
 $("#new-panel").addEventListener("click", (e) => {
   const button = e.target.closest("button[data-act]");
-  if (button) act(button.dataset.act, "", $("#new-panel .detail"), button);
+  if (!button) return;
+  const detail = button.closest(".detail");
+  if (handleTargetAction(button.dataset.act, button, detail)) return;
+  act(button.dataset.act, "", detail, button);
 });
 $("#new").onclick = () => {
   const panel = $("#new-panel");
