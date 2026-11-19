@@ -416,12 +416,21 @@ _SIDES = {"client": "客户端", "server": "服务端", "both": "双端", "unkno
 
 async def review_threshold(client: Any, record: dict[str, Any], others: list[dict[str, Any]]) -> dict[str, Any]:
     """Advisory AI review of one entry's metadata; never blocks saving and never produces Lua."""
+    def _paths(item: dict[str, Any]) -> str:
+        targets = _targets_of(item)
+        return "、".join("{}.{}".format(t["table"], t["field"]) for t in targets)
+
     existing = "\n".join(
-        "- {key}：{name}（{table_name}.{field_name}）".format(**item) for item in others if item["key"] != record.get("key")
+        "- {}：{}（{}）".format(item["key"], item["name"], _paths(item))
+        for item in others if item["key"] != record.get("key")
     )
-    entry = "key={}\n中文名={}\n别名={}\n表名={}\n字段名={}\n说明={}".format(
+    targets = _normalize_targets(record.get("targets") or [])
+    if not targets and record.get("table_name"):
+        targets = [{"table": record["table_name"], "field": record["field_name"]}]
+    targets_text = "；".join("{}.{}".format(t["table"], t["field"]) for t in targets) if targets else "（未填写）"
+    entry = "key={}\n中文名={}\n别名={}\n生效位置={}\n说明={}".format(
         record.get("key", ""), record.get("name", ""), "、".join(record.get("aliases") or []),
-        record.get("table_name", ""), record.get("field_name", ""), record.get("description", ""),
+        targets_text, record.get("description", ""),
     )
     prompt = (
         "你在审核游戏测试服「热更阈值注册表」的一条登记，只看元数据，不要输出 Lua 或执行建议。"

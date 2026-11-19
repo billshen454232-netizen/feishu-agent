@@ -319,3 +319,38 @@ def test_old_rows_without_targets_still_expand(tmp_path):
     assert item["targets"] == [{"table": "t_old", "field": "f_old"}]
     plan = store.expand_plan(_hotfix(["-s", "2016", "-k", "k1", "-v", "1", "--patch-type", "common"]))
     assert plan.steps[0].args == ["-s", "2016", "-k", "f_old", "--table", "t_old", "-v", "1", "--patch-type", "common"]
+
+
+def test_review_prompt_includes_every_target_path(monkeypatch):
+    """AI 审核必须看到全部生效位置，否则会误报「表名和字段名为空」."""
+    import asyncio
+    import src.hotfix_thresholds as module
+
+    captured = {}
+
+    async def fake_generate(client, messages, prompt=None, **kwargs):
+        captured["prompt"] = prompt
+
+        class _Result:
+            text = '{"consistent": true, "reason": "ok"}'
+            model = "stub"
+
+        return _Result()
+
+    monkeypatch.setattr(module, "generate_with_provenance", fake_generate)
+    record = {
+        "key": "champion_badge_need_member",
+        "name": "冠军服徽章所需人数",
+        "aliases": ["冠军服国人数"],
+        "targets": [
+            {"table": "activity_champion_server_define_config", "field": "champion_badge_need_member"},
+            {"table": "activity_champion_server_define_config2", "field": "champion_badge_need_member"},
+        ],
+    }
+    asyncio.run(module.review_threshold(None, record, []))
+
+    prompt = captured["prompt"]
+    assert "activity_champion_server_define_config.champion_badge_need_member" in prompt
+    assert "activity_champion_server_define_config2.champion_badge_need_member" in prompt
+    # 不应再把生效位置当成未填写
+    assert "生效位置=（未填写）" not in prompt
