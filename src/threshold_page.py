@@ -99,7 +99,7 @@ THRESHOLDS_HTML = r"""<!doctype html>
     <a class="back" href="/plan">项目计划</a>
   </div>
   <p class="principle">飞书「热更 X 服 某阈值为 N」只能使用这里启用的条目。保存后下一条飞书请求立即生效，不需要改代码、不需要部署 GS-1。
-  AI 只看到 key 与中文名；生效路径（表名.字段名）由 Gateway 确定性展开。已执行过的条目不能删除、不能改生效路径，只能停用。</p>
+  规划时，AI 根据启用条目的中文名、别名和用途说明选择一个或多个 key；生效位置由 Gateway 展开，仍需在飞书确认。已执行过的条目不能删除或改生效位置，只能停用。</p>
   <div class="tabs" id="tabs" role="tablist"></div>
 </div></header>
 <main><div class="wrap">

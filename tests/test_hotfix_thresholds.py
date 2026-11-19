@@ -57,10 +57,10 @@ def test_planner_catalog_exposes_only_registered_keys(tmp_path):
     contracts = parse_call_contracts(text)
     names = {c.name for c in contracts.contracts if c.path == HOTFIX_PATH}
     assert names == {"hotfix-server-threshold", "hotfix-server-threshold-with-patch-type",
-                     "hotfix-threshold-apply-multi-table",
                      "cleanup-legacy-auto-hotfix", "restore-auto-hotfix"}
     contracts.validate(_hotfix(["-s", "5010", "-k", "union_impeach_min", "-v", "1"]))
     for args in (["-s", "5010", "-k", "rank_quota", "-v", "1"],
+                 ["-s", "5010", "-k", "f", "--table", "t1", "--table", "t2", "-v", "1", "--patch-type", "common"],
                  ["-s", "5010", "-k", "union_impeach_union_member_min", "--table", "union_config_setting",
                   "-v", "1", "--patch-type", "common"]):
         with pytest.raises(MuliuPlanError):
@@ -187,6 +187,43 @@ async def test_planner_returns_the_expanded_plan(tmp_path):
     assert "战队交换人数" in ai.prompts[0] and "-k faction_swap_team_member_min" in ai.prompts[0]
     assert [step.args[-1] for step in plan.steps] == ["common", "client_avatar"]
     assert plan.steps[0].args[3:6] == ["faction_swap_team_member_num_min", "--table", "season_process_season_config"]
+
+
+@pytest.mark.parametrize("keys", [("badge", "mark"), ("mark",)])
+def test_planner_uses_active_purpose_in_both_stages_and_expands_selected_keys(tmp_path, keys):
+    import asyncio
+
+    store = _store(tmp_path, seed=False)
+    for key, name in (("badge", "徽章"), ("mark", "印记"), ("retired", "停用项")):
+        store.create({"key": key, "name": name, "description": name + "人数是整体立国门槛之一",
+                      "targets": [{"table": table, "field": key + "_min"} for table in ("sample_one", "sample_two")],
+                      "notes": "internal-note-sentinel", "source": "internal-source-sentinel"}, operator="t")
+    store.update("retired", {"state": "disabled"}, operator="t")
+    store.update("badge", {"description": "整体立国门槛包含徽章及印记。token=example-private-value"}, operator="t")
+    request = "将 5010 服整体立国门槛改为 1" if len(keys) == 2 else "只将 5010 服印记人数改为 1"
+
+    class StubAI:
+        def __init__(self):
+            self.prompts = []
+
+        async def generate(self, history, prompt):
+            self.prompts.append(prompt)
+            return json.dumps({"kind": "operation", "summary": request, "steps": [
+                {"path": HOTFIX_PATH, "args": ["-s", "5010", "-k", key, "-v", "1"],
+                 "description": key} for key in keys]})
+
+    ai = StubAI()
+    planner = MuliuPlanner(ai, HotfixPlannerCatalog(CATALOG_PATH, store), max_steps=10, plan_expander=store.expand_plan)
+    plan = asyncio.run(planner.create_plan(request))
+    assert len(ai.prompts) == 2  # initial decision and independent semantic review
+    for prompt in ai.prompts:
+        assert "整体立国门槛包含徽章及印记" in prompt and "印记人数是整体立国门槛之一" in prompt
+        assert all(private not in prompt for private in (
+            "example-private-value", "停用项人数", "internal-note-sentinel", "internal-source-sentinel", "sample_one"))
+    assert [step.args for step in plan.steps] == [
+        ["-s", "5010", "-k", key + "_min", "--table", "sample_one", "--table", "sample_two", "-v", "1",
+         "--patch-type", side] for key in keys for side in ("common", "client_avatar")]
+    MuliuScriptCatalog(CATALOG_PATH).read_call_contracts().validate(plan)
 
 
 def test_threshold_routes(tmp_path):
