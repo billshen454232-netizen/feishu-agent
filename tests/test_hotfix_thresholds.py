@@ -57,6 +57,7 @@ def test_planner_catalog_exposes_only_registered_keys(tmp_path):
     contracts = parse_call_contracts(text)
     names = {c.name for c in contracts.contracts if c.path == HOTFIX_PATH}
     assert names == {"hotfix-server-threshold", "hotfix-server-threshold-with-patch-type",
+                     "hotfix-threshold-apply-multi-table",
                      "cleanup-legacy-auto-hotfix", "restore-auto-hotfix"}
     contracts.validate(_hotfix(["-s", "5010", "-k", "union_impeach_min", "-v", "1"]))
     for args in (["-s", "5010", "-k", "rank_quota", "-v", "1"],
@@ -237,3 +238,84 @@ def test_snapshot_round_trip(tmp_path):
 
     assert other.import_snapshot(snapshot, operator="t") == 24
     assert other.export_snapshot() == snapshot
+
+
+def test_multi_target_entry_expands_to_one_call_with_both_tables(tmp_path):
+    """一条登记带多个表：展开成一次调用，两个 --table 写进同一个补丁文件."""
+    store = _store(tmp_path, seed=False)
+    store.create(
+        {
+            "key": "champion_badge_member",
+            "name": "冠军服徽章人数要求",
+            "targets": [
+                {"table": "activity_champion_server_define_config", "field": "champion_badge_need_member"},
+                {"table": "activity_champion_server_define_config2", "field": "champion_badge_need_member"},
+            ],
+        },
+        operator="t",
+    )
+
+    plan = store.expand_plan(_hotfix(["-s", "2016", "-k", "champion_badge_member", "-v", "1", "--patch-type", "common"]))
+
+    assert len(plan.steps) == 1
+    assert plan.steps[0].args == [
+        "-s", "2016", "-k", "champion_badge_need_member",
+        "--table", "activity_champion_server_define_config",
+        "--table", "activity_champion_server_define_config2",
+        "-v", "1", "--patch-type", "common",
+    ]
+    # 展开结果必须能通过静态调用合同：两个 --table 走多表合同
+    contracts = parse_call_contracts(CATALOG_PATH.read_text(encoding="utf-8"))
+    contracts.validate(plan)
+
+
+def test_multi_target_defaults_to_both_sides_and_stays_valid(tmp_path):
+    store = _store(tmp_path, seed=False)
+    store.create(
+        {
+            "key": "champion_badge_member",
+            "name": "冠军服徽章人数要求",
+            "targets": [
+                {"table": "t_one", "field": "champion_badge_need_member"},
+                {"table": "t_two", "field": "champion_badge_need_member"},
+            ],
+        },
+        operator="t",
+    )
+
+    plan = store.expand_plan(_hotfix(["-s", "2016", "-k", "champion_badge_member", "-v", "1"]))
+    assert len(plan.steps) == 2
+    assert all("--table" in step.args for step in plan.steps)
+    parse_call_contracts(CATALOG_PATH.read_text(encoding="utf-8")).validate(plan)
+
+
+def test_single_target_entry_keeps_the_original_single_table_contract(tmp_path):
+    store = _store(tmp_path, seed=False)
+    store.create(
+        {"key": "one_field", "name": "单表阈值", "table_name": "t_one", "field_name": "f_one"},
+        operator="t",
+    )
+    plan = store.expand_plan(_hotfix(["-s", "2016", "-k", "one_field", "-v", "1", "--patch-type", "common"]))
+    assert plan.steps[0].args == ["-s", "2016", "-k", "f_one", "--table", "t_one", "-v", "1", "--patch-type", "common"]
+    parse_call_contracts(CATALOG_PATH.read_text(encoding="utf-8")).validate(plan)
+
+
+def test_multi_target_duplicate_paths_are_rejected(tmp_path):
+    store = _store(tmp_path, seed=False)
+    store.create(
+        {"key": "a_field", "name": "A", "table_name": "shared", "field_name": "shared_field"}, operator="t"
+    )
+    with pytest.raises(ThresholdError, match="生效路径"):
+        store.create(
+            {"key": "b_field", "name": "B", "targets": [{"table": "shared", "field": "shared_field"}]}, operator="t"
+        )
+
+
+def test_old_rows_without_targets_still_expand(tmp_path):
+    """旧库没有 targets_json：迁移后按单条路径回填，展开行为不变."""
+    store = _store(tmp_path, seed=False)
+    store.create({"key": "k1", "name": "旧写法", "table_name": "t_old", "field_name": "f_old"}, operator="t")
+    item = store.get("k1")
+    assert item["targets"] == [{"table": "t_old", "field": "f_old"}]
+    plan = store.expand_plan(_hotfix(["-s", "2016", "-k", "k1", "-v", "1", "--patch-type", "common"]))
+    assert plan.steps[0].args == ["-s", "2016", "-k", "f_old", "--table", "t_old", "-v", "1", "--patch-type", "common"]

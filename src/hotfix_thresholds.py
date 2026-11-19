@@ -25,6 +25,9 @@ HOTFIX_PATH = "/home/serverGeneralScript/auto_hotfix_tool.py"
 DUAL_PATCH_TYPES = (("common", "服务端"), ("client_avatar", "客户端"))
 STATES = ("active", "disabled")
 TEXT_FIELDS = ("name", "table_name", "field_name", "description", "source", "notes")
+# 一条登记可以命中多个 Lua 位置：同一业务概念常需要多张表 / 多个字段一起改。
+# ``table_name`` / ``field_name`` 保留首个目标，供历史行为与已执行锁定继续可用。
+MAX_TARGETS = 20
 SEED_PATH = Path(__file__).resolve().parents[1] / "config" / "hotfix_thresholds.seed.json"
 ROUTING_BEGIN = "<!-- HOTFIX_THRESHOLD_REGISTRY:BEGIN -->"
 ROUTING_END = "<!-- HOTFIX_THRESHOLD_REGISTRY:END -->"
@@ -35,6 +38,44 @@ _MAX_TEXT = 2000
 _MAX_ALIASES = 20
 # Jobs that never got past the confirmation card cannot have left patches on a server.
 _NOT_EXECUTED_STATUSES = ("awaiting_confirmation", "cancelled", "expired")
+
+
+def _normalize_targets(raw: Any) -> list[dict[str, str]]:
+    """把页面提交的目标列表收敛成 [{table, field}]，去重并校验标识符。
+
+    空列表表示「沿用 table_name / field_name 这一条」的老行为，由调用方补齐。
+    """
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise ThresholdError("targets 必须是数组")
+    if len(raw) > MAX_TARGETS:
+        raise ThresholdError("一条登记最多 {} 个目标".format(MAX_TARGETS))
+    targets: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            raise ThresholdError("targets 的每一项必须是 {table, field}")
+        table = str(item.get("table") or item.get("table_name") or "").strip()
+        field = str(item.get("field") or item.get("field_name") or "").strip()
+        if not table and not field:
+            continue
+        if _IDENTIFIER_PATTERN.fullmatch(table) is None:
+            raise ThresholdError("表名「{}」只能包含字母、数字和下划线，且不能以数字开头".format(table))
+        if _IDENTIFIER_PATTERN.fullmatch(field) is None:
+            raise ThresholdError("字段名「{}」只能包含字母、数字和下划线，且不能以数字开头".format(field))
+        if (table, field) not in seen:
+            seen.add((table, field))
+            targets.append({"table": table, "field": field})
+    return targets
+
+
+def _targets_of(record: dict[str, Any]) -> list[dict[str, str]]:
+    """读取一条记录的全部目标；老记录没有 targets 时退回单条路径。"""
+    stored = record.get("targets") or []
+    if stored:
+        return [{"table": item["table"], "field": item["field"]} for item in stored]
+    return [{"table": record["table_name"], "field": record["field_name"]}]
 
 
 class ThresholdError(ValueError):
@@ -56,6 +97,7 @@ class ThresholdStore:
                     aliases_json TEXT NOT NULL DEFAULT '[]',
                     table_name TEXT NOT NULL,
                     field_name TEXT NOT NULL,
+                    targets_json TEXT NOT NULL DEFAULT '',
                     description TEXT NOT NULL DEFAULT '',
                     state TEXT NOT NULL DEFAULT 'active',
                     source TEXT NOT NULL DEFAULT '',
@@ -76,6 +118,15 @@ class ThresholdStore:
                 );
                 """
             )
+            # 旧库补列：targets_json 是本版新增，缺失时按单条路径回填。
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(hotfix_thresholds)").fetchall()}
+            if "targets_json" not in columns:
+                conn.execute("ALTER TABLE hotfix_thresholds ADD COLUMN targets_json TEXT NOT NULL DEFAULT ''")
+                conn.execute(
+                    "UPDATE hotfix_thresholds SET targets_json = "
+                    "json_array(json_object('table', table_name, 'field', field_name)) "
+                    "WHERE targets_json = ''"
+                )
             empty = conn.execute("SELECT COUNT(*) FROM hotfix_thresholds").fetchone()[0] == 0
             conn.commit()
         if empty and seed_path is not None and Path(seed_path).is_file():
@@ -125,6 +176,14 @@ class ThresholdStore:
         if self.get(key) is not None:
             raise ThresholdError("key {} 已存在".format(key))
         values = self._validated({name: value for name, value in fields.items() if name != "key"})
+        # 目标列表存在时，table_name / field_name 取首个目标，保持既有列语义。
+        targets = values.get("targets") or []
+        if targets:
+            values["table_name"] = values.get("table_name") or targets[0]["table"]
+            values["field_name"] = values.get("field_name") or targets[0]["field"]
+        else:
+            targets = _normalize_targets([{"table": values.get("table_name"), "field": values.get("field_name")}])
+            values["targets"] = targets
         for required in ("name", "table_name", "field_name"):
             if not values.get(required):
                 raise ThresholdError("{} 不能为空".format(_LABELS[required]))
@@ -143,7 +202,14 @@ class ThresholdStore:
         if current is None:
             raise KeyError(key)
         values = self._validated(changes)
+        if values.get("targets"):
+            if not values.get("table_name"):
+                values["table_name"] = values["targets"][0]["table"]
+            if not values.get("field_name"):
+                values["field_name"] = values["targets"][0]["field"]
         moved = any(field in values and values[field] != current[field] for field in ("table_name", "field_name"))
+        if values.get("targets") and _targets_of({**current, "targets": values["targets"]}) != _targets_of(current):
+            moved = True
         if moved and current["executed"]:
             raise ThresholdError("该阈值已执行过，不能修改生效路径（服务器上可能已有补丁）；请停用后新增一条")
         merged = {**current, **values}
@@ -183,10 +249,12 @@ class ThresholdStore:
 
     def export_snapshot(self) -> dict[str, Any]:
         fields = ("key", "name", "aliases", "table_name", "field_name", "description", "state", "source", "notes")
-        return {
-            "schema_version": 1,
-            "thresholds": [{field: item[field] for field in fields} for item in self.list_thresholds()],
-        }
+        items = []
+        for item in self.list_thresholds():
+            record = {field: item[field] for field in fields}
+            record["targets"] = _targets_of(item)
+            items.append(record)
+        return {"schema_version": 2, "thresholds": items}
 
     def import_snapshot(self, snapshot: dict[str, Any], *, operator: str, now: Optional[int] = None) -> int:
         records = []
@@ -236,7 +304,7 @@ class ThresholdStore:
     def _validated(self, changes: dict[str, Any]) -> dict[str, Any]:
         values: dict[str, Any] = {}
         for field, value in changes.items():
-            if field in ("executed", "created_at", "updated_at", "updated_by", "sort_order"):
+            if field in ("executed", "created_at", "updated_at", "updated_by", "sort_order", "targets"):
                 continue
             if field == "state":
                 if value not in STATES:
@@ -259,6 +327,8 @@ class ThresholdStore:
         for field in ("table_name", "field_name"):
             if values.get(field) and _IDENTIFIER_PATTERN.fullmatch(values[field]) is None:
                 raise ThresholdError("{} 只能是字母或下划线开头的字母、数字、下划线（≤64 位）".format(_LABELS[field]))
+        if "targets" in changes:
+            values["targets"] = _normalize_targets(changes["targets"])
         return values
 
     def _check_conflicts(self, record: dict[str, Any]) -> None:
@@ -294,13 +364,15 @@ class ThresholdStore:
     def _insert(conn: sqlite3.Connection, record: dict[str, Any], order: int, timestamp: int, operator: str) -> None:
         conn.execute(
             """
-            INSERT INTO hotfix_thresholds (key, name, aliases_json, table_name, field_name, description, state,
-                                           source, notes, sort_order, created_at, updated_at, updated_by)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO hotfix_thresholds (key, name, aliases_json, table_name, field_name, targets_json,
+                                           description, state, source, notes, sort_order, created_at, updated_at,
+                                           updated_by)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 record["key"], record["name"], json.dumps(record.get("aliases") or [], ensure_ascii=False),
-                record["table_name"], record["field_name"], record.get("description", ""),
+                record["table_name"], record["field_name"],
+                json.dumps(record.get("targets") or [], ensure_ascii=False), record.get("description", ""),
                 record.get("state", "active"), record.get("source", ""), record.get("notes", ""),
                 order, timestamp, timestamp, operator,
             ),
@@ -326,6 +398,7 @@ class ThresholdStore:
             "aliases": json.loads(row["aliases_json"] or "[]"),
             "table_name": row["table_name"],
             "field_name": row["field_name"],
+            "targets": json.loads(row["targets_json"] or "[]"),
             "description": row["description"],
             "state": row["state"],
             "source": row["source"],
@@ -414,14 +487,15 @@ def _check_unique(records: list[dict[str, Any]]) -> None:
             if previous is not None and previous != record["key"]:
                 raise ThresholdError("中文名 / 别名「{}」已被 {} 使用".format(term, previous))
             terms[term] = record["key"]
-        path = (record["table_name"], record["field_name"])
-        if path in paths:
-            raise ThresholdError("生效路径 {}.{} 已被 {} 使用".format(*path, paths[path]))
-        paths[path] = record["key"]
+        for target in _targets_of(record):
+            path = (target["table"], target["field"])
+            if path in paths:
+                raise ThresholdError("生效路径 {}.{} 已被 {} 使用".format(path[0], path[1], paths[path]))
+            paths[path] = record["key"]
 
 
 def _is_referenced(item: dict[str, Any], references: set[str]) -> bool:
-    return item["key"] in references or item["field_name"] in references
+    return item["key"] in references or any(target["field"] in references for target in _targets_of(item))
 
 
 def _render_routing(active: list[dict[str, Any]]) -> str:
@@ -453,6 +527,8 @@ def _planner_contracts(keys: Iterable[str]) -> list[dict[str, Any]]:
     key_pattern = "(?:{})".format("|".join(re.escape(key) for key in sorted(keys)))
     server = {"server_id": "[0-9]{3,8}"}
     patch_types = "avatar|battle|center|client_account|client_avatar|common|login|scene|test|union|unionmirror"
+    # 展开后是真实字段名与表名，不是登记 key。
+    table_ident = "[A-Za-z_][A-Za-z0-9_]{0,63}"
     base = {"path": HOTFIX_PATH, "runner": "python3.7", "risk": "write"}
     return [
         {"name": "hotfix-server-threshold", **base,
@@ -461,6 +537,12 @@ def _planner_contracts(keys: Iterable[str]) -> list[dict[str, Any]]:
         {"name": "hotfix-server-threshold-with-patch-type", **base,
          "args": ["-s", "{server_id}", "-k", "{key}", "-v", "{value}", "--patch-type", "{patch_type}"],
          "variables": {**server, "key": key_pattern, "value": "[0-9]{1,16}", "patch_type": patch_types}},
+        {"name": "hotfix-threshold-apply-multi-table", "path": HOTFIX_PATH, "runner": "python3.7", "risk": "write",
+         "args": ["-s", "{server_id}", "-k", "{field}", "--table", "{table}", "--table", "{table2}",
+                  "-v", "{value}", "--patch-type", "{patch_type}"],
+         "variables": {**server, "field": table_ident, "table": table_ident, "table2": table_ident,
+                       "value": "[0-9]{1,16}", "patch_type": patch_types},
+         "repeat": ["--table", "{table2}"]},
         {"name": "cleanup-legacy-auto-hotfix", **base,
          "args": ["-s", "{server_id}", "--cleanup-legacy", "{key}"],
          "variables": {**server, "key": key_pattern}},
@@ -483,10 +565,17 @@ def _expand_step(step: MuliuStep, registry: dict[str, dict[str, Any]]) -> list[M
             sides = [(args[7], "")]
         else:
             sides = [(patch_type, "（{}）".format(label)) for patch_type, label in DUAL_PATCH_TYPES]
+        # 多目标时把字段名写进一次调用的多个 --table，让它们落进同一个补丁文件；
+        # 分开调用会复用同名文件，后一次覆盖前一次的赋值。
+        targets = _targets_of(item)
+        names = list(dict.fromkeys(target["field"] for target in targets))
+        table_args: list[str] = []
+        for target in targets:
+            table_args.extend(["--table", target["table"]])
         return [
             dataclasses.replace(
                 step,
-                args=["-s", args[1], "-k", item["field_name"], "--table", item["table_name"], "-v", args[5],
+                args=["-s", args[1], "-k", names[0], *table_args, "-v", args[5],
                       "--patch-type", patch_type],
                 description=step.description + suffix,
             )

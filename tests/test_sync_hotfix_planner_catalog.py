@@ -24,7 +24,12 @@ def test_generated_catalog_contains_environment_mapping_and_only_executable_hotf
     # Hotfix routes are rendered live by the Gateway registry, never checked in.
     assert "-k faction_swap_team_member_min" not in rendered
     hotfix = [c for c in parse_call_contracts(rendered).contracts if c.path.endswith("auto_hotfix_tool.py")]
-    assert sorted(c.name for c in hotfix) == ["cleanup-legacy-auto-hotfix", "hotfix-threshold-apply", "restore-auto-hotfix"]
+    assert sorted(c.name for c in hotfix) == [
+        "cleanup-legacy-auto-hotfix",
+        "hotfix-threshold-apply",
+        "hotfix-threshold-apply-multi-table",
+        "restore-auto-hotfix",
+    ]
     apply = next(c for c in hotfix if c.name == "hotfix-threshold-apply")
     assert apply.args == ("-s", "{server_id}", "-k", "{field}", "--table", "{table}", "-v", "{value}", "--patch-type", "{patch_type}")
 

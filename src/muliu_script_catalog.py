@@ -52,9 +52,63 @@ class MuliuCallContract:
     route_scopes: frozenset[str] = frozenset()
     # Non-empty: executed by a Worker-side backend (e.g. the UI-automation API), not by Muliu / GS-1.
     backend: str = ""
+    # 可重复参数对（如 ``["--table", "{table}"]``）：模板中该段可以被匹配 1..N 次，
+    # 用于「同一次调用改多张表」。``repeat`` 必须是 ``args`` 中一段连续子序列。
+    repeat: tuple[str, ...] = ()
+
+    def _matches_repeating(self, step: MuliuStep) -> bool:
+        """Match a template containing a repeatable segment (``--table a --table b``)."""
+        pattern = self.repeat
+        width = len(pattern)
+        start = next(
+            (index for index in range(len(self.args) - width + 1)
+             if self.args[index:index + width] == pattern),
+            None,
+        )
+        if start is None:
+            return False
+        head, tail = self.args[:start], self.args[start + width:]
+        # 模板里写了重复段几次，调用就至少要出现几次，长度必须能被重复段整除。
+        # 这让「单表」与「多表」两份合同不会互相抢匹配。
+        occurrences = sum(
+            1 for index in range(len(self.args) - width + 1)
+            if self.args[index:index + width] == pattern
+        )
+        minimum = len(head) + width * occurrences + len(tail)
+        if len(step.args) < minimum:
+            return False
+        if not self._match_segment(step.args[:len(head)], head):
+            return False
+        remaining = len(step.args) - len(head) - len(tail)
+        if remaining < width * occurrences or remaining % width != 0:
+            return False
+        middle = step.args[len(head):len(head) + remaining]
+        for offset in range(0, remaining, width):
+            if not self._match_segment(middle[offset:offset + width], pattern):
+                return False
+        if tail and not self._match_segment(step.args[-len(tail):], tail):
+            return False
+        return True
+
+    def _match_segment(self, actual: Any, template: Any) -> bool:
+        if len(actual) != len(template):
+            return False
+        for actual_argument, template_argument in zip(actual, template):
+            variable_match = _VARIABLE_TEMPLATE_PATTERN.fullmatch(template_argument)
+            if variable_match is None:
+                if actual_argument != template_argument:
+                    return False
+                continue
+            if self.variable_patterns[variable_match.group(1)].fullmatch(actual_argument) is None:
+                return False
+        return True
 
     def matches(self, step: MuliuStep) -> bool:
-        if step.path != self.path or len(step.args) != len(self.args):
+        if step.path != self.path:
+            return False
+        if self.repeat:
+            return self._matches_repeating(step)
+        if len(step.args) != len(self.args):
             return False
 
         for actual_argument, template_argument in zip(step.args, self.args):
@@ -360,7 +414,7 @@ def _parse_contract(raw_contract: object, index: int) -> MuliuCallContract:
         raise MuliuCallContractError("{} 必须是 JSON 对象".format(label))
     _reject_unknown_fields(
         raw_contract,
-        {"name", "path", "args", "variables", "runner", "risk", "route_scopes", "backend"},
+        {"name", "path", "args", "variables", "runner", "risk", "route_scopes", "backend", "repeat"},
         label,
     )
 
@@ -405,6 +459,19 @@ def _parse_contract(raw_contract: object, index: int) -> MuliuCallContract:
                 "{}.variables.{} 不是合法正则".format(label, variable_name)
             ) from exc
 
+    raw_repeat = raw_contract.get("repeat") or []
+    if not isinstance(raw_repeat, list):
+        raise MuliuCallContractError("{}.repeat 必须是数组".format(label))
+    repeat = tuple(
+        _require_non_empty_string(value, "{}.repeat[{}]".format(label, position))
+        for position, value in enumerate(raw_repeat, start=1)
+    )
+    if repeat:
+        if len(repeat) >= len(args):
+            raise MuliuCallContractError("{}.repeat 必须比 args 短".format(label))
+        if not any(tuple(args[i:i + len(repeat)]) == repeat for i in range(len(args) - len(repeat) + 1)):
+            raise MuliuCallContractError("{}.repeat 必须是 args 中的一段连续子序列".format(label))
+
     for argument in args:
         variable_match = _VARIABLE_TEMPLATE_PATTERN.fullmatch(argument)
         if variable_match is not None and variable_match.group(1) not in variable_patterns:
@@ -420,6 +487,7 @@ def _parse_contract(raw_contract: object, index: int) -> MuliuCallContract:
         risk=risk,
         route_scopes=route_scopes,
         backend=backend,
+        repeat=repeat,
     )
 
 

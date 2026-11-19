@@ -66,6 +66,7 @@ THRESHOLDS_HTML = r"""<!doctype html>
   .form input:disabled { background: var(--paper); color: var(--ink-3); }
   .form textarea { min-height: 60px; resize: vertical; }
   .form .wide { grid-column: 2 / 5; }
+  .target-row { display: grid; grid-template-columns: 1fr 1fr auto; gap: 6px; margin-bottom: 6px; }
   .hint { font-size: 12px; color: var(--ink-3); margin: 2px 0 0; }
   .actions { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; align-items: center; }
   .meta-line { font-size: 12px; color: var(--ink-3); margin-left: auto; }
@@ -156,7 +157,8 @@ function matches(item) {
   const q = $("#search").value.trim().toLowerCase();
   if (tab !== "all" && item.state !== tab) return false;
   if (!q) return true;
-  return [item.name, item.key, item.table_name, item.field_name, item.description, item.source, item.notes, ...item.aliases]
+  const paths = targetsOf(item).flatMap((t) => [t.table, t.field]);
+  return [item.name, item.key, ...paths, item.description, item.source, item.notes, ...item.aliases]
     .some((v) => String(v || "").toLowerCase().includes(q));
 }
 
@@ -169,13 +171,18 @@ function render() {
     ${shown.map(rowHtml).join("")}</div>`;
 }
 
+function targetsOf(item) {
+  const list = item.targets && item.targets.length ? item.targets : [{ table: item.table_name, field: item.field_name }];
+  return list;
+}
+
 function rowHtml(item) {
   const expanded = open.has(item.key);
   return `<div class="row ${item.state}" data-key="${esc(item.key)}" aria-expanded="${expanded}" tabindex="0">
       <span class="dot ${item.state}" title="${item.state === "active" ? "启用" : "停用"}"></span>
       <span><div class="name">${esc(item.name)}</div>${item.aliases.length ? `<div class="aliases">${esc(item.aliases.join("、"))}</div>` : ""}</span>
       <span class="key"><code>${esc(item.key)}</code></span>
-      <span class="path"><code>${esc(item.table_name)}.${esc(item.field_name)}</code></span>
+      <span class="path"><code>${targetsOf(item).map((t) => esc(t.table) + "." + esc(t.field)).join("  ·  ")}</code></span>
       <span class="desc" title="${esc(item.description)}">${esc(item.description)}</span>
       <span>${item.executed ? '<span class="badge used" title="已有任务执行过：不能删除、不能改生效路径">已执行</span>' : ""}</span>
       <span class="when">${clock(item.updated_at)}</span>
@@ -189,8 +196,12 @@ function formHtml(item, isNew = false) {
       ${isNew ? `<label>key</label><div class="wide"><input name="key" placeholder="如 union_impeach_min" autocomplete="off"><p class="hint">小写字母开头，小写字母 / 数字 / 下划线；创建后不能改，飞书计划里使用它。</p></div>` : ""}
       <label>中文名</label><input name="name" value="${esc(item.name)}">
       <label>别名</label><input name="aliases" value="${esc((item.aliases || []).join("、"))}" placeholder="用 、 或逗号分隔">
-      <label>表名</label><input name="table_name" value="${esc(item.table_name)}" ${lock}>
-      <label>字段名</label><input name="field_name" value="${esc(item.field_name)}" ${lock}>
+      <label>生效位置</label>
+      <div class="wide" data-targets>
+        <p class="hint">同一次热更改多个位置时逐行填写，会写进同一个补丁文件一起生效。</p>
+        ${targetsHtml(item)}
+        <button class="btn" type="button" data-act="add-target" ${lock}>+ 再加一个位置</button>
+      </div>
       <label>说明</label><textarea class="wide" name="description">${esc(item.description)}</textarea>
       <label>来源</label><input name="source" value="${esc(item.source)}">
       <label>备注</label><input name="notes" value="${esc(item.notes)}">
@@ -220,12 +231,28 @@ function reviewHtml(r) {
     ${r.comments ? `<dt>其他</dt><dd>${esc(r.comments)}</dd>` : ""}</dl></div>`;
 }
 
+function targetsHtml(item) {
+  const list = (item.targets && item.targets.length) ? item.targets : [{ table: item.table_name || "", field: item.field_name || "" }];
+  return list.map((t) => `<div class="target-row">
+      <input name="target_table" value="${esc(t.table || "")}" placeholder="Lua 表名" ${item.executed ? "disabled" : ""}>
+      <input name="target_field" value="${esc(t.field || "")}" placeholder="字段名" ${item.executed ? "disabled" : ""}>
+      <button class="btn" type="button" data-act="drop-target" ${item.executed ? "disabled" : ""}>移除</button>
+    </div>`).join("");
+}
+
+function readTargets(container) {
+  const rows = [...container.querySelectorAll("[data-targets] .target-row")];
+  return rows.map((row) => ({
+    table: (row.querySelector("[name=target_table]") || {}).value?.trim() || "",
+    field: (row.querySelector("[name=target_field]") || {}).value?.trim() || "",
+  })).filter((t) => t.table || t.field);
+}
+
 function readForm(container) {
   const v = (name) => { const el = container.querySelector(`[name=${name}]`); return el ? el.value.trim() : undefined; };
   const data = { name: v("name"), aliases: splitAliases(v("aliases") || ""), description: v("description"), source: v("source"), notes: v("notes") };
-  const table = container.querySelector("[name=table_name]"), field = container.querySelector("[name=field_name]");
-  if (!table.disabled) data.table_name = table.value.trim();
-  if (!field.disabled) data.field_name = field.value.trim();
+  const rows = [...container.querySelectorAll("[data-targets] .target-row")];
+  if (rows.length && !rows[0].querySelector("input").disabled) data.targets = readTargets(container);
   if (container.querySelector("[name=key]")) data.key = v("key");
   return data;
 }
@@ -276,9 +303,36 @@ function rerenderForm(slot, container) {
   if (box) box.outerHTML = html; else container.querySelector(".actions").insertAdjacentHTML("afterend", html);
 }
 
+function targetRowHtml() {
+  return `<div class="target-row">
+      <input name="target_table" placeholder="Lua 表名">
+      <input name="target_field" placeholder="字段名">
+      <button class="btn" type="button" data-act="drop-target">移除</button>
+    </div>`;
+}
+
+function handleTargetAction(action, button, detail) {
+  if (action === "add-target") {
+    const box = detail.querySelector("[data-targets]");
+    box.querySelector("[data-act=add-target]").insertAdjacentHTML("beforebegin", targetRowHtml());
+    return true;
+  }
+  if (action === "drop-target") {
+    const rows = detail.querySelectorAll("[data-targets] .target-row");
+    if (rows.length <= 1) { toast("至少保留一个生效位置"); return true; }
+    button.closest(".target-row").remove();
+    return true;
+  }
+  return false;
+}
+
 $("#content").addEventListener("click", (e) => {
   const button = e.target.closest("button[data-act]");
-  if (button) { const detail = button.closest("[data-detail]"); act(button.dataset.act, detail.dataset.detail, detail, button); return; }
+  if (button) {
+    const detail = button.closest("[data-detail]");
+    if (handleTargetAction(button.dataset.act, button, detail)) return;
+    act(button.dataset.act, detail.dataset.detail, detail, button); return;
+  }
   const row = e.target.closest(".row");
   if (!row) return;
   const key = row.dataset.key;
@@ -295,7 +349,7 @@ $("#new-panel").addEventListener("click", (e) => {
 });
 $("#new").onclick = () => {
   const panel = $("#new-panel");
-  panel.innerHTML = `<div class="detail"><h3>新增阈值</h3>${formHtml({ name: "", aliases: [], table_name: "", field_name: "", description: "", source: "", notes: "" }, true)}</div>`;
+  panel.innerHTML = `<div class="detail"><h3>新增阈值</h3>${formHtml({ name: "", aliases: [], table_name: "", field_name: "", targets: [], description: "", source: "", notes: "" }, true)}</div>`;
   panel.hidden = false; panel.querySelector("[name=key]").focus();
 };
 $("#tabs").addEventListener("click", (e) => {

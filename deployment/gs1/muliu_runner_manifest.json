@@ -588,6 +588,36 @@
       "risk": "write"
     },
     {
+      "name": "hotfix-threshold-apply-multi-table",
+      "path": "/home/serverGeneralScript/auto_hotfix_tool.py",
+      "args": [
+        "-s",
+        "{server_id}",
+        "-k",
+        "{field}",
+        "--table",
+        "{table}",
+        "--table",
+        "{table2}",
+        "-v",
+        "{value}",
+        "--patch-type",
+        "{patch_type}"
+      ],
+      "variables": {
+        "field": "[A-Za-z_][A-Za-z0-9_]{0,63}",
+        "patch_type": "avatar|battle|center|client_account|client_avatar|common|login|scene|test|union|unionmirror",
+        "server_id": "[0-9]{3,8}",
+        "table": "[A-Za-z_][A-Za-z0-9_]{0,63}",
+        "table2": "[A-Za-z_][A-Za-z0-9_]{0,63}",
+        "value": "[0-9]{1,16}"
+      },
+      "runner": [
+        "python3.7"
+      ],
+      "risk": "write"
+    },
+    {
       "name": "cleanup-legacy-auto-hotfix",
       "path": "/home/serverGeneralScript/auto_hotfix_tool.py",
       "args": [

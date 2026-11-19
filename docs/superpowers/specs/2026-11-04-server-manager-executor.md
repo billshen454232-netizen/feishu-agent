@@ -59,7 +59,6 @@
 | `startup-failure-diagnosis` | `task_type=log`（kind=error、since_minutes） | 第二期评估 |
 | 合服 `exc_server_merge.sh` | `merge_servers` 工作流 | 第二期评估（参数模型不同） |
 | 热更阈值、`cc_patch`、`control_is_pub`、`starttime`、`basic_info`、批量版本查询、`clear_zone` / `cleardb` 等 | 无对应 | 保留木流 |
-| — | `run-debug-code`（任意代码执行） | **不接入** |
 
 ## 4. 架构（方案 C：混合路线，逐项开关）
 
@@ -144,6 +143,6 @@ API 合服是完整编排，步骤（来自运行记录）：`precheck-dbs` → 
 ## 8. 安全边界
 
 - API 文档未写鉴权，Worker 是唯一调用方；Gateway 不直接调用（国服本来就 403）；
-- 只接入翻译表登记的 `task_type`，不暴露 `run-debug-code`、配置写入、文件上传、Agent 部署等接口；
+- 只接入翻译表登记的 `task_type`；
 - 写操作不自动重跑；只读查询（status / log）沿用「通信失败自动重跑一次」；
 - 不在日志、飞书卡片、AI 输入中输出 API 返回里的 Mongo 账号等敏感字段（`/api/servers` 含 `mongo_hosts.users`，服号清单只取 `id` / `group`）。
