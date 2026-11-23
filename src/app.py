@@ -32,6 +32,7 @@ from .baye_check import (
     should_judge,
 )
 from .qa_library import QaService, QaStore
+from .duty_queries import DutyQueries
 from .event_handler import FeishuEventHandler
 from .execution_report import ExecutionReportStore
 from .feishu_client import FeishuClient
@@ -143,7 +144,11 @@ def create_app(config_path: str | Path = "config/config.json") -> FastAPI:
         # Only a Gateway has the intranet team-kb service pulling questions.
         team_kb_questions=team_kb_questions if config.runtime.role == "gateway" else None,
     )
-    event_handler = FeishuEventHandler(config, job_store, job_queue, job_processor=job_processor)
+    duty_queries = (
+        DutyQueries.from_env(team_kb_questions, feishu_client, event_token=config.feishu.verification_token)
+        if config.runtime.role == "gateway" else None
+    )
+    event_handler = FeishuEventHandler(config, job_store, job_queue, job_processor=job_processor, duty_queries=duty_queries)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -154,7 +159,7 @@ def create_app(config_path: str | Path = "config/config.json") -> FastAPI:
         lease_task: asyncio.Task[None] | None = None
         team_kb_task: asyncio.Task[None] | None = None
         if config.runtime.role == "gateway":
-            team_kb_task = asyncio.create_task(_watch_team_kb_questions(team_kb_questions, job_processor))
+            team_kb_task = asyncio.create_task(_watch_team_kb_questions(team_kb_questions, job_processor, duty_queries))
             await _deliver_expired_worker_leases(
                 job_store,
                 job_processor,
@@ -228,6 +233,8 @@ def create_app(config_path: str | Path = "config/config.json") -> FastAPI:
             feishu_client=feishu_client, judge_ai_client=interpretation_ai_client, team_kb_reviews=team_kb_reviews,
             team_kb_questions=team_kb_questions,
         )
+        if duty_queries is not None:
+            _add_duty_routes(app, duty_queries)
 
     return app
 
@@ -595,10 +602,39 @@ TEAM_KB_POLL_SECONDS = 0.5
 TEAM_KB_SWEEP_SECONDS = 10.0
 
 
-async def _watch_team_kb_questions(store: TeamKbQuestionStore, job_processor: MessageJobProcessor) -> None:
+def _add_duty_routes(app: FastAPI, queries: DutyQueries) -> None:
+    def authorize(authorization: Optional[str]) -> None:
+        if not queries.worker_authorized(authorization):
+            raise HTTPException(status_code=401, detail="invalid duty worker authorization")
+
+    @app.post("/internal/worker/duty/claim", include_in_schema=False)
+    async def claim_duty(authorization: Optional[str] = Header(default=None)) -> dict[str, Any]:
+        authorize(authorization)
+        return {"items": queries.claim()}
+
+    @app.post("/internal/worker/duty/{question_id}/answer", include_in_schema=False)
+    async def answer_duty(question_id: str, payload: dict[str, Any],
+                          authorization: Optional[str] = Header(default=None)) -> dict[str, str]:
+        authorize(authorization)
+        try:
+            finished = await queries.finish(question_id, payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if not finished:
+            raise HTTPException(status_code=404, detail="duty claim not active")
+        return {"status": "ok"}
+
+
+async def _watch_team_kb_questions(store: TeamKbQuestionStore, job_processor: MessageJobProcessor,
+                                  duty_queries: Optional[DutyQueries] = None) -> None:
     while True:
         await asyncio.sleep(TEAM_KB_SWEEP_SECONDS)
         await _deliver_expired_team_kb_questions(store, job_processor)
+        if duty_queries is not None and duty_queries.token:
+            try:
+                await duty_queries.expire()
+            except Exception:
+                logger.warning("duty queue expiry failed")
 
 
 async def _deliver_expired_team_kb_questions(store: TeamKbQuestionStore, job_processor: MessageJobProcessor) -> None:

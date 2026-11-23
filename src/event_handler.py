@@ -12,11 +12,13 @@ logger = logging.getLogger(__name__)
 
 
 class FeishuEventHandler:
-    def __init__(self, config: AppConfig, job_store: Any, job_queue: Any, job_processor: Any | None = None) -> None:
+    def __init__(self, config: AppConfig, job_store: Any, job_queue: Any, job_processor: Any | None = None,
+                 *, duty_queries: Any = None) -> None:
         self._config = config
         self._job_store = job_store
         self._job_queue = job_queue
         self._job_processor = job_processor
+        self._duty_queries = duty_queries
 
     async def handle(self, payload: dict[str, Any]) -> dict[str, Any]:
         if "challenge" in payload:
@@ -69,6 +71,11 @@ class FeishuEventHandler:
 
         chat_id = str(message.get("chat_id", ""))
         message_id = str(message.get("message_id", ""))
+        if self._duty_queries is not None and await self._duty_queries.accept(
+            text=user_text, chat_type=chat_type, chat_id=chat_id, message_id=message_id,
+            mentions=mentions, verification_token=header.get("token"),
+        ):
+            return {"code": 0}
         sender = event.get("sender", {})
         sender_id = sender.get("sender_id", {}) if isinstance(sender, dict) else {}
         user_id = ""

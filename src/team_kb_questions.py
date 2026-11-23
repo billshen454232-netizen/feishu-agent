@@ -107,10 +107,13 @@ class TeamKbQuestionStore:
             columns = {row["name"] for row in conn.execute("PRAGMA table_info(team_kb_questions)")}
             if "references_json" not in columns:  # reviewed answers sent along with the question (§5.8)
                 conn.execute("ALTER TABLE team_kb_questions ADD COLUMN references_json TEXT NOT NULL DEFAULT '[]'")
+            if "source" not in columns:
+                conn.execute("ALTER TABLE team_kb_questions ADD COLUMN source TEXT NOT NULL DEFAULT 'team_kb'")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_questions_source_status ON team_kb_questions (source, status, asked_at)")
             conn.commit()
 
     def ask(self, question_id: str, chat_id: str, text: str, now: Optional[int] = None, *,
-            references: Optional[list[dict[str, Any]]] = None) -> bool:
+            references: Optional[list[dict[str, Any]]] = None, source: str = "team_kb") -> bool:
         """Queue a question (keyed by the Feishu message id, so a re-processed message is not asked twice).
 
         ``references`` are reviewed answers (``{id, question, answer}``) the team-kb answer must prefer.
@@ -121,21 +124,23 @@ class TeamKbQuestionStore:
                 for r in (references or [])[:MAX_REFERENCES]]
         with self._connect() as conn:
             cursor = conn.execute(
-                "INSERT OR IGNORE INTO team_kb_questions (question_id, chat_id, text, status, asked_at, references_json) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT OR IGNORE INTO team_kb_questions (question_id, chat_id, text, status, asked_at, references_json, source) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (question_id, chat_id, text[:MAX_QUESTION_CHARS], QUESTION_PENDING, timestamp,
-                 json.dumps(refs, ensure_ascii=False)),
+                 json.dumps(refs, ensure_ascii=False), source),
             )
             conn.commit()
             return cursor.rowcount > 0
 
-    def claim(self, limit: int = 5, now: Optional[int] = None) -> list[dict[str, Any]]:
+    def claim(self, limit: int = 5, now: Optional[int] = None, *, source: str = "team_kb",
+              max_age: Optional[int] = None) -> list[dict[str, Any]]:
         timestamp = int(time.time()) if now is None else now
+        cutoff = timestamp - max_age if max_age is not None else None
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT question_id, text, asked_at, references_json FROM team_kb_questions WHERE status = ? "
-                "ORDER BY asked_at LIMIT ?",
-                (QUESTION_PENDING, limit),
+                "SELECT question_id, text, asked_at, references_json FROM team_kb_questions WHERE source = ? "
+                "AND status = ? AND (? IS NULL OR asked_at > ?) ORDER BY asked_at LIMIT ?",
+                (source, QUESTION_PENDING, cutoff, cutoff, limit),
             ).fetchall()
             claimed = []
             for row in rows:
@@ -149,16 +154,18 @@ class TeamKbQuestionStore:
             conn.commit()
         return claimed
 
-    def finish(self, question_id: str, answer: dict[str, Any], now: Optional[int] = None) -> Optional[dict[str, Any]]:
-        """Store the answer of a claimed question; None when it is unknown, already finished or timed out."""
+    def finish(self, question_id: str, answer: dict[str, Any], now: Optional[int] = None, *,
+               source: str = "team_kb", max_age: Optional[int] = None) -> Optional[dict[str, Any]]:
+        """Complete a live claim in the specified queue."""
         timestamp = int(time.time()) if now is None else now
+        cutoff = timestamp - max_age if max_age is not None else None
         with self._connect() as conn:
             cursor = conn.execute(
                 "UPDATE team_kb_questions SET status = ?, answered_at = ?, answer = ?, sources_json = ?, model = ?, error = ? "
-                "WHERE question_id = ? AND status = ?",
+                "WHERE question_id = ? AND source = ? AND status = ? AND (? IS NULL OR claimed_at > ?)",
                 (QUESTION_ANSWERED if answer["ok"] else QUESTION_FAILED, timestamp, answer["text"],
                  json.dumps(answer["sources"], ensure_ascii=False), answer["model"], answer["error"],
-                 question_id, QUESTION_CLAIMED),
+                 question_id, source, QUESTION_CLAIMED, cutoff, cutoff),
             )
             conn.commit()
             if cursor.rowcount == 0:
@@ -166,15 +173,15 @@ class TeamKbQuestionStore:
         return self.get(question_id)
 
     def expire(self, now: Optional[int] = None, *, claim_timeout: int = CLAIM_TIMEOUT_SECONDS,
-               answer_timeout: int = ANSWER_TIMEOUT_SECONDS) -> list[dict[str, Any]]:
+               answer_timeout: int = ANSWER_TIMEOUT_SECONDS, source: str = "team_kb") -> list[dict[str, Any]]:
         """Fail questions nobody claimed or answered in time; returns them so the asker can be told."""
         timestamp = int(time.time()) if now is None else now
         expired = []
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT question_id, status FROM team_kb_questions WHERE (status = ? AND asked_at <= ?) "
-                "OR (status = ? AND claimed_at <= ?)",
-                (QUESTION_PENDING, timestamp - claim_timeout, QUESTION_CLAIMED, timestamp - answer_timeout),
+                "SELECT question_id, status FROM team_kb_questions WHERE source = ? AND ((status = ? AND asked_at <= ?) "
+                "OR (status = ? AND claimed_at <= ?))",
+                (source, QUESTION_PENDING, timestamp - claim_timeout, QUESTION_CLAIMED, timestamp - answer_timeout),
             ).fetchall()
             for row in rows:
                 reason = "nobody claimed it" if row["status"] == QUESTION_PENDING else "no answer in time"

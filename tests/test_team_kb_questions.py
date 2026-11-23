@@ -46,6 +46,21 @@ def test_store_claims_once_answers_only_claimed_and_expires_slow_questions(tmp_p
     assert store.finish("om_2", parse_answer(ANSWER), now=2122) is None  # a late answer is dropped
 
 
+def test_duty_queue_isolated_from_team_kb_and_rejects_late_result(tmp_path):
+    store = _store(tmp_path)
+    assert store.ask("om_kb", "oc_group", "产品问题", now=1000)
+    assert store.ask("om_duty", "oc_group", "2026-11-23", now=1000, source="wecom_duty")
+    assert [item["id"] for item in store.claim(now=1001)] == ["om_kb"]
+    assert [item["id"] for item in store.claim(now=1001, source="wecom_duty")] == ["om_duty"]
+    answer = parse_answer(ANSWER)
+    assert store.finish("om_duty", answer, now=1002) is None
+    assert store.finish("om_kb", answer, now=1002, source="wecom_duty") is None
+    assert store.finish("om_kb", answer, now=1002) is not None
+    assert store.finish("om_duty", answer, now=1121, source="wecom_duty", max_age=120) is None
+    assert store.expire(now=1121) == []
+    assert [item["question_id"] for item in store.expire(now=1121, source="wecom_duty")] == ["om_duty"]
+
+
 def test_prefix_answer_validation_and_reply_format():
     assert strip_prefix("问题 浮桥谁测的") == "浮桥谁测的" and strip_prefix(" 问题：浮桥") == "浮桥"
     assert strip_prefix("问题, 浮桥") == "浮桥" and strip_prefix("问题") == "" and strip_prefix("问题：") == ""

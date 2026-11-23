@@ -25,3 +25,7 @@ tools/hotfix_threshold_registry.py
 # 新服开服配置检查账号表（含密码，只放在 Worker 本地）
 config/baye_accounts.*
 !config/baye_accounts.example.csv
+
+# Worker-local WeCom document links and installed dependencies
+config/wecom_tables.json
+tools/wecom_bot/node_modules/

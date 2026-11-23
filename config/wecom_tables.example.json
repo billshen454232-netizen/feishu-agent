@@ -1,0 +1,9 @@
+{
+  "tables": [
+    {
+      "name": "值班表",
+      "url": "https://doc.weixin.qq.com/sheet/EXAMPLE_DOC_ID",
+      "description": "按日期查询当天的值班人员，表中包含日期和值班人字段"
+    }
+  ]
+}
