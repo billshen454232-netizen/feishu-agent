@@ -149,6 +149,35 @@ def test_live_table_model_uses_only_confirmed_https_origins():
     assert server.table_qa.select_company_ai(ai, "https://company.example.invalid/v1") is None
 
 
+def test_live_table_model_can_be_enabled_in_ai_json(tmp_path):
+    config = tmp_path / "ai.json"
+    models = [
+        {"model": "default", "base_url": "https://default.example.invalid/v1"},
+        {"model": "approved", "base_url": "https://company.example.invalid/v1", "wecom_tables": True},
+        {"model": "disabled", "base_url": "https://default.example.invalid/v1", "wecom_tables": False},
+        {"model": "unencrypted", "base_url": "http://company.example.invalid/v1", "wecom_tables": True},
+        {"model": "string-flag", "base_url": "https://default.example.invalid/v1", "wecom_tables": "true"},
+    ]
+    config.write_text(json.dumps({"models": [{**entry, "api_key": "fixture"} for entry in models]}), encoding="utf-8")
+    ai = server.cards.CardAI.from_file(str(config))
+
+    selected = server.table_qa.select_company_ai(ai)
+    assert [model["model"] for model in selected.models] == ["approved"]
+    assert selected._open is not None
+    selected_with_legacy_setting = server.table_qa.select_company_ai(ai, "https://default.example.invalid")
+    assert [model["model"] for model in selected_with_legacy_setting.models] == ["approved"]
+
+    ai.models[1]["wecom_tables"] = False
+    assert server.table_qa.select_company_ai(ai, "https://default.example.invalid") is None
+
+    config.write_text(json.dumps({"models": [
+        {**models[0], "api_key": "fixture"},
+        {**models[1], "wecom_tables": True},  # This entry has no key and is filtered out.
+    ]}), encoding="utf-8")
+    incomplete = server.cards.CardAI.from_file(str(config))
+    assert server.table_qa.select_company_ai(incomplete, "https://default.example.invalid") is None
+
+
 def _b64(text, encoding="utf-8"):
     return base64.b64encode(text.encode(encoding)).decode()
 

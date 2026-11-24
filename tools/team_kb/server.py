@@ -638,12 +638,12 @@ def main() -> None:
     if gateway:
         GatewaySync(kb, *gateway).start()
         QuestionPoller(kb, *gateway).start()
-        origins = os.getenv("WECOM_TABLE_AI_ORIGINS", "").strip()
-        if origins:
-            table_ai = table_qa.select_company_ai(ai, origins)
+        legacy_origins = os.getenv("WECOM_TABLE_AI_ORIGINS", "").strip()
+        if legacy_origins or (ai is not None and ai.wecom_tables_configured):
+            table_ai = table_qa.select_company_ai(ai, legacy_origins)
             QuestionPoller(kb, *gateway, table_answer=lambda item: table_qa.answer_table(item, table_ai)).start()
             if table_ai is None:
-                logger.warning("WeCom table model is missing for the configured company origins")
+                logger.warning("WeCom table model configuration does not match a usable HTTPS model")
     else:
         logger.warning("gateway sync and Feishu questions disabled: no --agent-config with runtime.gateway_base_url / worker_token")
     if ai:

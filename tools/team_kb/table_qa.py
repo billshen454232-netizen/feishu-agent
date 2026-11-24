@@ -51,19 +51,20 @@ def _origin(value):
     return f'https://{host}' + (f':{port}' if port not in (None, 443) else '')
 
 
-def select_company_ai(ai, origins):
-    """Use only the explicitly confirmed upstreams from the existing AI configuration."""
-    if ai is None or not origins:
+def select_company_ai(ai, legacy_origins=''):
+    """Select HTTPS models explicitly enabled for table questions in ai.json."""
+    if ai is None:
         return None
-    approved = set()
-    for value in origins.split(','):
-        value = value.strip()
-        if not value:
-            continue
-        origin = _origin(value)
-        if origin is not None and value.rstrip('/') == origin:
-            approved.add(origin)
-    models = [model for model in ai.models if _origin(model['base_url']) in approved]
+    if ai.wecom_tables_configured:
+        models = [model for model in ai.models if model.get('wecom_tables') is True and _origin(model['base_url'])]
+    else:
+        # Existing installations can keep using the origin setting until they opt in a model in ai.json.
+        approved = set()
+        for value in legacy_origins.split(','):
+            origin = _origin(value.strip())
+            if origin is not None and value.strip().rstrip('/') == origin:
+                approved.add(origin)
+        models = [model for model in ai.models if _origin(model['base_url']) in approved]
     return CardAI(models[:2], min(ai.timeout, 16), allow_redirects=False) if models else None
 
 

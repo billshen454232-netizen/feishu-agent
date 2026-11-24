@@ -129,6 +129,7 @@ class CardAI:
 
     def __init__(self, models: List[Dict], timeout: float = 120.0, *, allow_redirects: bool = True) -> None:
         self.models, self.timeout = models, timeout
+        self.wecom_tables_configured = any('wecom_tables' in model for model in models)
         self._open = None if allow_redirects else build_opener(_NoRedirects()).open
 
     @classmethod
@@ -136,9 +137,15 @@ class CardAI:
         if not path or not Path(path).is_file():
             return None
         data = json.loads(Path(path).read_text(encoding="utf-8"))
-        models = [m for m in data.get("models") or [] if isinstance(m, dict) and m.get("api_key") and m.get("model")
+        entries = [m for m in data.get("models") or [] if isinstance(m, dict)]
+        models = [m for m in entries if m.get("api_key") and m.get("model")
                   and str(m.get("base_url") or "").startswith(("http://", "https://"))]
-        return cls(models, float(data.get("timeout_seconds") or 120)) if models else None
+        if not models:
+            return None
+        ai = cls(models, float(data.get("timeout_seconds") or 120))
+        # A marked entry with missing fields must not trigger the legacy fallback.
+        ai.wecom_tables_configured = any('wecom_tables' in model for model in entries)
+        return ai
 
     def complete(self, system: str, user: str, max_tokens: int = 800) -> Tuple[str, str]:
         """``(reply text, model name)`` from the first model that answers; raises CardError when none does."""

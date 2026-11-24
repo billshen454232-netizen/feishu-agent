@@ -25,7 +25,7 @@
 
 `team-kb` 的查表轮询在本机按名称和用途选择数据源，送入模型的是脱敏问题、所选表格的有限摘录及实际坐标。回复由程序从已读取的单元格位置生成引用，部分覆盖时显示提示。
 
-在 `team-kb` 的本地环境文件将 `WECOM_TABLE_AI_ORIGINS` 设为经确认可处理企微资料的公司 HTTPS 来源地址，多个地址用逗号分隔。查表从现有 `/opt/team-kb/ai.json` 选用匹配来源的模型。
+在 `/opt/team-kb/ai.json` 的 `models` 数组中，给经确认可处理企微资料的公司 HTTPS 模型加上 `"wecom_tables": true`。重启 `team-kb` 后，查表优先使用按配置顺序标记的模型（最多两项）。旧配置未声明 `wecom_tables` 时，仍兼容已设置的 `WECOM_TABLE_AI_ORIGINS`。
 
 Gateway、`team-kb` 和 `wecom-bot` 需发布到同一版本，查表领取和回传走新版队列协议。JKS 安装 `tools/wecom_bot/` 的运行文件及 `wecom-bot.service`，并同步 `tools/team_kb/` 到知识库服务的运行目录。三个服务按各自的发布流程重启。升级后通过配置页启用已确认可共享的表格，从机器人所在群提问并对照原表。此后新增或停用表格在配置页保存即可生效。
 
