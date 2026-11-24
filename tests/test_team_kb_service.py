@@ -26,6 +26,104 @@ TABLE = """---
 """
 
 
+def test_live_table_poller_uses_registered_excerpts_and_actual_coordinates():
+    api_calls, sheet_calls, prompts = [], [], []
+    catalog = [
+        {"id": "plan", "name": "周计划", "description": "查本周任务 https://example.invalid/private"},
+        {"id": "smoke", "name": "冒烟", "description": "查服号"},
+        {"id": "private", "name": "未启用的表", "description": "其他"},
+    ]
+    preview = {"name": "周计划", "skippedTabs": 0, "tabs": [
+        {"title": "版本A", "coverage": ["B4:E6"], "partial": True, "rows": [
+            {"row": 4, "column": 2, "values": ["测试计划", None, "发布状态", None]},
+            {"row": 5, "column": 2, "values": ["任务", "进度", "状态", "测试账号密码"]},
+            {"row": 6, "column": 2, "values": ["回归", None, "待完成", "fixture-secret-value"]},
+        ]},
+        {"title": "版本B", "coverage": [], "partial": True, "unavailable": True, "rows": []},
+    ]}
+    item = {"id": "om_table", "text": "本周有哪些任务还未完成？", "table_ids": ["plan", "smoke"]}
+
+    def read(path):
+        sheet_calls.append(path)
+        return {"/tables": {"tables": catalog}, "/tables/plan": preview}[path]
+
+    class Model:
+        def complete(self, system, user, max_tokens):
+            prompts.append(json.loads(user))
+            if len(prompts) == 1:
+                return '{"id":"plan"}', "stub"
+            return '{"answer":"回归任务待完成。", "citations":["S1R6"]}', "stub"
+
+    model = Model()
+    poller = server.QuestionPoller(None, "https://example.invalid", "fixture", table_answer=lambda q: server.table_qa.answer_table(q, model, read))
+
+    def call(method, path, payload=None, timeout=20):
+        api_calls.append((method, path, payload))
+        return {"items": [item]} if method == "GET" else {}
+
+    poller._call = call
+    result = poller.answer_one(poller.poll_once()[0])
+    assert sheet_calls == ["/tables", "/tables/plan"]
+    assert [table["id"] for table in prompts[0]["tables"]] == ["plan", "smoke"]
+    assert "example.invalid" not in json.dumps(prompts, ensure_ascii=False)
+    assert "fixture-secret-value" not in json.dumps(prompts, ensure_ascii=False)
+    row = next(row for row in prompts[1]["excerpts"] if row["id"] == "S1R6")
+    assert row["cells"] == {"B6": "回归", "D6": "待完成"}
+    assert prompts[1]["partial"] is True
+    assert result == {
+        "ok": True, "table_id": "plan",
+        "text": "回归任务待完成。\n\n来源：周计划\n版本A!B6:D6\n本次仅核对了表格摘录。",
+    }
+    assert api_calls == [
+        ("GET", "/internal/team-kb/table-questions?wait=25", None),
+        ("POST", "/internal/team-kb/table-questions/om_table/answer", result),
+    ]
+
+
+def test_live_table_rejects_unregistered_selection_and_uncited_answers():
+    item = {"text": "最近通过了吗", "table_ids": ["enabled"]}
+    calls = []
+
+    def read(path):
+        calls.append(path)
+        if path == "/tables":
+            return {"tables": [{"id": "enabled", "name": "冒烟表", "description": "查询结果"}]}
+        assert path == "/tables/enabled"
+        return {"name": "冒烟表", "tabs": [{"title": "结果", "coverage": ["D8:E8"], "rows": [
+            {"row": 8, "column": 4, "values": ["最新", "通过"]},
+        ]}]}
+
+    class Model:
+        def __init__(self, selection):
+            self.selection = selection
+
+        def complete(self, system, user, max_tokens):
+            answer = {"id": self.selection} if "tables" in json.loads(user) else {
+                "answer": "有记录", "citations": ["S1R30"],
+            }
+            return json.dumps(answer), "stub"
+
+    assert server.table_qa.answer_table(item, Model("other"), read)["reason"] == "no_match"
+    assert calls == ["/tables"]
+    assert server.table_qa.answer_table(item, Model("enabled"), read)["reason"] == "no_evidence"
+    assert calls == ["/tables", "/tables", "/tables/enabled"]
+
+
+def test_live_table_model_uses_only_confirmed_https_origins():
+    ai = server.cards.CardAI([
+        {"model": "first", "base_url": "https://other.example.invalid/v1"},
+        {"model": "approved", "base_url": "https://company.example.invalid/v1"},
+        {"model": "unencrypted", "base_url": "http://company.example.invalid/v1"},
+        {"model": "lookalike", "base_url": "https://company.example.invalid.other.invalid/v1"},
+    ])
+    selected = server.table_qa.select_company_ai(ai, "https://company.example.invalid")
+    assert [model["model"] for model in selected.models] == ["approved"]
+    assert selected.timeout == 16
+    assert selected._open is not None
+    assert server.table_qa.select_company_ai(ai, "") is None
+    assert server.table_qa.select_company_ai(ai, "https://company.example.invalid/v1") is None
+
+
 def _b64(text, encoding="utf-8"):
     return base64.b64encode(text.encode(encoding)).decode()
 

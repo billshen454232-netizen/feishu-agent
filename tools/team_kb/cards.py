@@ -25,7 +25,7 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import build_site  # noqa: E402
@@ -119,11 +119,17 @@ def clean_card(content: str, title: str) -> Optional[str]:
     return "\n".join(lines) + "\n"
 
 
+class _NoRedirects(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 class CardAI:
     """OpenAI-compatible chat models from ai.json, tried in order (cards and Feishu answers); errors never contain the key."""
 
-    def __init__(self, models: List[Dict], timeout: float = 120.0) -> None:
+    def __init__(self, models: List[Dict], timeout: float = 120.0, *, allow_redirects: bool = True) -> None:
         self.models, self.timeout = models, timeout
+        self._open = None if allow_redirects else build_opener(_NoRedirects()).open
 
     @classmethod
     def from_file(cls, path: str) -> Optional["CardAI"]:
@@ -173,7 +179,7 @@ class CardAI:
                      "User-Agent": "team-kb/1.0"},
         )
         try:
-            with urlopen(request, timeout=self.timeout) as response:
+            with (self._open or urlopen)(request, timeout=self.timeout) as response:
                 data = json.loads(response.read().decode("utf-8"))
             return str(data["choices"][0]["message"]["content"] or "")
         except HTTPError as exc:

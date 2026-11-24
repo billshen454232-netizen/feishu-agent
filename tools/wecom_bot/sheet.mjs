@@ -78,58 +78,86 @@ function rowCount(sheet) {
   return lastRow ? Number(lastRow[1]) : sheet.row_count;
 }
 
-export async function lookupDuty(cli, source, date) {
+async function listSheets(cli, source) {
   const { sheets } = await cli(['get', '--docid', source.url]);
   if (!Array.isArray(sheets)) throw new Error('企微返回的工作表列表不可用。');
-  const candidates = source.tab ? sheets.filter(sheet => sheet.sheet_id === source.tab) : sheets;
-  if (!candidates.length) throw new Error('没有找到目标工作表，请核对表格链接。');
-  const records = [];
-  let recognized = false;
-  let sawDate = false;
-  const range = async (sheet, a1) => {
+  return sheets;
+}
+
+async function readDutySheet(cli, source, sheet, date) {
+  const end = rowCount(sheet);
+  if (sheet.data_range === '' || !Number.isSafeInteger(end) || end < 1 || !sheet.sheet_id) return null;
+  const range = async a1 => {
     const result = await cli(['ranges', 'get', '--docid', source.url, '--sheet-id', sheet.sheet_id,
       '--range', a1, '--mode', 'default']);
-    const rows = result.grid_data?.rows;
-    if (!Array.isArray(rows)) throw new Error('企微返回的单元格数据不可用。');
-    return rows;
+    const grid = result.grid_data;
+    if (!Array.isArray(grid?.rows)) throw new Error('企微返回的单元格数据不可用。');
+    return grid;
   };
 
-  for (const sheet of candidates) {
-    if (sheet.data_range === '') continue;
-    const end = rowCount(sheet);
-    if (!Number.isSafeInteger(end) || end < 1 || !sheet.sheet_id) continue;
-    const width = Math.min(36, Math.max(1, sheet.column_count || 36));
-    const header = await range(sheet, `A1:${col(width - 1)}${Math.min(end, HEADER_ROWS)}`);
-    for (const [index, row] of header.entries()) {
-      const labels = (row.values ?? []).map(cell => cellText(cell).replace(/\s+/g, '').toLowerCase());
-      const dateCol = labels.findIndex(text => DATE_HEADERS.has(text));
-      const dutyCols = labels.flatMap((text, i) =>
-        DUTY_HEADERS.has(text) || /^值班人[一二三四五六七八九十0-9]+$/.test(text) ? [i] : []);
-      if (dateCol < 0 || !dutyCols.length) continue;
-      recognized = true;
-      const first = index + 2;
-      if (end - first + 1 > MAX_SCAN_ROWS) throw new Error('值班表行数超出单次查询范围，请使用目标工作表链接。');
-      if (first > end) break;
-      const letter = col(dateCol);
-      for (let start = first; start <= end; start += 200) {
-        const dates = await range(sheet, `${letter}${start}:${letter}${Math.min(end, start + 199)}`);
-        for (const [offset, day] of dates.entries()) {
-          const key = cellDate(day.values?.[0]);
-          if (key) sawDate = true;
-          if (key !== date) continue;
-          const actualRow = start + offset;
-          for (const position of dutyCols) {
-            const address = `${col(position)}${actualRow}`;
-            const [result] = await range(sheet, `${address}:${address}`);
-            const person = cellText(result?.values?.[0]);
-            if (person) records.push(person);
-          }
+  const width = Math.min(36, Math.max(1, sheet.column_count || 36));
+  const header = await range(`A1:${col(width - 1)}${Math.min(end, HEADER_ROWS)}`);
+  for (const [index, row] of header.rows.entries()) {
+    const labels = (row.values ?? []).map(cell => cellText(cell).replace(/\s+/g, '').toLowerCase());
+    const dateCol = labels.findIndex(text => DATE_HEADERS.has(text));
+    const dutyCols = labels.flatMap((text, i) =>
+      DUTY_HEADERS.has(text) || /^值班人[一二三四五六七八九十0-9]+$/.test(text) ? [i] : []);
+    if (dateCol < 0 || !dutyCols.length) continue;
+
+    const first = (header.start_row ?? 0) + index + 2;
+    if (end - first + 1 > MAX_SCAN_ROWS) throw new Error('值班表行数超出单次查询范围。');
+    const firstColumn = header.start_column ?? 0;
+    const letter = col(firstColumn + dateCol);
+    const people = new Set();
+    let sawDate = false;
+    for (let start = first; start <= end; start += 200) {
+      const dates = await range(`${letter}${start}:${letter}${Math.min(end, start + 199)}`);
+      for (const [offset, day] of dates.rows.entries()) {
+        const key = cellDate(day.values?.[0]);
+        if (key) sawDate = true;
+        if (key !== date) continue;
+        const actualRow = (dates.start_row ?? start - 1) + offset + 1;
+        for (const position of dutyCols) {
+          const address = `${col(firstColumn + position)}${actualRow}`;
+          const { rows: [result] } = await range(`${address}:${address}`);
+          const person = cellText(result?.values?.[0]);
+          if (person) people.add(person);
         }
       }
-      break;
     }
+    return { people: [...people], sawDate };
   }
-  if (!recognized) throw new Error('找不到日期和值班人列，请核对表头。');
-  if (!sawDate) throw new Error('没有读到完整日期，请核对值班表日期格式。');
-  return [...new Set(records)];
+  return null;
+}
+
+export async function lookupDuty(cli, source, date) {
+  const sheets = await listSheets(cli, source);
+  const candidates = source.tab ? sheets.filter(sheet => sheet.sheet_id === source.tab) : sheets;
+  if (!candidates.length) throw new Error('没有找到目标工作表，请核对表格链接。');
+  const results = [];
+  for (const sheet of candidates) {
+    const record = await readDutySheet(cli, source, sheet, date);
+    if (record) results.push(record);
+  }
+  if (!results.length) throw new Error('找不到日期和值班人列，请核对表头。');
+  if (!results.some(record => record.sawDate)) throw new Error('没有读到完整日期，请核对值班表日期格式。');
+  return [...new Set(results.flatMap(record => record.people))];
+}
+
+export async function lookupDutyBySheet(cli, source, date) {
+  // A copied link usually pins the tab open in the browser. Feishu queries span the workbook.
+  const sheets = await listSheets(cli, source);
+  const results = [];
+  for (const [index, sheet] of sheets.entries()) {
+    const title = sheet.title?.trim() || `工作表 ${index + 1}`;
+    let record;
+    try {
+      record = await readDutySheet(cli, source, sheet, date);
+    } catch {
+      // Preserve results from other tabs when a tab cannot be read.
+    }
+    const people = record?.sawDate ? record.people : null;
+    results.push({ title, people });
+  }
+  return results;
 }

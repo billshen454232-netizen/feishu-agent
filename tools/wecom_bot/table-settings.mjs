@@ -125,6 +125,9 @@ export async function openTableSettings({ stateDir, cliBinary, reader = makeShee
 
   return {
     get current() { return { source: current.tables[0], configDir: current.configDir }; },
+    readerSource(id) {
+      return { source: current.tables.find(table => table.id === id), configDir: current.configDir };
+    },
     view: () => ({
       authorized: Boolean(current.configDir), enrollment: enrollment?.status ?? 'idle',
       tables: current.tables,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import logging
+import os
 import re
 import time
 from contextlib import asynccontextmanager
@@ -22,7 +23,10 @@ from .plan_board import PlanStore
 from .hotfix_thresholds import HotfixPlannerCatalog, ThresholdStore
 from .execution_routes import ExecutionRouteStore
 from .team_kb_reviews import ReviewError, TeamKbReviewStore, parse_review_item
-from .team_kb_questions import UNAVAILABLE_REPLY, QuestionError, TeamKbQuestionStore, format_reply, parse_answer
+from .team_kb_questions import (
+    ANSWER_TIMEOUT_SECONDS, CLAIM_TIMEOUT_SECONDS, MAX_ANSWER_CHARS, TABLE_QUESTION_SOURCE, TABLE_UNAVAILABLE, UNAVAILABLE_REPLY,
+    QuestionError, TeamKbQuestionStore, format_reply, parse_answer,
+)
 from .baye_check import (
     BayeCheckCoordinator,
     build_followup_card,
@@ -46,7 +50,7 @@ from .muliu_routing import MuliuPlanRouteResolver
 from .muliu_planner import MuliuPlanner
 from .muliu_script_catalog import BACKEND_BAYE_CHECK, MuliuScriptCatalog
 from .muliu_worker import GatewayWorkerClient, MuliuWorker
-from .operation_message import build_execution_status_card, format_execution_result
+from .operation_message import build_execution_status_card, format_execution_result, mask_sensitive_operation_data
 from .script_knowledge_base import ScriptKnowledgeBase
 from .utils.diagnostics import install_stack_dump_signals
 from .worker_protocol import (
@@ -148,7 +152,10 @@ def create_app(config_path: str | Path = "config/config.json") -> FastAPI:
         DutyQueries.from_env(team_kb_questions, feishu_client, event_token=config.feishu.verification_token)
         if config.runtime.role == "gateway" else None
     )
-    event_handler = FeishuEventHandler(config, job_store, job_queue, job_processor=job_processor, duty_queries=duty_queries)
+    event_handler = FeishuEventHandler(
+        config, job_store, job_queue, job_processor=job_processor, duty_queries=duty_queries,
+        table_questions=team_kb_questions if config.runtime.role == "gateway" else None,
+    )
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -159,7 +166,9 @@ def create_app(config_path: str | Path = "config/config.json") -> FastAPI:
         lease_task: asyncio.Task[None] | None = None
         team_kb_task: asyncio.Task[None] | None = None
         if config.runtime.role == "gateway":
-            team_kb_task = asyncio.create_task(_watch_team_kb_questions(team_kb_questions, job_processor, duty_queries))
+            team_kb_task = asyncio.create_task(
+                _watch_team_kb_questions(team_kb_questions, job_processor, duty_queries, feishu_client=feishu_client)
+            )
             await _deliver_expired_worker_leases(
                 job_store,
                 job_processor,
@@ -510,6 +519,61 @@ def _add_gateway_worker_routes(
                 return {"items": []}
             await asyncio.sleep(TEAM_KB_POLL_SECONDS)
 
+    # Only the table entries explicitly enabled for Feishu may be read or cited through this route.
+    approved_tables = frozenset(
+        value.strip() for value in os.getenv("FEISHU_WECOM_TABLE_IDS", "").split(",")
+        if re.fullmatch(r"[A-Za-z0-9_-]{1,80}", value.strip())
+    )
+
+    @app.get("/internal/team-kb/table-questions", include_in_schema=False)
+    async def claim_table_questions(
+        wait: float = 0,
+        authorization: Optional[str] = Header(default=None),
+        x_feishu_worker_id: Optional[str] = Header(default=None),
+    ) -> dict[str, Any]:
+        store = require_team_kb_questions(authorization, x_feishu_worker_id)
+        deadline = time.monotonic() + max(0.0, min(wait, TEAM_KB_MAX_WAIT_SECONDS))
+        while True:
+            items = store.claim(limit=1, source=TABLE_QUESTION_SOURCE, max_age=CLAIM_TIMEOUT_SECONDS)
+            if items or time.monotonic() >= deadline:
+                for item in items:
+                    item["table_ids"] = sorted(approved_tables)
+                return {"items": items}
+            await asyncio.sleep(TEAM_KB_POLL_SECONDS)
+
+    @app.post("/internal/team-kb/table-questions/{question_id}/answer", include_in_schema=False)
+    async def answer_table_question(
+        question_id: str,
+        payload: dict[str, Any],
+        authorization: Optional[str] = Header(default=None),
+        x_feishu_worker_id: Optional[str] = Header(default=None),
+    ) -> dict[str, str]:
+        store = require_team_kb_questions(authorization, x_feishu_worker_id)
+        reason = payload.get("reason")
+        ok = payload.get("ok") is True
+        if ok:
+            table_id, text = payload.get("table_id"), payload.get("text")
+            if not isinstance(table_id, str) or table_id not in approved_tables:
+                raise HTTPException(status_code=422, detail="table source not approved")
+            if not isinstance(text, str) or not text.strip():
+                raise HTTPException(status_code=422, detail="table answer required")
+            text = mask_sensitive_operation_data(re.sub(r"https?://[^\s<>]+", "[链接已脱敏]", text[:MAX_ANSWER_CHARS], flags=re.I))
+        else:
+            text = {
+                "model_not_configured": "企微查表模型尚未启用，请联系维护人员配置公司模型。",
+                "table_not_configured": "请先启用要在飞书查询的企微表格。",
+                "no_match": "请提供登记的表格名称，或把问题问得更具体一些。",
+                "no_evidence": "在本次读取的表格范围内没有找到足够的资料。",
+            }.get(reason if isinstance(reason, str) else "", TABLE_UNAVAILABLE)
+        question = store.finish(
+            question_id, {"ok": ok, "text": "", "sources": [], "model": "", "error": ""},
+            source=TABLE_QUESTION_SOURCE, max_age=ANSWER_TIMEOUT_SECONDS,
+        )
+        if question is None:
+            raise HTTPException(status_code=404, detail="table claim not active")
+        await _reply_table_question(feishu_client, question["question_id"], text)
+        return {"status": "ok"}
+
     @app.post("/internal/team-kb/features", include_in_schema=False)
     async def report_team_kb_features(
         payload: dict[str, Any],
@@ -625,11 +689,24 @@ def _add_duty_routes(app: FastAPI, queries: DutyQueries) -> None:
         return {"status": "ok"}
 
 
+async def _reply_table_question(feishu_client: Any, message_id: str, text: str) -> None:
+    if feishu_client is not None:
+        try:
+            await feishu_client.reply_text(message_id, text)
+        except Exception:
+            logger.warning("table reply failed")
+
+
 async def _watch_team_kb_questions(store: TeamKbQuestionStore, job_processor: MessageJobProcessor,
-                                  duty_queries: Optional[DutyQueries] = None) -> None:
+                                  duty_queries: Optional[DutyQueries] = None, *, feishu_client: Any = None) -> None:
     while True:
         await asyncio.sleep(TEAM_KB_SWEEP_SECONDS)
         await _deliver_expired_team_kb_questions(store, job_processor)
+        try:
+            for item in store.expire(source=TABLE_QUESTION_SOURCE):
+                await _reply_table_question(feishu_client, item["question_id"], TABLE_UNAVAILABLE)
+        except Exception:
+            logger.warning("table queue expiry failed")
         if duty_queries is not None and duty_queries.token:
             try:
                 await duty_queries.expire()

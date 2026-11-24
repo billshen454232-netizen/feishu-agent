@@ -28,6 +28,9 @@ MAX_REFERENCES = 3
 
 # 「问题 浮桥谁测的」「问题：…」; a separator is required so 「问题是 5000 服起不来」 still goes to the planner.
 PREFIX = re.compile(r"^\s*问题(?:\s*[:：,，]\s*|\s+|$)")
+TABLE_QUESTION_SOURCE = "wecom_table"
+TABLE_PREFIX = re.compile(r"^\s*查表(?:\s*[:：,，]\s*|\s+|$)")
+TABLE_UNAVAILABLE = "企微查表暂时不可用，请稍后再试。"
 REPLY_HEADER = "📒 组内知识库"
 UNAVAILABLE_REPLY = "📒 组内知识库暂时不可用（内网知识库服务没有响应），请稍后再问，或到内网知识库站点搜索。"
 FAILED_REPLY = "📒 组内知识库这次没能生成回答，请稍后再问一次，或到内网知识库站点搜索。"

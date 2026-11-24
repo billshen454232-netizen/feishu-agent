@@ -68,10 +68,26 @@ def test_duty_reply_is_bound_to_original_message_in_each_bot_group(tmp_path):
         assert client.post('/internal/worker/duty/claim', headers=headers).json() == {
             'items': [{'id': 'om_other_group', 'date': '2026-11-23'}],
         }
-        assert client.post('/internal/worker/duty/om_other_group/answer', headers=headers, json=result).status_code == 200
+        grouped = {'status': 'grouped', 'source': '示例值班表', 'sheets': [
+            {'title': '国内', 'people': ['示例同学']},
+            {'title': '海外', 'people': ['海外示例同学']},
+        ]}
+        assert client.post('/internal/worker/duty/om_other_group/answer', headers=headers, json=grouped).status_code == 200
+        assert store.get('om_other_group')['answer'] == ''
 
-    expected = '2026-11-23 值班人员：示例同学\n来源：示例值班表'
-    assert feishu.replies == [('om_duty', expected), ('om_other_group', expected)]
+        for suffix, people in (('empty', []), ('unavailable', None)):
+            message_id = f'om_{suffix}'
+            assert client.post('/feishu/events', json=event(message_id)).status_code == 200
+            assert client.post('/internal/worker/duty/claim', headers=headers).json()['items'][0]['id'] == message_id
+            grouped['sheets'][1]['people'] = people
+            assert client.post(f'/internal/worker/duty/{message_id}/answer', headers=headers, json=grouped).status_code == 200
+
+    assert feishu.replies == [
+        ('om_duty', '2026-11-23 值班人员：示例同学\n来源：示例值班表'),
+        ('om_other_group', '2026-11-23 值班人员\n国内：示例同学\n海外：海外示例同学\n来源：示例值班表'),
+        ('om_empty', '2026-11-23 值班人员\n国内：示例同学\n海外：未查到值班记录\n来源：示例值班表'),
+        ('om_unavailable', '2026-11-23 值班人员\n国内：示例同学\n海外：暂时无法查询\n来源：示例值班表'),
+    ]
 
 
 def test_relative_duty_day_resolves_in_beijing():

@@ -73,18 +73,33 @@ class DutyQueries:
 
     async def finish(self, question_id: str, payload: dict[str, Any]) -> bool:
         status = payload.get('status')
-        if status not in ('found', 'empty', 'unavailable'):
+        if status not in ('found', 'empty', 'grouped', 'unavailable'):
             raise ValueError('invalid duty result status')
         people: list[str] = []
+        lines: list[str] = []
         title = ''
+        has_readable_sheet = False
         if status == 'found':
-            raw_people = payload.get('people')
-            if not isinstance(raw_people, list) or not 1 <= len(raw_people) <= 32:
-                raise ValueError('invalid duty result list')
-            people = [self._field(person) for person in raw_people]
+            people = self._people(payload.get('people'), minimum=1)
+        elif status == 'grouped':
+            sheets = payload.get('sheets')
+            if not isinstance(sheets, list) or not 2 <= len(sheets) <= 32:
+                raise ValueError('invalid duty sheets')
+            for sheet in sheets:
+                if not isinstance(sheet, dict) or 'people' not in sheet:
+                    raise ValueError('invalid duty sheet')
+                sheet_title = self._field(sheet.get('title'))
+                if sheet['people'] is None:
+                    text = '暂时无法查询'
+                else:
+                    names = self._people(sheet['people'])
+                    text = '、'.join(names) if names else '未查到值班记录'
+                    has_readable_sheet = True
+                lines.append(f'{sheet_title}：{text}')
         if status != 'unavailable':
             title = self._field(payload.get('source'))
-        item = self.store.finish(question_id, {'ok': status != 'unavailable', 'text': '', 'sources': [],
+        ok = has_readable_sheet if status == 'grouped' else status != 'unavailable'
+        item = self.store.finish(question_id, {'ok': ok, 'text': '', 'sources': [],
                                                'model': '', 'error': ''}, source=_DUTY_SOURCE,
                                  max_age=ANSWER_TIMEOUT_SECONDS)
         if item is None:
@@ -95,6 +110,8 @@ class DutyQueries:
             reply = f"{item['text']} 值班人员：{'、'.join(people)}\n来源：{title}"
         elif status == 'empty':
             reply = f"{title}中没有查到 {item['text']} 的值班记录。"
+        elif status == 'grouped':
+            reply = '\n'.join([f"{item['text']} 值班人员", *lines, f'来源：{title}'])
         else:
             reply = _UNAVAILABLE
         await self._reply(item['question_id'], reply)
@@ -110,6 +127,12 @@ class DutyQueries:
             await self.feishu_client.reply_text(message_id, text)
         except Exception:  # The upstream response may include the reply body.
             logger.warning('duty reply failed')
+
+    @classmethod
+    def _people(cls, values: Any, *, minimum: int = 0) -> list[str]:
+        if not isinstance(values, list) or not minimum <= len(values) <= 32:
+            raise ValueError('invalid duty result list')
+        return [cls._field(value) for value in values]
 
     @staticmethod
     def _field(value: Any) -> str:

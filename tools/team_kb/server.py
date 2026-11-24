@@ -15,6 +15,7 @@ import base64
 import hashlib
 import json
 import logging
+import os
 import queue
 import re
 import subprocess
@@ -34,6 +35,7 @@ import build_site  # noqa: E402
 import cards  # noqa: E402
 import normalize  # noqa: E402
 import qa  # noqa: E402
+import table_qa  # noqa: E402
 
 logger = logging.getLogger("team-kb")
 
@@ -472,17 +474,22 @@ class QuestionPoller(threading.Thread):
 
     WAIT_SECONDS = 25
 
-    def __init__(self, kb: KnowledgeBase, base_url: str, token: str, workers: int = 3) -> None:
-        super().__init__(name="team-kb-questions", daemon=True)
+    def __init__(self, kb: KnowledgeBase, base_url: str, token: str, workers: int = 3, *, table_answer=None) -> None:
+        super().__init__(name="team-kb-table-questions" if table_answer else "team-kb-questions", daemon=True)
         self.kb, self.base_url, self.token = kb, base_url.rstrip("/"), token
-        self._pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="team-kb-answer")
+        self._table_answer = table_answer
+        self._queue_path = "/internal/team-kb/table-questions" if table_answer else "/internal/team-kb/questions"
+        self._pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="team-kb-answer") if not table_answer else None
         self._last_error = ""
 
     def run(self) -> None:
         while True:
             try:
                 for item in self.poll_once():
-                    self._pool.submit(self.answer_one, item)
+                    if self._pool is None:
+                        self.answer_one(item)
+                    else:
+                        self._pool.submit(self.answer_one, item)
                 if self._last_error:
                     logger.warning("question polling recovered")
                 self._last_error = ""
@@ -494,11 +501,23 @@ class QuestionPoller(threading.Thread):
                 time.sleep(15 if "HTTP 404" in message else 5)
 
     def poll_once(self) -> List[Dict]:
-        path = "/internal/team-kb/questions?wait={}".format(self.WAIT_SECONDS)
+        path = "{}?wait={}".format(self._queue_path, self.WAIT_SECONDS)
         return list(self._call("GET", path, timeout=self.WAIT_SECONDS + 15).get("items") or [])
 
     def answer_one(self, item: Dict) -> Dict:
         question_id = str(item.get("id") or "")
+        if self._table_answer is not None:
+            try:
+                result = self._table_answer(item)
+            except Exception:
+                logger.warning("table lookup failed")
+                result = {"ok": False, "reason": "lookup_failed"}
+            try:
+                self._call("POST", "{}/{}/answer".format(self._queue_path, quote(question_id, safe="")), result,
+                           timeout=10)
+            except Exception:
+                logger.warning("table answer delivery failed")
+            return result
         try:
             result = qa.answer(str(item.get("text") or ""), self.kb.index.qa, self.kb.ai,
                                references=item.get("references") or [])
@@ -619,6 +638,12 @@ def main() -> None:
     if gateway:
         GatewaySync(kb, *gateway).start()
         QuestionPoller(kb, *gateway).start()
+        origins = os.getenv("WECOM_TABLE_AI_ORIGINS", "").strip()
+        if origins:
+            table_ai = table_qa.select_company_ai(ai, origins)
+            QuestionPoller(kb, *gateway, table_answer=lambda item: table_qa.answer_table(item, table_ai)).start()
+            if table_ai is None:
+                logger.warning("WeCom table model is missing for the configured company origins")
     else:
         logger.warning("gateway sync and Feishu questions disabled: no --agent-config with runtime.gateway_base_url / worker_token")
     if ai:

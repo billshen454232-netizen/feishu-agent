@@ -1,5 +1,5 @@
 import { setTimeout as delay } from 'node:timers/promises';
-import { isoDate, lookupDuty } from './sheet.mjs';
+import { isoDate, lookupDutyBySheet } from './sheet.mjs';
 
 export async function pollDutyOnce({ request, getSettings, cliFor, signal }) {
   const { items } = await request('/claim');
@@ -15,9 +15,17 @@ export async function pollDutyOnce({ request, getSettings, cliFor, signal }) {
     try {
       const deadline = AbortSignal.timeout(85000);
       const lookupSignal = signal ? AbortSignal.any([signal, deadline]) : deadline;
-      const people = await lookupDuty(cliFor(config.configDir, lookupSignal), config.source, date);
-      if (people.length <= 32 && people.every(person => person.length <= 120)) {
-        result = { status: people.length ? 'found' : 'empty', people, source: config.source.name };
+      const sheets = await lookupDutyBySheet(cliFor(config.configDir, lookupSignal), config.source, date);
+      const bounded = sheets.map(({ title, people }) => ({
+        title: title.slice(0, 120),
+        people: people && people.length <= 32 && people.every(person => person.length <= 120) ? people : null,
+      }));
+      const source = config.source.name;
+      if (bounded.length === 1 && bounded[0].people !== null) {
+        const { people } = bounded[0];
+        result = { status: people.length ? 'found' : 'empty', people, source };
+      } else if (bounded.length > 1 && bounded.length <= 32) {
+        result = { status: 'grouped', sheets: bounded, source };
       }
     } catch {
       // CLI errors may contain private document URLs or cell data.

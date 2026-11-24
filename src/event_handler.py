@@ -7,18 +7,20 @@ from typing import Any
 
 from .config import AppConfig
 from .operation_message import QA_FEEDBACK_ACTION
+from .team_kb_questions import MAX_QUESTION_CHARS, TABLE_PREFIX, TABLE_QUESTION_SOURCE, TeamKbQuestionStore
 
 logger = logging.getLogger(__name__)
 
 
 class FeishuEventHandler:
     def __init__(self, config: AppConfig, job_store: Any, job_queue: Any, job_processor: Any | None = None,
-                 *, duty_queries: Any = None) -> None:
+                 *, duty_queries: Any = None, table_questions: TeamKbQuestionStore | None = None) -> None:
         self._config = config
         self._job_store = job_store
         self._job_queue = job_queue
         self._job_processor = job_processor
         self._duty_queries = duty_queries
+        self._table_questions = table_questions
 
     async def handle(self, payload: dict[str, Any]) -> dict[str, Any]:
         if "challenge" in payload:
@@ -53,7 +55,28 @@ class FeishuEventHandler:
         logger.warning("message event_id=%s chat_type=%s message_type=%s mentions=%s", event_id, chat_type, message.get("message_type"), len(mentions))
 
         if chat_type != "p2p":
-            confirmation_text = self._remove_mentions(raw_text, mentions) if mentions else raw_text
+            user_text = self._remove_mentions(raw_text, mentions) if mentions else raw_text
+        table_prefix = TABLE_PREFIX.match(user_text)
+        if self._table_questions is not None and table_prefix:
+            # Explicit table questions are read-only, even if their text ends with a confirmation command.
+            chat_id = str(message.get("chat_id", ""))
+            message_id = str(message.get("message_id", ""))
+            bot_id = getattr(self._duty_queries, "bot_open_id", "")
+            tagged = bot_id and any(
+                isinstance(mention.get("id"), dict) and mention["id"].get("open_id") == bot_id
+                for mention in mentions
+            )
+            if (self._config.feishu.verification_token and chat_type == "group" and tagged
+                    and chat_id and re.fullmatch(r"om_[A-Za-z0-9_-]+", message_id)):
+                question = user_text[table_prefix.end():].strip()
+                if 0 < len(question) <= MAX_QUESTION_CHARS:
+                    self._table_questions.ask(message_id, chat_id, question, source=TABLE_QUESTION_SOURCE)
+                else:
+                    await self._duty_queries._reply(message_id, "请在「查表」后填写问题，最多 500 字。")
+            return {"code": 0}
+
+        if chat_type != "p2p":
+            confirmation_text = user_text
             if await self._try_enqueue_confirmation(
                 chat_type,
                 str(message.get("chat_id", "")),

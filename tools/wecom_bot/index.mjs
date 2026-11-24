@@ -1,8 +1,10 @@
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createAdminServer } from './admin.mjs';
 import { runDutyPoller } from './duty-poller.mjs';
 import { makeSheetCli } from './sheet.mjs';
 import { openTableSettings } from './table-settings.mjs';
+import { createTableReaderServer, tableReader } from './table-reader.mjs';
 
 async function start() {
   const stateDir = process.env.STATE_DIRECTORY;
@@ -16,6 +18,14 @@ async function start() {
     console.error('企微配置页监听失败。');
     process.exitCode = 1;
   });
+  const runtimeDir = process.env.RUNTIME_DIRECTORY;
+  const readerServer = runtimeDir ? createTableReaderServer(tableReader({
+    settings, cliFor: (configDir, signal) => makeSheetCli(cliBinary, configDir, signal),
+  })) : undefined;
+  if (readerServer) {
+    readerServer.on('error', () => console.error('企微表格读取通道启动失败。'));
+    readerServer.listen(join(process.env.RUNTIME_DIRECTORY, 'tables.sock'));
+  }
   const stop = new AbortController();
   server.listen(port, '127.0.0.1', () => {
     console.info('企微配置页已监听 127.0.0.1:18409');
@@ -32,6 +42,7 @@ async function start() {
   });
   process.once('SIGTERM', () => {
     stop.abort();
+    readerServer?.close();
     server.close();
   });
 }
