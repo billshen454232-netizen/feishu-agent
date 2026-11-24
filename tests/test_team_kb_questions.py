@@ -158,7 +158,8 @@ def test_gateway_question_endpoints_long_poll_and_deliver(monkeypatch, tmp_path)
     assert feishu.replies == [("om_1", format_reply(parse_answer(ANSWER)))]
 
 
-def test_live_table_queue_requires_current_protocol_and_replies_to_original_message(monkeypatch, tmp_path):
+@pytest.mark.parametrize("mention_key", ["@_user_1", "@_user_2"])
+def test_live_table_queue_requires_current_protocol_and_replies_to_original_message(monkeypatch, tmp_path, mention_key):
     config_path = tmp_path / "gateway-config.json"
     database = tmp_path / "jobs.sqlite3"
     config_path.write_text(json.dumps({
@@ -180,7 +181,7 @@ def test_live_table_queue_requires_current_protocol_and_replies_to_original_mess
         "event": {"message": {
             "chat_type": "group", "chat_id": "oc_test", "message_id": "om_table", "message_type": "text",
             "content": json.dumps({"text": "@_user_1 查表 本周还有哪些任务未完成？"}),
-            "mentions": [{"key": "@_user_1", "id": {"open_id": "ou_other"}}],
+            "mentions": [{"key": mention_key, "id": {"open_id": "ou_other"}}],
         }},
     }
     with TestClient(create_app(config_path)) as client:
