@@ -13,10 +13,11 @@ const sheets = [
 const text = value => ({ cell_value: { text: value } });
 
 function fixture() {
-  const source = { id: 'registered', name: '测试计划', description: '按版本筛选', url: 'https://doc.weixin.qq.com/sheet/FIXTURE?tab=plan' };
+  const source = { id: 'registered', name: '测试计划', description: '按版本筛选', url: 'https://doc.weixin.qq.com/sheet/FIXTURE?tab=plan', feishuEnabled: true };
+  let tables = [source, { ...source, id: 'private', feishuEnabled: false }];
   const settings = {
-    view: () => ({ tables: [source] }),
-    readerSource: id => ({ source: id === source.id ? source : undefined, configDir: 'fixture-auth' }),
+    view: () => ({ tables }),
+    readerSource: id => ({ source: tables.find(table => table.id === id), configDir: 'fixture-auth' }),
   };
   const calls = [];
   const cliFor = configDir => async args => {
@@ -35,14 +36,33 @@ function fixture() {
       { values: [text('完成'), { cell_value: { time: { year: 2026, month: 11, day: 24 } } }, { cell_value: { number: 42 } }] },
     ] } };
   };
-  return { reader: tableReader({ settings, cliFor }), calls };
+  return {
+    reader: tableReader({ settings, cliFor }), calls,
+    disable: () => { tables = tables.map(table => ({ ...table, feishuEnabled: false })); },
+  };
 }
 
 test('registered workbooks expose display metadata and only approved local IDs are resolved', async () => {
-  const { reader, calls } = fixture();
-  assert.deepEqual(reader.catalog(), [{ id: 'registered', name: '测试计划', description: '按版本筛选' }]);
+  const { reader, calls, disable } = fixture();
+  const catalog = reader.catalog();
+  assert.equal(catalog.length, 1);
+  assert.ok(catalog[0].revision);
+  assert.deepEqual(catalog.map(({ id, name, description }) => ({ id, name, description })), [
+    { id: 'registered', name: '测试计划', description: '按版本筛选' },
+  ]);
   await assert.rejects(reader.preview('unknown'), /Table not available/);
+  await assert.rejects(reader.preview('private'), /Table not available/);
+  disable();
+  assert.deepEqual(reader.catalog(), []);
+  await assert.rejects(reader.preview('registered'), /Table not available/);
   assert.deepEqual(calls, []);
+});
+
+test('a preview stops returning data if sharing is turned off during the read', async () => {
+  const { reader, disable } = fixture();
+  const pending = reader.preview('registered');
+  disable();
+  await assert.rejects(pending, /Table settings changed/);
 });
 
 test('previews keep real offsets and blank positions, and report unread or partial tabs', async () => {

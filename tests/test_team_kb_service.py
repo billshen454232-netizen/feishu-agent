@@ -29,11 +29,10 @@ TABLE = """---
 def test_live_table_poller_uses_registered_excerpts_and_actual_coordinates():
     api_calls, sheet_calls, prompts = [], [], []
     catalog = [
-        {"id": "plan", "name": "周计划", "description": "查本周任务 https://example.invalid/private"},
-        {"id": "smoke", "name": "冒烟", "description": "查服号"},
-        {"id": "private", "name": "未启用的表", "description": "其他"},
+        {"id": "plan", "name": "周计划", "description": "查本周任务 https://example.invalid/private", "revision": "rev-plan"},
+        {"id": "smoke", "name": "冒烟", "description": "查服号", "revision": "rev-smoke"},
     ]
-    preview = {"name": "周计划", "skippedTabs": 0, "tabs": [
+    preview = {"name": "周计划", "revision": "rev-plan", "skippedTabs": 0, "tabs": [
         {"title": "版本A", "coverage": ["B4:E6"], "partial": True, "rows": [
             {"row": 4, "column": 2, "values": ["测试计划", None, "发布状态", None]},
             {"row": 5, "column": 2, "values": ["任务", "进度", "状态", "测试账号密码"]},
@@ -41,11 +40,11 @@ def test_live_table_poller_uses_registered_excerpts_and_actual_coordinates():
         ]},
         {"title": "版本B", "coverage": [], "partial": True, "unavailable": True, "rows": []},
     ]}
-    item = {"id": "om_table", "text": "本周有哪些任务还未完成？", "table_ids": ["plan", "smoke"]}
+    item = {"id": "om_table", "text": "本周有哪些任务还未完成？"}
 
     def read(path):
         sheet_calls.append(path)
-        return {"/tables": {"tables": catalog}, "/tables/plan": preview}[path]
+        return {"/tables": {"policy": "explicit-v1", "tables": catalog}, "/tables/plan": preview}[path]
 
     class Model:
         def complete(self, system, user, max_tokens):
@@ -63,7 +62,7 @@ def test_live_table_poller_uses_registered_excerpts_and_actual_coordinates():
 
     poller._call = call
     result = poller.answer_one(poller.poll_once()[0])
-    assert sheet_calls == ["/tables", "/tables/plan"]
+    assert sheet_calls == ["/tables", "/tables/plan", "/tables"]
     assert [table["id"] for table in prompts[0]["tables"]] == ["plan", "smoke"]
     assert "example.invalid" not in json.dumps(prompts, ensure_ascii=False)
     assert "fixture-secret-value" not in json.dumps(prompts, ensure_ascii=False)
@@ -75,21 +74,23 @@ def test_live_table_poller_uses_registered_excerpts_and_actual_coordinates():
         "text": "回归任务待完成。\n\n来源：周计划\n版本A!B6:D6\n本次仅核对了表格摘录。",
     }
     assert api_calls == [
-        ("GET", "/internal/team-kb/table-questions?wait=25", None),
-        ("POST", "/internal/team-kb/table-questions/om_table/answer", result),
+        ("GET", "/internal/team-kb/table-questions-v2?wait=25", None),
+        ("POST", "/internal/team-kb/table-questions-v2/om_table/answer", result),
     ]
 
 
 def test_live_table_rejects_unregistered_selection_and_uncited_answers():
-    item = {"text": "最近通过了吗", "table_ids": ["enabled"]}
+    item = {"text": "最近通过了吗"}
     calls = []
 
     def read(path):
         calls.append(path)
         if path == "/tables":
-            return {"tables": [{"id": "enabled", "name": "冒烟表", "description": "查询结果"}]}
+            return {"policy": "explicit-v1", "tables": [
+                {"id": "enabled", "name": "冒烟表", "description": "查询结果", "revision": "rev-enabled"},
+            ]}
         assert path == "/tables/enabled"
-        return {"name": "冒烟表", "tabs": [{"title": "结果", "coverage": ["D8:E8"], "rows": [
+        return {"name": "冒烟表", "revision": "rev-enabled", "tabs": [{"title": "结果", "coverage": ["D8:E8"], "rows": [
             {"row": 8, "column": 4, "values": ["最新", "通过"]},
         ]}]}
 
@@ -107,6 +108,30 @@ def test_live_table_rejects_unregistered_selection_and_uncited_answers():
     assert calls == ["/tables"]
     assert server.table_qa.answer_table(item, Model("enabled"), read)["reason"] == "no_evidence"
     assert calls == ["/tables", "/tables", "/tables/enabled"]
+
+
+def test_live_table_rejects_legacy_catalog_and_stops_reply_after_unsharing():
+    item = {"text": "查冒烟表"}
+    catalog_entry = {"id": "smoke", "name": "冒烟表", "description": "版本结果", "revision": "rev-smoke"}
+
+    class Model:
+        def complete(self, system, user, max_tokens):
+            return '{"answer":"通过", "citations":["S1R8"]}', "stub"
+
+    assert server.table_qa.answer_table(item, Model(), lambda path: {"tables": [catalog_entry]}) == {
+        "ok": False, "reason": "lookup_failed",
+    }
+
+    reads = iter([
+        {"policy": "explicit-v1", "tables": [catalog_entry]},
+        {"name": "冒烟表", "revision": "rev-smoke", "tabs": [
+            {"title": "结果", "coverage": ["D8:E8"], "rows": [{"row": 8, "column": 4, "values": ["最新", "通过"]}]},
+        ]},
+        {"policy": "explicit-v1", "tables": []},
+    ])
+    assert server.table_qa.answer_table(item, Model(), lambda path: next(reads)) == {
+        "ok": False, "reason": "lookup_failed",
+    }
 
 
 def test_live_table_model_uses_only_confirmed_https_origins():

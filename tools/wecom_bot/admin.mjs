@@ -45,6 +45,9 @@ form { display:grid; gap:14px; padding:2px 24px 24px; }
 label { display:grid; gap:5px; font-size:14px; font-weight:550; }
 input,textarea { width:100%; padding:9px 12px; border:1px solid #d8d1c5; border-radius:9px; background:white; color:var(--ink); font:inherit; font-weight:400; }
 textarea { min-height:84px; resize:vertical; }
+.share-option { display:flex; align-items:flex-start; gap:8px; }
+.share-option input { width:16px; height:16px; margin:3px 0 0; accent-color:var(--accent); }
+.share-option .hint { display:block; font-weight:400; }
 input::placeholder,textarea::placeholder { color:#746c61; }
 .actions { justify-content:flex-start; flex-wrap:wrap; }
 .notice { font-size:14px; color:var(--muted); }
@@ -86,6 +89,10 @@ input::placeholder,textarea::placeholder { color:#746c61; }
       <label>表格名称<input name="name" maxlength="100" required></label>
       <label>企微表格链接<input name="url" type="url" placeholder="https://doc.weixin.qq.com/sheet/…" required></label>
       <label>用途说明<textarea name="description" rows="2" maxlength="500" placeholder="例如按日期查询值班人员"></textarea></label>
+      <label class="share-option">
+        <input name="feishuEnabled" type="checkbox">
+        <span>允许飞书查表<span class="hint">启用后，机器人所在的飞书群可以查询此工作簿。</span></span>
+      </label>
       <div class="actions">
         <button type="submit" class="primary">保存并验证</button>
         <button type="button" data-cancel>取消编辑</button>
@@ -178,10 +185,16 @@ function addRow(saved) {
   const submit = form.querySelector('[type=submit]');
   const cancel = form.querySelector('[data-cancel]');
   const fields = form.querySelectorAll('input, textarea');
+  const share = form.elements.namedItem('feishuEnabled');
+  const link = form.elements.namedItem('url');
   const fill = () => {
     summary.textContent = saved?.name ?? '新表格';
-    for (const field of fields) field.value = saved?.[field.name] ?? '';
+    for (const field of fields) {
+      if (field !== share) field.value = saved?.[field.name] ?? '';
+    }
+    share.checked = saved?.feishuEnabled === true;
   };
+  link.addEventListener('input', () => { share.checked = false; });
   fill();
 
   cancel.onclick = () => {
@@ -201,6 +214,7 @@ function addRow(saved) {
   form.onsubmit = async event => {
     event.preventDefault();
     const input = Object.fromEntries(new FormData(form));
+    input.feishuEnabled = share.checked;
     if (saved) input.id = saved.id;
     for (const element of [submit, cancel, ...fields]) element.disabled = true;
     show(message, '正在验证读表权限…');

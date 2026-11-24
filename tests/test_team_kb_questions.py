@@ -158,7 +158,7 @@ def test_gateway_question_endpoints_long_poll_and_deliver(monkeypatch, tmp_path)
     assert feishu.replies == [("om_1", format_reply(parse_answer(ANSWER)))]
 
 
-def test_live_table_queue_uses_approved_sources_and_original_message(monkeypatch, tmp_path):
+def test_live_table_queue_requires_current_protocol_and_replies_to_original_message(monkeypatch, tmp_path):
     config_path = tmp_path / "gateway-config.json"
     database = tmp_path / "jobs.sqlite3"
     config_path.write_text(json.dumps({
@@ -168,12 +168,13 @@ def test_live_table_queue_uses_approved_sources_and_original_message(monkeypatch
         "job_queue": {"database_path": str(database), "recovery_window_seconds": 600},
     }), encoding="utf-8")
     monkeypatch.setenv("FEISHU_DUTY_BOT_OPEN_ID", "ou_testbot")
-    monkeypatch.setenv("FEISHU_WECOM_TABLE_IDS", "test-plan,smoke")
+    monkeypatch.delenv("FEISHU_WECOM_TABLE_IDS", raising=False)
     feishu = FakeFeishuClient()
     monkeypatch.setattr("src.app.create_ai_client", lambda _cfg: object())
     monkeypatch.setattr("src.app.FeishuClient", lambda _cfg: feishu)
     headers = {"Authorization": "Bearer fixture", "X-Feishu-Worker-Id": "team-kb"}
-    base = "/internal/team-kb/table-questions"
+    legacy_base = "/internal/team-kb/table-questions"
+    base = legacy_base + "-v2"
     event = {
         "header": {"event_id": "ev_test", "event_type": "im.message.receive_v1", "token": "verify"},
         "event": {"message": {
@@ -189,13 +190,15 @@ def test_live_table_queue_uses_approved_sources_and_original_message(monkeypatch
         event["event"]["message"]["mentions"][0]["id"]["open_id"] = "ou_testbot"
         assert client.post("/feishu/events", json=event).status_code == 200
         assert client.get("/internal/team-kb/questions", headers=headers).json() == {"items": []}
+        assert client.get(legacy_base, headers=headers).status_code == 404
         claimed = client.get(base, headers=headers).json()["items"][0]
-        assert claimed["table_ids"] == ["smoke", "test-plan"]
+        assert "table_ids" not in claimed
         assert claimed["text"] == "本周还有哪些任务未完成？"
         response_path = base + "/om_table/answer"
-        answer = {"ok": True, "table_id": "other", "text": "待验收。\n来源：计划 B4:C4\nhttps://example.invalid/internal"}
-        assert client.post(response_path, headers=headers, json=answer).status_code == 422
-        answer["table_id"] = "test-plan"
+        answer = {"ok": True, "table_id": "test-plan", "text": "待验收。\n来源：计划 B4:C4\nhttps://example.invalid/internal"}
+        assert client.post(legacy_base + "/om_table/answer", headers=headers, json=answer).status_code == 404
+        assert client.post(response_path, json=answer).status_code == 401
+        assert client.post(response_path, headers=headers, json={**answer, "table_id": "bad/id"}).status_code == 422
         assert client.post(response_path, headers=headers, json=answer).status_code == 200
         assert client.post(response_path, headers=headers, json=answer).status_code == 404
     assert TeamKbQuestionStore(database).get("om_table")["answer"] == ""

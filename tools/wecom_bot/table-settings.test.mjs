@@ -41,6 +41,7 @@ test('legacy table stays first, adding or editing only verifies the submitted en
   assert.equal(settings.current.source.url, duty.url);
 
   const added = await settings.save(smoke);
+  assert.equal(added.feishuEnabled, false);
   assert.deepEqual(calls, Array(2).fill({ configDir: legacyAuth, url: smoke.url }));
   assert.deepEqual((await settingsOnDisk()).tables.map(table => table.name), [duty.name, smoke.name]);
 
@@ -49,10 +50,12 @@ test('legacy table stays first, adding or editing only verifies the submitted en
   assert.equal(settings.view().tables[1].name, smoke.name);
   denied.clear();
 
-  const renamed = await settings.save({ ...added, name: '冒烟记录', description: '' });
+  await assert.rejects(settings.save({ ...added, feishuEnabled: 'true' }), /必须是布尔值/);
+  const renamed = await settings.save({ ...added, name: '冒烟记录', description: '', feishuEnabled: true });
   const reopened = await openTableSettings(options);
   assert.equal(renamed.id, added.id);
   assert.equal(renamed.description, '');
+  assert.equal(reopened.readerSource(added.id).source.feishuEnabled, true);
   assert.deepEqual(reopened.view().tables.map(table => table.name), [duty.name, '冒烟记录']);
   assert.equal(reopened.current.source.url, duty.url);
   assert.equal(reopened.current.configDir, legacyAuth);

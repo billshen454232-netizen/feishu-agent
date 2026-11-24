@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
 import { isoDate } from './sheet.mjs';
 
@@ -83,13 +84,29 @@ async function previewTab(cli, url, tab) {
 }
 
 export function tableReader({ settings, cliFor }) {
+  const revisions = new WeakMap();
+  function enabledTable(id) {
+    const { source, configDir } = settings.readerSource(id) ?? {};
+    if (source?.feishuEnabled !== true || !configDir) return null;
+    let grant = revisions.get(source);
+    if (grant?.configDir !== configDir) {
+      grant = { configDir, revision: randomUUID() };
+      revisions.set(source, grant);
+    }
+    return { source, ...grant };
+  }
+
   return {
     catalog() {
-      return settings.view().tables.map(({ id, name, description }) => ({ id, name, description }));
+      return settings.view().tables.flatMap(({ id, name, description }) => {
+        const table = enabledTable(id);
+        return table ? [{ id, name, description, revision: table.revision }] : [];
+      });
     },
     async preview(id) {
-      const { source, configDir } = settings.readerSource(id) ?? {};
-      if (!source || !configDir) throw new Error('Table not available');
+      const table = enabledTable(id);
+      if (!table) throw new Error('Table not available');
+      const { source, configDir, revision } = table;
       const cli = cliFor(configDir, AbortSignal.timeout(36000));
       const { sheets } = await cli(['get', '--docid', source.url]);
       if (!Array.isArray(sheets)) throw new Error('Invalid sheet metadata');
@@ -103,7 +120,8 @@ export function tableReader({ settings, cliFor }) {
           tabs.push({ title, coverage: [], rows: [], partial: true, unavailable: true });
         }
       }
-      return { name: source.name, tabs, skippedTabs: sheets.length - tabs.length };
+      if (enabledTable(id)?.revision !== revision) throw new Error('Table settings changed during lookup');
+      return { name: source.name, tabs, skippedTabs: sheets.length - tabs.length, revision };
     },
   };
 }
@@ -117,7 +135,7 @@ export function createTableReaderServer(reader) {
       res.end(JSON.stringify(body));
     };
     if (req.method !== 'GET') return send(405, { error: 'method not allowed' });
-    if (req.url === '/tables') return send(200, { tables: reader.catalog() });
+    if (req.url === '/tables') return send(200, { policy: 'explicit-v1', tables: reader.catalog() });
     const match = /^\/tables\/([A-Za-z0-9_-]{1,80})$/.exec(req.url);
     if (!match) return send(404, { error: 'unknown route' });
     if (busy) return send(503, { error: 'reader busy' });

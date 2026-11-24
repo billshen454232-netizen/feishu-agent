@@ -74,7 +74,8 @@ export async function openTableSettings({ stateDir, cliBinary, reader = makeShee
     current = next;
   }
 
-  async function save({ id, url, name, description }) {
+  async function save({ id, url, name, description, feishuEnabled = false }) {
+    if (typeof feishuEnabled !== 'boolean') throw new Error('飞书查表开关必须是布尔值。');
     if (saving || enrollment?.status === 'waiting') throw new Error('请等当前操作结束。');
     saving = true;
     try {
@@ -94,7 +95,7 @@ export async function openTableSettings({ stateDir, cliBinary, reader = makeShee
       const { configDir } = current;
       if (!configDir) throw new Error('请先完成并启用顶部的企微授权。');
       await verifyTable(source, configDir);
-      const table = { ...source, id: id ?? randomUUID() };
+      const table = { ...source, id: id ?? randomUUID(), feishuEnabled };
       const tables = [...current.tables];
       tables[index] = table;
       await persist({ configDir, tables });

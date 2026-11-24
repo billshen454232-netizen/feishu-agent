@@ -173,30 +173,42 @@ def _model_json(ai, system, payload, max_tokens):
     return result
 
 
+def _shared_catalog(read):
+    registry = read('/tables')
+    if registry.get('policy') != 'explicit-v1':
+        raise ValueError('Unsupported table sharing policy')
+    return {
+        table['id']: {
+            'id': table['id'], 'name': _clean(table['name']),
+            'description': _clean(table['description']), 'revision': table['revision'],
+        }
+        for table in registry['tables']
+        if TABLE_ID.fullmatch(table['id']) and table.get('revision')
+    }
+
+
 def answer_table(item, ai, read=read_local):
-    allowed_ids = frozenset(value for value in item.get('table_ids') or [] if isinstance(value, str))
-    if not allowed_ids:
-        return {'ok': False, 'reason': 'table_not_configured'}
     if ai is None:
         return {'ok': False, 'reason': 'model_not_configured'}
     question = _clean(item.get('text'))
     if not question:
         return {'ok': False, 'reason': 'no_match'}
     try:
-        catalog = {
-            table['id']: {'id': table['id'], 'name': _clean(table['name']), 'description': _clean(table['description'])}
-            for table in read('/tables')['tables'] if table['id'] in allowed_ids and TABLE_ID.fullmatch(table['id'])
-        }
+        catalog = _shared_catalog(read)
         if not catalog:
             return {'ok': False, 'reason': 'table_not_configured'}
         exact = [key for key, table in catalog.items() if table['name'] and table['name'] in question]
         if len(exact) == 1:
             selected = exact[0]
         else:
-            selected = _model_json(ai, SELECT_PROMPT, {'question': question, 'tables': list(catalog.values())}, 100).get('id')
+            options = [{key: table[key] for key in ('id', 'name', 'description')} for table in catalog.values()]
+            selected = _model_json(ai, SELECT_PROMPT, {'question': question, 'tables': options}, 100).get('id')
         if not isinstance(selected, str) or selected not in catalog:
             return {'ok': False, 'reason': 'no_match'}
+        revision = catalog[selected]['revision']
         preview = read('/tables/' + selected)
+        if preview.get('revision') != revision:
+            return {'ok': False, 'reason': 'lookup_failed'}
         rows, coverage, partial = _evidence(preview, question)
         if not rows:
             return {'ok': False, 'reason': 'no_evidence'}
@@ -219,6 +231,8 @@ def answer_table(item, ai, read=read_local):
         lines = [_clean(answer)[:1800], '', f"来源：{_clean(preview['name'])}", '、'.join(citations)[:650]]
         if partial:
             lines.append('本次仅核对了表格摘录。')
+        if _shared_catalog(read).get(selected, {}).get('revision') != revision:
+            return {'ok': False, 'reason': 'lookup_failed'}
         return {'ok': True, 'table_id': selected, 'text': '\n'.join(lines)}
     except (OSError, ValueError, TypeError, KeyError, CardError, http.client.HTTPException):
         return {'ok': False, 'reason': 'lookup_failed'}

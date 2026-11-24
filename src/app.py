@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import hmac
 import logging
-import os
 import re
 import time
 from contextlib import asynccontextmanager
@@ -519,13 +518,8 @@ def _add_gateway_worker_routes(
                 return {"items": []}
             await asyncio.sleep(TEAM_KB_POLL_SECONDS)
 
-    # Only the table entries explicitly enabled for Feishu may be read or cited through this route.
-    approved_tables = frozenset(
-        value.strip() for value in os.getenv("FEISHU_WECOM_TABLE_IDS", "").split(",")
-        if re.fullmatch(r"[A-Za-z0-9_-]{1,80}", value.strip())
-    )
-
-    @app.get("/internal/team-kb/table-questions", include_in_schema=False)
+    # This queue version delegates table enablement to the Worker’s private reader.
+    @app.get("/internal/team-kb/table-questions-v2", include_in_schema=False)
     async def claim_table_questions(
         wait: float = 0,
         authorization: Optional[str] = Header(default=None),
@@ -536,12 +530,10 @@ def _add_gateway_worker_routes(
         while True:
             items = store.claim(limit=1, source=TABLE_QUESTION_SOURCE, max_age=CLAIM_TIMEOUT_SECONDS)
             if items or time.monotonic() >= deadline:
-                for item in items:
-                    item["table_ids"] = sorted(approved_tables)
                 return {"items": items}
             await asyncio.sleep(TEAM_KB_POLL_SECONDS)
 
-    @app.post("/internal/team-kb/table-questions/{question_id}/answer", include_in_schema=False)
+    @app.post("/internal/team-kb/table-questions-v2/{question_id}/answer", include_in_schema=False)
     async def answer_table_question(
         question_id: str,
         payload: dict[str, Any],
@@ -553,8 +545,8 @@ def _add_gateway_worker_routes(
         ok = payload.get("ok") is True
         if ok:
             table_id, text = payload.get("table_id"), payload.get("text")
-            if not isinstance(table_id, str) or table_id not in approved_tables:
-                raise HTTPException(status_code=422, detail="table source not approved")
+            if not isinstance(table_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", table_id):
+                raise HTTPException(status_code=422, detail="invalid table source ID")
             if not isinstance(text, str) or not text.strip():
                 raise HTTPException(status_code=422, detail="table answer required")
             text = mask_sensitive_operation_data(re.sub(r"https?://[^\s<>]+", "[链接已脱敏]", text[:MAX_ANSWER_CHARS], flags=re.I))

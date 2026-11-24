@@ -478,7 +478,7 @@ class QuestionPoller(threading.Thread):
         super().__init__(name="team-kb-table-questions" if table_answer else "team-kb-questions", daemon=True)
         self.kb, self.base_url, self.token = kb, base_url.rstrip("/"), token
         self._table_answer = table_answer
-        self._queue_path = "/internal/team-kb/table-questions" if table_answer else "/internal/team-kb/questions"
+        self._queue_path = "/internal/team-kb/table-questions-v2" if table_answer else "/internal/team-kb/questions"
         self._pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="team-kb-answer") if not table_answer else None
         self._last_error = ""
 
