@@ -27,7 +27,7 @@ TABLE = """---
 
 
 def test_live_table_poller_uses_registered_excerpts_and_actual_coordinates():
-    api_calls, sheet_calls, prompts = [], [], []
+    api_calls, sheet_calls, prompts, token_budgets = [], [], [], []
     catalog = [
         {"id": "plan", "name": "周计划", "description": "查本周任务 https://example.invalid/private", "revision": "rev-plan"},
         {"id": "smoke", "name": "冒烟", "description": "查服号", "revision": "rev-smoke"},
@@ -49,6 +49,7 @@ def test_live_table_poller_uses_registered_excerpts_and_actual_coordinates():
     class Model:
         def complete(self, system, user, max_tokens):
             prompts.append(json.loads(user))
+            token_budgets.append(max_tokens)
             if len(prompts) == 1:
                 return '{"id":"plan"}', "stub"
             return '{"answer":"回归任务待完成。", "citations":["S1R6"]}', "stub"
@@ -62,6 +63,7 @@ def test_live_table_poller_uses_registered_excerpts_and_actual_coordinates():
 
     poller._call = call
     result = poller.answer_one(poller.poll_once()[0])
+    assert token_budgets == [4096, 4096]
     assert sheet_calls == ["/tables", "/tables/plan", "/tables"]
     assert [table["id"] for table in prompts[0]["tables"]] == ["plan", "smoke"]
     assert "example.invalid" not in json.dumps(prompts, ensure_ascii=False)

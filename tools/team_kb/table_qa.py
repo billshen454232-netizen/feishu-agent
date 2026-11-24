@@ -24,6 +24,8 @@ PRIVATE_ADDRESS = re.compile(r'(?<![\d.])(?:10\.\d{1,3}|192\.168|172\.(?:1[6-9]|
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 MAX_EVIDENCE_CHARS = 12500
 MAX_EVIDENCE_ROWS = 30
+# Reasoning and the final JSON can share the model's generation budget.
+MODEL_OUTPUT_TOKENS = 4096
 BEIJING = timezone(timedelta(hours=8))
 
 SELECT_PROMPT = (
@@ -203,7 +205,7 @@ def answer_table(item, ai, read=read_local):
             selected = exact[0]
         else:
             options = [{key: table[key] for key in ('id', 'name', 'description')} for table in catalog.values()]
-            selected = _model_json(ai, SELECT_PROMPT, {'question': question, 'tables': options}, 100).get('id')
+            selected = _model_json(ai, SELECT_PROMPT, {'question': question, 'tables': options}, MODEL_OUTPUT_TOKENS).get('id')
         if not isinstance(selected, str) or selected not in catalog:
             return {'ok': False, 'reason': 'no_match'}
         revision = catalog[selected]['revision']
@@ -216,7 +218,7 @@ def answer_table(item, ai, read=read_local):
         result = _model_json(ai, ANSWER_PROMPT, {
             'question': question, 'today': datetime.now(BEIJING).date().isoformat(),
             'coverage': coverage, 'partial': partial, 'excerpts': rows,
-        }, 800)
+        }, MODEL_OUTPUT_TOKENS)
         ids, answer = result.get('citations'), result.get('answer')
         by_id = {row['id']: row for row in rows}
         if not isinstance(answer, str) or not answer.strip() or not isinstance(ids, list) or not ids:
