@@ -652,6 +652,55 @@
         "python3.7"
       ],
       "risk": "write"
+    },
+    {
+      "name": "list-cn-gvg-connections",
+      "path": "/home/serverGeneralScript/gvg_topology.py",
+      "args": [
+        "list",
+        "{scope}"
+      ],
+      "variables": {
+        "scope": "weeklygvg|devgvg|qagvg"
+      },
+      "runner": [
+        "python3.7"
+      ],
+      "risk": "read"
+    },
+    {
+      "name": "preview-cn-gvg-topology",
+      "path": "/home/serverGeneralScript/gvg_topology.py",
+      "args": [
+        "{preview_mode}",
+        "{scope}"
+      ],
+      "variables": {
+        "preview_mode": "preview-stop|preview-start",
+        "scope": "weeklygvg|devgvg|qagvg"
+      },
+      "runner": [
+        "python3.7"
+      ],
+      "risk": "read"
+    },
+    {
+      "name": "apply-cn-gvg-topology",
+      "path": "/home/serverGeneralScript/gvg_topology.py",
+      "args": [
+        "{operation}",
+        "{scope}",
+        "{signature}"
+      ],
+      "variables": {
+        "operation": "stop|start",
+        "scope": "weeklygvg|devgvg|qagvg",
+        "signature": "[a-f0-9]{64}"
+      },
+      "runner": [
+        "python3.7"
+      ],
+      "risk": "write"
     }
   ]
 }

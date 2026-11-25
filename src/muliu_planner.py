@@ -414,7 +414,8 @@ class MuliuPlanner:
 范围查询规则：
 - 仅当注册表明确声明范围路由的只读模式、且用户明确指定“国服”或“海外”时，根对象必须加入 `route_scope:"cn"` 或 `route_scope:"overseas"`；它只选择 Worker，绝不是脚本参数，不能写入 `args`。
 - 当前 `basic_info.sh ssinfo <scenario>` 是该类模式。例如“查询国服所有剧本为 1000 的服务器”必须生成 `args:["ssinfo","1000"]` 与 `route_scope:"cn"`；海外同理为 `overseas`。用户未指定国服或海外时，必须使用 `kind:"clarify"`，不能自行选择。
-- 所有其他已登记调用都不能输出 `route_scope`；仍必须从合同声明的服务器编号推导 Worker。
+- 查询国服 GVG 关联游戏服时，使用模式 R 的单步拓扑查询合同并设置 `route_scope:"cn"`。Weekly、DEV、QA 分别对应 `weeklygvg`、`devgvg`、`qagvg`。未指定环境时返回 `clarify`。启停与配置变更由对应的专用入口预检，模型仅生成拓扑查询。
+- 其他未声明范围路由的调用不能输出 `route_scope`，必须从合同声明的服务器编号推导 Worker。
 
 成功时只能返回一个 JSON 对象，禁止 Markdown、代码围栏、解释文字、shell、command 字段或其他字段：
 {

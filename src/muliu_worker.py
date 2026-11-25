@@ -18,7 +18,8 @@ from .muliu_routing import MuliuPlanRouteResolver, MuliuRouteSnapshot, MuliuRout
 from .server_manager import ROUTE_API, ROUTES, ServerManagerClient, ServerManagerStepRunner, translate
 from .baye_check import BayeCheckCoordinator, BayeCheckError, BayeCheckSubmitUnknown
 from .muliu_executor import MuliuStepResult
-from .muliu_script_catalog import BACKEND_BAYE_CHECK
+from .muliu_script_catalog import BACKEND_BAYE_CHECK, BACKEND_GVG_CHANGE, BACKEND_GVG_QUERY
+from .gvg_connection import GvgChangeStore, GvgQueryError, WeeklyGvgChange, WeeklyGvgScope
 from .worker_protocol import serialize_execution_result
 
 logger = logging.getLogger(__name__)
@@ -209,7 +210,8 @@ class MuliuWorker:
             local_snapshot = self._route_resolver.resolve(plan)
             if local_snapshot != gateway_snapshot:
                 raise MuliuRoutingError("Gateway 路由分类与 Worker 本地服号归属不一致")
-            routed_config = muliu_config_for_route(
+            backend = self._call_contracts.backend_for(plan.steps[0]) if self._call_contracts is not None else ""
+            routed_config = None if backend in {BACKEND_GVG_QUERY, BACKEND_GVG_CHANGE} else muliu_config_for_route(
                 self._config.muliu,
                 local_snapshot.region,
                 local_snapshot.identifier,
@@ -226,15 +228,18 @@ class MuliuWorker:
                 logger.error("gateway no longer accepts invalid-plan result message_id=%s", job.message_id)
             return
 
-        if self._call_contracts is not None and self._call_contracts.backend_for(plan.steps[0]) == BACKEND_BAYE_CHECK:
+        if backend == BACKEND_BAYE_CHECK:
             await self._submit_baye_check(job, plan)
             return
 
-        api_steps, api_runner = await self._api_route(plan, job, local_snapshot.region)
-        routed_executor = MuliuExecutor(routed_config)
-        execution_task = asyncio.create_task(
-            self._execute_with_read_only_retry(routed_executor, plan, job.message_id, api_steps, api_runner)
-        )
+        if backend in {BACKEND_GVG_QUERY, BACKEND_GVG_CHANGE}:
+            execution_task = asyncio.create_task(asyncio.to_thread(self._execute_gvg, plan, job.message_id))
+        else:
+            api_steps, api_runner = await self._api_route(plan, job, local_snapshot.region)
+            routed_executor = MuliuExecutor(routed_config)
+            execution_task = asyncio.create_task(
+                self._execute_with_read_only_retry(routed_executor, plan, job.message_id, api_steps, api_runner)
+            )
         heartbeat_task = asyncio.create_task(self._heartbeat_until_done(job.message_id, execution_task))
         try:
             result = await execution_task
@@ -273,6 +278,31 @@ class MuliuWorker:
         accepted = await self._gateway_client.submit_result(job.message_id, result)
         if not accepted:
             logger.error("gateway no longer accepts result message_id=%s", job.message_id)
+
+    def _execute_gvg(self, plan: Any, message_id: str) -> MuliuExecutionResult:
+        step = plan.steps[0]
+        mode = step.args[0]
+        reason, unknown = "", False
+        try:
+            settings = self._config.server_manager
+            if not settings.enabled or "cn" not in settings.regions:
+                raise GvgQueryError("Worker 未启用国服 Server Manager。")
+            scope = WeeklyGvgScope.load(self._config.execution_interpretation.server_environments_path)
+            client = self._sm_client("cn")
+            change = WeeklyGvgChange(scope, GvgChangeStore(self._config.job_queue.database_path), client, message_id)
+            if mode == "apply":
+                log, reason, unknown = change.apply(step.args[2], step.args[3].split(","))
+            else:
+                log = change.preview(mode, step.args[2])
+        except GvgQueryError as exc:
+            return MuliuExecutionResult(summary=plan.summary, step_results=[], failed_step_number=1,
+                                        failure_reason=str(exc))
+        if unknown:
+            return MuliuExecutionResult(summary=plan.summary, step_results=[], result_unknown_reason=log)
+        return MuliuExecutionResult(summary=plan.summary, step_results=[MuliuStepResult(
+            step_number=1, description=step.description, path=step.path, args=list(step.args),
+            succeeded=not reason, log=log,
+        )], failed_step_number=1 if reason else None, failure_reason=reason)
 
     async def _submit_baye_check(self, job: ClaimedWorkerJob, plan: Any) -> None:
         """Submit the UI-automation check and report "submitted" at once; the result follows in the same thread."""

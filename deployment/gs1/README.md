@@ -15,6 +15,8 @@
 
 机器人侧当前唯一执行合同仍是 [../../config/muliu_script_catalog.md](../../config/muliu_script_catalog.md)。该合同通过 Gateway 和 Worker 校验；Worker 向 Task 89 发送的 payload 只有 `path + args`。
 
+国服 Weekly、DEV、QA GVG 拓扑入口的候选源文件是 [gvg_topology.py](../../knowledge/scripts/gvg_topology.py)。部署到国服 GS-1 的 `/home/serverGeneralScript/gvg_topology.py` 后，先验证 Task 89 的只读查询以及启停预检对业务执行边界的拦截，再验收实际启停。该入口依赖同机的木流拓扑代码和 `qa_env_all_machine.txt`。升级上游脚本后重新验收预检与确认后的计划核对。
+
 ## 2. runner manifest 的准确边界
 
 [muliu_runner_manifest.json](muliu_runner_manifest.json) 记录当前 catalog 的精确 `path + args` 模板、变量正则、`runner` 与 `risk`，且不包含凭据。它由下列本地工具生成：

@@ -19,7 +19,9 @@ _RUNNER_VALUES = frozenset({"bash", "python3.7"})
 _RISK_VALUES = frozenset({"read", "write"})
 # Non-Muliu executors on the Worker. Such contracts are never part of the GS-1 runner manifest.
 BACKEND_BAYE_CHECK = "baye_check"
-_BACKEND_VALUES = frozenset({BACKEND_BAYE_CHECK})
+BACKEND_GVG_QUERY = "gvg_query"
+BACKEND_GVG_CHANGE = "gvg_change"
+_BACKEND_VALUES = frozenset({BACKEND_BAYE_CHECK, BACKEND_GVG_QUERY, BACKEND_GVG_CHANGE})
 
 
 class MuliuScriptCatalogError(RuntimeError):

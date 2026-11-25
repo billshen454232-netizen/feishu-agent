@@ -1,5 +1,23 @@
 {
   "schema_version": 1,
+  "gvg_clusters": {
+    "weeklygvg": {
+      "region": "cn",
+      "game_environment": "weekly",
+      "number": 4,
+      "nodes": ["2022", "2023", "2024", "2025"]
+    },
+    "devgvg": {
+      "region": "cn",
+      "number": 260005,
+      "primary_node": "2026"
+    },
+    "qagvg": {
+      "region": "cn",
+      "number": 260006,
+      "primary_node": "2028"
+    }
+  },
   "environment_labels": {
     "dev": "DEV",
     "weekly": "weekly",

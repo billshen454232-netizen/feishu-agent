@@ -6,7 +6,9 @@ from dataclasses import dataclass
 from typing import Literal
 
 from .muliu_plan import MuliuPlan
-from .muliu_script_catalog import MuliuCallContracts
+from .muliu_script_catalog import BACKEND_GVG_CHANGE, BACKEND_GVG_QUERY, MuliuCallContracts
+from .gvg_connection import WeeklyGvgScope
+from .gvg_topology import GVG_TOPOLOGY_PATH
 from .server_environments import ServerEnvironments, ServerEnvironmentsError
 
 
@@ -49,7 +51,22 @@ class MuliuPlanRouteResolver:
     def resolve(self, plan: MuliuPlan) -> MuliuRouteSnapshot:
         try:
             self._call_contracts.validate(plan)
+            if any(step.path == GVG_TOPOLOGY_PATH for step in plan.steps):
+                if len(plan.steps) != 1:
+                    raise ValueError("GVG 拓扑操作必须单独发起")
+                return MuliuRouteSnapshot.from_region("cn")
             backends = {self._call_contracts.backend_for(step) for step in plan.steps}
+            if backends == {BACKEND_GVG_QUERY}:
+                if len(plan.steps) != 1 or plan.route_scope != "cn" or not self._call_contracts.is_read_only(plan):
+                    raise ValueError("GVG 配置查询必须是国服的单步只读计划")
+                return MuliuRouteSnapshot.from_region("cn")
+            if backends == {BACKEND_GVG_CHANGE}:
+                scope = WeeklyGvgScope.load(self._server_environments_path)
+                targets = self._call_contracts.extract_server_ids(plan)
+                if (len(plan.steps) != 1 or len(set(targets)) != len(targets)
+                        or not set(targets).issubset(scope.game_servers)):
+                    raise ValueError("GVG 配置变更仅允许一次操作国服 Weekly 普通游戏服")
+                return MuliuRouteSnapshot.from_region("cn")
             if backends != {""}:
                 if len(plan.steps) != 1:
                     raise ValueError("开服配置检查需要单独发起，不能和其他操作放在同一个计划里")

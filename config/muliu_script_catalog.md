@@ -390,6 +390,14 @@
 - **执行方式**：必须**单独发起**，不能和其他操作放在同一个计划里。Worker 提交后立即回复「已提交」，约 3–10 分钟后在同一话题追加结果卡片（含两张截图）。给了期望开服时间且执行机返回了截图识别文字时，卡片附自动判定：开服时间应等于期望值，霸业第一阶段结束应为期望开服时间 + 4 小时。
 - **远端影响**：会清除检查手机上游戏的本地数据并重新登录（不影响游戏服数据）；占用检查手机，同一手机上一次未结束时会被拒绝。没给开服时间时不做自动判定，需人工核对截图。
 
+### 模式 R：查询国服 GVG 拓扑及按批次启停
+
+- 查询示例「列出国服 Weekly GVG 连接了哪些游戏服」「国服 QA GVG 有哪些关联服」。支持 Weekly、DEV、QA，分别对应 `weeklygvg`、`devgvg`、`qagvg`。
+- 查询合同使用 `kind:"operation"`、`route_scope:"cn"`、单步 `path:"/home/serverGeneralScript/gvg_topology.py"` 和 `args:["list", "<scope>"]`，用用户明确给出的环境填充 `<scope>`。
+- Worker 经 Task 89 运行 GS-1 拓扑扫描，报告 GVG 侧运行态和关联服状态。
+- 启停示例「国服 DEV GVG 停服」「国服 QA GVG 起服」。Gateway 直接解析，先查批次再出确认卡。`preview-stop`、`preview-start`、`stop`、`start` 由系统生成，模型只生成查询合同。
+- **配置变更入口**：「国服 Weekly GVG 只保留 2016 的连接配置」或「恢复 GVG 变更单 <单号>」。由 Gateway 直接解析请求，Worker 只读预检后生成确认卡。模型只能规划本模式的 `list` 查询。`preview-keep`、`preview-restore` 和 `apply` 都由系统生成。配置改动检测 game 停服状态，不自动启停进程。
+
 ## 维护要求
 
 新增可执行模式时，在同一次修改中更新本文件的自然语言映射、精确模板和文件末尾的机器可校验合同，并为该模式及其与其他已登记动作的组合补充本地测试。本地资料和调用合同负责让 AI 生成合规 `path + args`；任务入口脚本只负责根目录、普通文件、固定 argv 与 `shell=False`，不应再维护第二份服务器端业务白名单或按扩展名决定能否执行。脚本必须已放入本机 `knowledge/scripts/` 作为阅读参考，并确认实际部署在 GS-1 的相同路径；通过本地测试后才可供机器人执行。
@@ -1006,6 +1014,61 @@
       "runner": "bash",
       "risk": "write",
       "backend": "baye_check"
+    },
+    {
+      "name": "list-cn-gvg-connections",
+      "path": "/home/serverGeneralScript/gvg_topology.py",
+      "args": ["list", "{scope}"],
+      "variables": {"scope": "weeklygvg|devgvg|qagvg"},
+      "runner": "python3.7",
+      "risk": "read",
+      "route_scopes": ["cn"]
+    },
+    {
+      "name": "preview-cn-gvg-topology",
+      "path": "/home/serverGeneralScript/gvg_topology.py",
+      "args": ["{preview_mode}", "{scope}"],
+      "variables": {"preview_mode": "preview-stop|preview-start", "scope": "weeklygvg|devgvg|qagvg"},
+      "runner": "python3.7",
+      "risk": "read",
+      "route_scopes": ["cn"]
+    },
+    {
+      "name": "apply-cn-gvg-topology",
+      "path": "/home/serverGeneralScript/gvg_topology.py",
+      "args": ["{operation}", "{scope}", "{signature}"],
+      "variables": {"operation": "stop|start", "scope": "weeklygvg|devgvg|qagvg", "signature": "[a-f0-9]{64}"},
+      "runner": "python3.7",
+      "risk": "write"
+    },
+    {
+      "name": "preview-weekly-gvg-keep",
+      "path": "/home/serverGeneralScript/_bot/gvg_connection",
+      "args": ["preview-keep", "weeklygvg", "{server_id}"],
+      "variables": {"server_id": "[0-9]{3,8}"},
+      "runner": "bash",
+      "risk": "read",
+      "route_scopes": ["cn"],
+      "backend": "gvg_query"
+    },
+    {
+      "name": "preview-weekly-gvg-restore",
+      "path": "/home/serverGeneralScript/_bot/gvg_connection",
+      "args": ["preview-restore", "weeklygvg", "{change_id}"],
+      "variables": {"change_id": "[0-9a-f]{16}"},
+      "runner": "bash",
+      "risk": "read",
+      "route_scopes": ["cn"],
+      "backend": "gvg_query"
+    },
+    {
+      "name": "apply-weekly-gvg-config",
+      "path": "/home/serverGeneralScript/_bot/gvg_connection",
+      "args": ["apply", "weeklygvg", "{change_id}", "{server_ids}"],
+      "variables": {"change_id": "[0-9a-f]{16}", "server_ids": "[0-9]{3,8}(?:,[0-9]{3,8}){0,19}"},
+      "runner": "bash",
+      "risk": "write",
+      "backend": "gvg_change"
     }
   ]
 }

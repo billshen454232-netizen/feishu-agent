@@ -13,12 +13,14 @@ from __future__ import annotations
 import datetime
 import hashlib
 import logging
+import re
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
 import httpx
 
+from .gvg_connection import GVG_CONFIG_PATH, GvgChangeUnknown, GvgConfigFile, GvgQueryError
 from .muliu_executor import MuliuExecutionError, MuliuSubmittedError
 from .muliu_plan import MuliuStep
 
@@ -139,6 +141,84 @@ class ServerManagerClient:
         response = self._http.get(self._base + "/servers", params={"env": self._env} if self._env else None)
         response.raise_for_status()
         return {str(item.get("id")) for item in response.json().get("servers", []) if item.get("id")}
+
+    def read_gvg_config(self, server_id: str) -> str:
+        """Read the authoritative game config for a validated game-server ID."""
+        return self._gvg_config(server_id, for_write=False).content
+
+    def gvg_config_file(self, server_id: str) -> GvgConfigFile:
+        return self._gvg_config(server_id, for_write=True)
+
+    def _gvg_config(self, server_id: str, *, for_write: bool) -> GvgConfigFile:
+        target = f"game_{server_id}"
+        params = {"target": target, **({"env": self._env} if self._env else {})}
+        try:
+            response = self._http.get(self._base + "/server-config-files", params=params)
+            response.raise_for_status()
+            data = response.json()
+            primary = [item for item in data["items"] if item.get("primary") is True]
+            if len(primary) != 1:
+                raise ValueError("primary game unit not unique")
+            item = primary[0]
+            if item.get("game_id") != target or item.get("role") != "game" or item.get("status") != "succeeded":
+                raise ValueError("primary game unit not verified")
+            files = [file for file in item["result"]["files"] if file.get("path") == GVG_CONFIG_PATH]
+            if len(files) != 1 or not isinstance(files[0].get("content"), str) or not files[0]["content"].strip():
+                raise ValueError("game config not available")
+            file = files[0]
+            machine_id, digest = item.get("machine_id"), file.get("sha256")
+            if for_write and (
+                not isinstance(machine_id, str) or not machine_id or not isinstance(digest, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", digest)
+                or hashlib.sha256(file["content"].encode("utf-8")).hexdigest() != digest
+            ):
+                raise ValueError("configuration version could not be verified")
+            return GvgConfigFile(server_id, machine_id or "", file["content"], digest or "")
+        except (httpx.HTTPError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            raise GvgQueryError(f"{server_id} 服的 GVG 配置无法核实。") from exc
+
+    def gvg_game_stopped(self, server_id: str, message_id: str, phase: str) -> bool:
+        target = f"game_{server_id}"
+        try:
+            result = self.run(ApiTask("status", (target,)), submission_id(f"{message_id}:{phase}:{server_id}", 1, 1),
+                              "GVG 配置变更前的 game 进程状态检查")
+            return result.succeeded and result.server_states.get(target) == "stopped"
+        except (httpx.HTTPError, MuliuExecutionError, MuliuSubmittedError, ValueError, TypeError):
+            return False
+
+    def write_gvg_config(self, config: GvgConfigFile, content: str) -> None:
+        """Submit one conditional replacement and wait for its workflow. Never replay a submission."""
+        body = {"target": f"game_{config.server_id}", "file": {
+            "machine_id": config.machine_id, "path": GVG_CONFIG_PATH, "content": content, "sha256": config.sha256,
+        }}
+        if self._env:
+            body["env"] = self._env
+        try:
+            response = self._http.post(self._base + "/server-config-file", json=body)
+        except httpx.HTTPError as exc:
+            raise GvgChangeUnknown("配置写入请求无可信响应。") from exc
+        if response.status_code == 400:
+            raise GvgQueryError("Server Manager 拒绝配置写入请求（HTTP 400）。")
+        if response.status_code != 202:
+            raise GvgChangeUnknown(f"未取得可信的配置写入受理结果（HTTP {response.status_code}）。")
+        try:
+            run_id = response.json().get("run_id")
+            if not isinstance(run_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", run_id):
+                raise ValueError("invalid workflow identifier")
+            deadline = self._clock() + self._timeout
+            while True:
+                status = self._http.get(self._base + "/workflows/runs/" + run_id)
+                status.raise_for_status()
+                state = status.json().get("status")
+                if state == "succeeded":
+                    return
+                if state not in {"queued", "pending", "running"} or self._clock() >= deadline:
+                    raise GvgChangeUnknown("写入工作流未确认成功，请核对该服配置及工作流记录。")
+                self._sleep(self._poll)
+        except (httpx.HTTPError, ValueError, AttributeError) as exc:
+            if isinstance(exc, GvgChangeUnknown):
+                raise
+            raise GvgChangeUnknown("写入已受理，工作流结果无法核实。") from exc
 
     def server_info(self, server_id: str, submission: str, reason: str) -> list[str]:
         """basic_info-like lines from read-only API data (config, release version, process status)."""

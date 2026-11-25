@@ -37,6 +37,8 @@ from .baye_check import (
 from .qa_library import QaService, QaStore
 from .duty_queries import DutyQueries
 from .event_handler import FeishuEventHandler
+from .gvg_connection import GVG_QUERY_PATH
+from .gvg_topology import GVG_TOPOLOGY_MODES, GVG_TOPOLOGY_PATH
 from .execution_report import ExecutionReportStore
 from .feishu_client import FeishuClient
 from .message_jobs import MessageJobStore
@@ -417,10 +419,18 @@ def _add_gateway_worker_routes(
         )
         if pending_job is None:
             raise HTTPException(status_code=404, detail="worker lease not found")
+        if (result.succeeded and len(plan.steps) == 1 and plan.steps[0].path == GVG_QUERY_PATH
+                and plan.steps[0].args[0] in {"preview-keep", "preview-restore"}):
+            await job_processor.present_gvg_preview(pending_job, plan, result.step_results[0].log)
+            return {"status": "accepted"}
+        if (result.succeeded and len(plan.steps) == 1 and plan.steps[0].path == GVG_TOPOLOGY_PATH
+                and plan.steps[0].args[0] in GVG_TOPOLOGY_MODES):
+            await job_processor.present_topology_preview(pending_job, plan, result.step_results[0].log)
+            return {"status": "accepted"}
         await job_processor.present_execution_result(
             pending_job,
             result,
-            pending_job.confirmation_message_id,
+            pending_job.confirmation_message_id or pending_job.message_id,
         )
         return {"status": "accepted"}
 
@@ -754,7 +764,7 @@ async def _deliver_expired_worker_leases(
         reply = format_execution_result(result)
         await job_processor.deliver_execution_result(
             job,
-            job.confirmation_message_id,
+            job.confirmation_message_id or job.message_id,
             reply,
             status_card=build_execution_status_card(result, detail=result_card_detail(reply, result)),
         )

@@ -89,6 +89,7 @@ def build_plan_confirmation_card(
     confirmation_token: str,
     route_label: str = "",
     route_identifier: str = "",
+    detail: str = "",
 ) -> dict[str, object]:
     """Build a card whose buttons only identify a stored pending plan.
 
@@ -112,6 +113,8 @@ def build_plan_confirmation_card(
                 ),
             },
         })
+    if detail:
+        elements.append({"tag": "div", "text": {"tag": "plain_text", "content": detail}})
     elements.append({"tag": "hr"})
     for step_number, step in enumerate(plan.steps, start=1):
         elements.append({

@@ -13,10 +13,12 @@ from .ai_client import generate_with_provenance
 from .config import AppConfig
 from .conversation_log import ConversationLogEntry
 from .conversation import ConversationStore
+from .gvg_connection import GVG_QUERY_PATH, WEEKLY_GVG_SCOPE, GvgQueryError, WeeklyGvgScope, change_request, parse_preview
+from .gvg_topology import GVG_TOPOLOGY_LABELS, GVG_TOPOLOGY_PATH, parse_topology_preview, topology_request
 from .message_jobs import MessageJobStore
 from .muliu_executor import MuliuExecutionError, MuliuExecutionResult, MuliuSubmittedError
 from .muliu_firewall import MuliuFirewallError
-from .muliu_plan import MuliuPlan, MuliuPlanError, MuliuPlanKind, parse_plan
+from .muliu_plan import MuliuPlan, MuliuPlanError, MuliuPlanKind, MuliuStep, parse_plan
 from .muliu_planner import MuliuPlanGeneration, MuliuPlanGenerationError
 from .muliu_routing import MuliuPlanRouteResolver, MuliuRouteSnapshot, MuliuRoutingError
 from .operation_message import (
@@ -203,6 +205,18 @@ class MessageJobProcessor:
             if forced_question is not None:  # 「问题 …」 always goes to the team knowledge base
                 await self._ask_team_kb(message_id, job, forced_question)
                 return
+            topology = topology_request(job.text)
+            if topology:
+                mode, scope = topology
+                preview = MuliuPlan(f"国服 {GVG_TOPOLOGY_LABELS[scope]} GVG 启停预检", [
+                    MuliuStep(GVG_TOPOLOGY_PATH, [mode, scope], "按 GS-1 拓扑生成执行批次"),
+                ], route_scope="cn")
+                await self._queue_gvg_read(job, preview)
+                return
+            gvg_request = change_request(job.text)
+            if gvg_request is not None:
+                await self._queue_gvg_preview(job, *gvg_request)
+                return
             if self._operation_planner is not None:
                 # Every script-related request reaches the same registry-aware AI
                 # decision. Keyword routing used to prevent registered calls such as
@@ -266,6 +280,13 @@ class MessageJobProcessor:
                         self._append_conversation_log(job, "operation_rejected", reply, generation=generation)
                     else:
                         self._muliu_firewall.validate(plan)
+                        if any(step.path == GVG_QUERY_PATH for step in plan.steps):
+                            raise MuliuPlanError("变更 GVG 配置请发「国服 Weekly GVG 只保留 <服号> 的连接配置」或「恢复 GVG 变更单 <单号>」。")
+                        if any(step.path == GVG_TOPOLOGY_PATH for step in plan.steps):
+                            if len(plan.steps) != 1 or plan.steps[0].args[0] != "list":
+                                raise MuliuPlanError("请单独发起 GVG 启停请求，例如「国服 QA GVG 停服」。")
+                            await self._queue_gvg_read(job, plan)
+                            return
                         route_snapshot = self._resolve_route_snapshot(plan)
                         confirmation_token = self._new_confirmation_token()
                         card = build_plan_confirmation_card(
@@ -619,6 +640,87 @@ class MessageJobProcessor:
                 status_card=build_execution_status_card(result, detail=result_card_detail(reply, result)),
             )
 
+    async def _queue_gvg_preview(self, job: Any, mode: str, argument: str) -> None:
+        plan = MuliuPlan("国服 Weekly GVG 配置变更预检", [
+            MuliuStep(GVG_QUERY_PATH, [mode, WEEKLY_GVG_SCOPE, argument], "只读核对配置及 game 停服状态"),
+        ], route_scope="cn")
+        await self._queue_gvg_read(job, plan)
+
+    async def _queue_gvg_read(self, job: Any, plan: MuliuPlan) -> None:
+        if self._config.runtime.role != "gateway" or job.chat_type != "group" or not job.user_id:
+            await self._reply_and_finish(job.message_id, "请在运维群发起 GVG 请求。")
+            return
+        try:
+            if self._muliu_firewall is None:
+                raise MuliuPlanError("Muliu 防火墙尚未初始化")
+            self._muliu_firewall.validate(plan)
+            route = self._resolve_route_snapshot(plan)
+            if not self._store.queue_read_query_for_worker(job.message_id, _plan_to_json(plan), route.region):
+                raise MuliuPlanError("GVG 请求无法进入 Worker 队列。")
+        except (MuliuFirewallError, MuliuRoutingError, MuliuPlanError) as exc:
+            await self._reply_and_finish(job.message_id, format_rejection(str(exc)))
+
+    async def present_topology_preview(self, job: Any, plan: MuliuPlan, log: str) -> None:
+        mode, scope = plan.steps[0].args
+        try:
+            if topology_request(job.text) != (mode, scope):
+                raise ValueError("启停预检与原请求不一致。")
+            operation = mode.removeprefix("preview-")
+            signature, targets = parse_topology_preview(log, scope, operation)
+            if not targets:
+                await self._reply_and_finish(job.message_id, "当前拓扑没有待执行的启停节点。")
+                return
+            action = "停服" if operation == "stop" else "起服"
+            title = f"国服 {GVG_TOPOLOGY_LABELS[scope]} GVG {action}"
+            write = MuliuPlan(title, [MuliuStep(GVG_TOPOLOGY_PATH, [operation, scope, signature], "按确认的拓扑批次执行")])
+            self._muliu_firewall.validate(write)
+            route = self._resolve_route_snapshot(write)
+        except (ValueError, MuliuFirewallError) as exc:
+            await self._reply_and_finish(job.message_id, format_rejection(str(exc)))
+            return
+        await self._send_gvg_confirmation(job, write, route, detail="\n".join(targets))
+
+    async def present_gvg_preview(self, job: Any, plan: MuliuPlan, log: str) -> None:
+        """Publish a write plan only after the validated read job returned exact targets."""
+        mode, _, argument = plan.steps[0].args
+        try:
+            identifier, cluster, targets = parse_preview(log, job.message_id)
+            scope = WeeklyGvgScope.load(self._config.execution_interpretation.server_environments_path)
+            keep = mode == "preview-keep"
+            if (change_request(job.text) != (mode, argument) or cluster != scope.cluster
+                    or not set(targets).issubset(scope.game_servers) or (keep and argument in targets)):
+                raise GvgQueryError("预检结果与原请求或当前 Weekly 资产范围不一致。")
+            if not targets:
+                await self._reply_and_finish(job.message_id, "当前配置无需修改。")
+                return
+            old, new = (str(cluster), "nil") if keep else ("nil", str(cluster))
+            title = f"保留 {argument} 服连接配置" if keep else f"恢复 GVG 变更单 {argument}"
+            write = MuliuPlan(f"国服 Weekly GVG {cluster}：{title}", [MuliuStep(
+                GVG_QUERY_PATH, ["apply", WEEKLY_GVG_SCOPE, identifier, ",".join(targets)],
+                f"{'、'.join(targets)} 服的连接配置从 {old} 改为 {new}，下次起服时生效",
+            )])
+            self._muliu_firewall.validate(write)
+            route = self._resolve_route_snapshot(write)
+        except (GvgQueryError, MuliuFirewallError, MuliuRoutingError, MuliuPlanError) as exc:
+            await self._reply_and_finish(job.message_id, format_rejection(str(exc)))
+            return
+        await self._send_gvg_confirmation(job, write, route)
+
+    async def _send_gvg_confirmation(
+        self, job: Any, write: MuliuPlan, route: MuliuRouteSnapshot, *, detail: str = "",
+    ) -> None:
+        token = self._new_confirmation_token()
+        card = build_plan_confirmation_card(write, request_message_id=job.message_id,
+                                            confirmation_token=token, route_label=route.label,
+                                            detail=detail)
+        try:
+            card_id = await self._feishu_client.reply_card(job.message_id, card)
+        except Exception:
+            logger.warning("GVG confirmation card delivery failed message_id=%s", job.message_id)
+            return
+        self._store.mark_awaiting_confirmation(job.message_id, _plan_to_json(write), card_id, token,
+                                              confirmation_method="card", route_region=route.region)
+
     async def present_execution_result(
         self,
         pending_job: Any,
@@ -633,6 +735,24 @@ class MessageJobProcessor:
         trusted card has already been delivered. Nothing here changes job state.
         """
         fallback_reply = mask_sensitive_operation_data(format_execution_result(result))
+        try:
+            plan = parse_plan(pending_job.plan_json, max_steps=self._config.muliu.max_steps)
+        except (AttributeError, MuliuPlanError):
+            plan = None
+        if plan is not None and any(step.path in {GVG_QUERY_PATH, GVG_TOPOLOGY_PATH} for step in plan.steps):
+            # Use verified per-server outcomes even when the requester chose a summary-only card.
+            detail = ("\n".join(clean_muliu_execution_log(step.log) for step in result.step_results)
+                      or result.result_unknown_reason or result.failure_reason)
+            await self.deliver_execution_result(
+                pending_job, reply_message_id, fallback_reply,
+                status_card=build_execution_status_card(result, detail=mask_sensitive_operation_data(detail)),
+            )
+            if self._report_store is not None:
+                try:
+                    self._report_store.record_artifact(pending_job.message_id, _terminal_status(result), "template", fallback_reply)
+                except Exception:  # noqa: BLE001 - bookkeeping must never hide a delivered result
+                    logger.exception("GVG execution report bookkeeping failed message_id=%s", pending_job.message_id)
+            return
         try:
             presentation = self._plan_presentation(pending_job, result)
         except Exception:  # noqa: BLE001 - template lookup must never hide a trusted result

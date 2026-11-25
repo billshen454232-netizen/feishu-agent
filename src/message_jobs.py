@@ -150,6 +150,20 @@ class MessageJobStore:
         """Record that a confirmed request is being submitted to Muliu."""
         self._update_status(message_id, "submission_in_progress", self._now(now))
 
+    def queue_read_query_for_worker(self, message_id: str, plan_json: str, route_region: str) -> bool:
+        """Queue a query after the Gateway has validated its dedicated read contract."""
+        with self._connect() as conn:
+            updated = conn.execute(
+                """
+                UPDATE message_jobs
+                SET status = 'queued_for_worker', plan_json = ?, route_region = ?, updated_at = ?
+                WHERE message_id = ? AND status = 'processing'
+                """,
+                (plan_json, route_region, self._now(None), message_id),
+            )
+            conn.commit()
+        return updated.rowcount == 1
+
     def queue_for_worker(self, message_id: str, now: int | None = None) -> bool:
         """Make a locally validated, confirmed plan available to an intranet worker."""
         timestamp = self._now(now)
