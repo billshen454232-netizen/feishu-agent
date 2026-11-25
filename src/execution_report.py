@@ -351,6 +351,8 @@ class ExecutionReportStore:
                     summary_text TEXT NOT NULL,
                     created_at INTEGER NOT NULL
                 );
+                CREATE INDEX IF NOT EXISTS idx_execution_artifacts_recent
+                    ON execution_artifacts (created_at DESC, message_id DESC);
                 CREATE TABLE IF NOT EXISTS execution_report_settings (
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
@@ -590,8 +592,11 @@ class ExecutionReportStore:
         with self._connect() as conn:
             return int(conn.execute("SELECT COUNT(*) FROM execution_artifacts").fetchone()[0])
 
-    def list_recent_executions(self, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
-        """Recent results with how they were explained (read-only review view)."""
+    def list_recent_executions(
+        self, limit: int = 50, offset: int = 0, *, include_details: bool = True,
+    ) -> list[dict[str, Any]]:
+        """Page through recent results, optionally omitting the long detail fields."""
+        detail_columns = "a.summary_text, COALESCE(i.summary, '') AS ai_summary," if include_details else ""
         with self._connect() as conn:
             has_jobs = conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'message_jobs'"
@@ -607,7 +612,7 @@ class ExecutionReportStore:
             rows = conn.execute(
                 """
                 SELECT a.message_id, a.terminal_status, a.report_source, a.error_fingerprint,
-                       a.summary_text, a.created_at,
+                       {detail_columns} a.created_at,
                        {request_column} AS request_text,
                        {user_id} AS user_id,
                        {user_name} AS user_name,
@@ -618,14 +623,14 @@ class ExecutionReportStore:
                        COALESCE(i.status, '') AS interpretation_status,
                        COALESCE(i.model_name, '') AS model_name,
                        COALESCE(i.elapsed_ms, 0) AS elapsed_ms,
-                       COALESCE(i.error_kind, '') AS error_kind,
-                       COALESCE(i.summary, '') AS ai_summary
+                       COALESCE(i.error_kind, '') AS error_kind
                 FROM execution_artifacts a
                 LEFT JOIN execution_interpretations i ON i.message_id = a.message_id
                 {join_jobs}
-                ORDER BY a.created_at DESC
+                ORDER BY a.created_at DESC, a.message_id DESC
                 LIMIT ? OFFSET ?
                 """.format(
+                    detail_columns=detail_columns,
                     request_column=request_column,
                     join_jobs=join_jobs,
                     user_id=job_column("user_id", "''"),
@@ -640,6 +645,19 @@ class ExecutionReportStore:
             {**dict(row), "request_text": mask_sensitive_operation_data(str(row["request_text"]))[:300]}
             for row in rows
         ]
+
+    def get_execution_detail(self, message_id: str) -> dict[str, str] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT a.summary_text, COALESCE(i.summary, '') AS ai_summary
+                FROM execution_artifacts a
+                LEFT JOIN execution_interpretations i ON i.message_id = a.message_id
+                WHERE a.message_id = ?
+                """,
+                (message_id,),
+            ).fetchone()
+        return dict(row) if row else None
 
     def prune_artifacts(self, retention_days: int, now: int | None = None) -> int:
         cutoff = self._now(now) - retention_days * 86400

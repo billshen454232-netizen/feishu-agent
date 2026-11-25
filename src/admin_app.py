@@ -158,14 +158,21 @@ def create_admin_app(
         }
 
     @app.get("/api/executions")
-    async def executions(page: int = 1, page_size: int = 20) -> dict[str, Any]:
+    async def executions(page: int = 1, page_size: int = 20, include_details: bool = True) -> dict[str, Any]:
         page, page_size = _paging(page, page_size)
         return {
-            "executions": store.list_recent_executions(page_size, (page - 1) * page_size),
+            "executions": store.list_recent_executions(page_size, (page - 1) * page_size, include_details=include_details),
             "total": store.count_executions(),
             "page": page,
             "page_size": page_size,
         }
+
+    @app.get("/api/executions/{message_id}")
+    async def execution_detail(message_id: str) -> dict[str, str]:
+        detail = store.get_execution_detail(message_id)
+        if detail is None:
+            raise HTTPException(status_code=404, detail="执行记录不存在或已过保留期")
+        return detail
 
     @app.get("/api/patterns/{pattern_id}/samples")
     async def samples(pattern_id: int) -> dict[str, Any]:
@@ -914,7 +921,7 @@ _INDEX_HTML = r"""<!doctype html>
       <h1>执行结果审批台 <a class="plan-link" href="/plan" target="_blank" rel="noopener">项目计划</a><a class="plan-link" href="/thresholds" target="_blank" rel="noopener">热更阈值</a><a class="plan-link" href="/routes" target="_blank" rel="noopener">执行路线</a></h1>
       <p class="lede">失败经 AI 分析后会收进「待审核」。通过的模板会被同类错误直接复用，不再调用 AI；改错了可以退回或删除。</p>
     </div>
-    <fieldset class="mode" id="mode">
+    <fieldset class="mode" id="mode" disabled>
       <legend>查询类操作成功后</legend>
       <div class="segmented" role="radiogroup">
         <label><input type="radio" name="mode" value="ai"><span>AI 解读日志</span></label>
@@ -1009,17 +1016,18 @@ let total = 0;
 const dirty = new Set();
 // Client cache: switching tabs / pages reuses data until 刷新 or a change invalidates it.
 const cache = new Map();          // "tab:page" -> { data, at }
-let summaryCache = null;          // { data, at }
+let summaryRequest = null;
+let loadVersion = 0;
 const cacheKey = () => `${state.tab}:${state.filter}:${state.page}`;
 function invalidateTemplates() {
   for (const key of [...cache.keys()]) if (key.startsWith("candidate:") || key.startsWith("verified:")) cache.delete(key);
-  summaryCache = null;
+  summaryRequest = null;
 }
 function invalidateQa() {
   for (const key of [...cache.keys()]) if (key.startsWith("qa:") || key.startsWith("docfix:")) cache.delete(key);
-  summaryCache = null;
+  summaryRequest = null;
 }
-function invalidateAll() { cache.clear(); summaryCache = null; }
+function invalidateAll() { cache.clear(); summaryRequest = null; }
 
 function readHash() {
   const params = new URLSearchParams(location.hash.slice(1));
@@ -1036,17 +1044,29 @@ function writeHash() {
 }
 
 async function api(method, url, body) {
-  const res = await fetch(url, {
-    method,
-    headers: { "Content-Type": "application/json", "X-Admin-Request": "1" },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-  if (!res.ok) {
-    let detail = res.statusText;
-    try { detail = (await res.json()).detail || detail; } catch (_) { detail = (await res.text()) || detail; }
-    throw new Error(`${res.status} ${detail}`);
+  const controller = method === "GET" ? new AbortController() : null;
+  const timeout = controller && setTimeout(() => controller.abort(), 15000);
+  try {
+    const res = await fetch(url, {
+      method,
+      headers: { "Content-Type": "application/json", "X-Admin-Request": "1" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal: controller?.signal,
+    });
+    if (res.status === 401 || res.status === 403) throw new Error("登录已过期或无访问权限，请刷新页面后重新登录");
+    const contentType = res.headers.get("content-type") || "";
+    if (!res.ok) {
+      const detail = contentType.includes("application/json") ? (await res.json()).detail : res.statusText;
+      throw new Error(`${res.status} ${detail || "请求失败"}`);
+    }
+    if (!contentType.includes("application/json")) throw new Error("服务未返回数据，请刷新页面并检查登录状态");
+    return await res.json();
+  } catch (err) {
+    if (controller?.signal.aborted) throw new Error("请求超时，请重试");
+    throw err;
+  } finally {
+    clearTimeout(timeout);
   }
-  return res.json();
 }
 
 let toastTimer;
@@ -1063,7 +1083,25 @@ function confirmDiscard() {
   return dirty.size === 0 || confirm(`有 ${dirty.size} 条诊断改动还没保存，确定放弃？`);
 }
 
+function loadSummary() {
+  if (summaryRequest) return;
+  const request = api("GET", "/api/summary");
+  summaryRequest = request;
+  request.then((summary) => {
+    if (summaryRequest !== request) return;
+    $("#n-candidate").textContent = summary.counts.candidate;
+    $("#n-verified").textContent = summary.counts.verified;
+    $("#n-qa").textContent = summary.qa ? summary.qa.pending : "–";
+    $("#n-docfix").textContent = summary.doc_fixes ? summary.doc_fixes.pending : "–";
+    $("#n-teamkb").textContent = summary.team_kb_pending ?? "–";
+    setMode(summary.read_success_mode);
+    $("#mode").disabled = false;
+  }).catch(() => { if (summaryRequest === request) summaryRequest = null; });
+}
+
 async function load({ force = false } = {}) {
+  const version = ++loadVersion;
+  const key = cacheKey();
   writeHash();
   document.querySelectorAll("nav.tabs a").forEach((a) => {
     if (a.dataset.tab === state.tab) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
@@ -1074,25 +1112,22 @@ async function load({ force = false } = {}) {
   $("#batch-approve").hidden = state.tab !== "candidate";
   $("#batch-revert").hidden = state.tab !== "verified";
   $("#select-all").checked = false;
-  if (force) { cache.delete(cacheKey()); summaryCache = null; }
-  const cached = cache.get(cacheKey());
-  if (!cached) $("#content").innerHTML = '<div class="state-box"><p>正在加载…</p></div>';
+  if (force) { cache.delete(key); summaryRequest = null; }
+  const cached = cache.get(key);
+  if (!cached) {
+    $("#content").innerHTML = '<div class="state-box"><p>正在加载…</p></div>';
+    $("#pager").hidden = true;
+  }
   $("#refresh").disabled = true;
+  loadSummary();
   try {
-    if (!summaryCache) summaryCache = { data: await api("GET", "/api/summary"), at: clock() };
-    const summary = summaryCache.data;
-    $("#n-candidate").textContent = summary.counts.candidate;
-    $("#n-verified").textContent = summary.counts.verified;
-    $("#n-qa").textContent = summary.qa ? summary.qa.pending : "–";
-    $("#n-docfix").textContent = summary.doc_fixes ? summary.doc_fixes.pending : "–";
-    $("#n-teamkb").textContent = summary.team_kb_pending ?? "–";
-    setMode(summary.read_success_mode);
     let entry = cached;
     if (!entry) {
       entry = { data: await api("GET", listUrl()), at: clock() };
-      const items = entry.data.patterns || entry.data.executions || entry.data.items || [];
-      if (!items.length && state.page > 1) { state.page -= 1; return load(); }
-      cache.set(cacheKey(), entry);
+      if (version !== loadVersion) return;
+      const lastPage = Math.max(1, Math.ceil(entry.data.total / PAGE_SIZE));
+      if (state.page > lastPage) { state.page = lastPage; return load(); }
+      cache.set(key, entry);
     }
     total = entry.data.total;
     if (isTemplates) {
@@ -1115,23 +1150,26 @@ async function load({ force = false } = {}) {
     renderPager();
     $("#stamp").textContent = `数据更新于 ${entry.at}`;
   } catch (err) {
+    if (version !== loadVersion) return;
     $("#content").innerHTML = `<div class="state-box error"><p>加载失败：${esc(err.message)}</p>
-      <p class="hint">登录可能已过期：请刷新整个页面（Ctrl+F5）重新登录后再试。</p><p><button class="btn" id="retry">重试</button></p></div>`;
+      <p><button class="btn" id="retry">重试</button></p></div>`;
     $("#retry").onclick = () => load({ force: true });
     $("#pager").hidden = true;
   } finally {
-    $("#refresh").disabled = false;
-    if (isTemplates && !document.querySelector(".tpl")) {
-      ["#select-all-wrap", "#batch-approve", "#batch-revert", "#batch-delete"].forEach((sel) => { $(sel).hidden = true; });
+    if (version === loadVersion) {
+      $("#refresh").disabled = false;
+      if (isTemplates && !document.querySelector(".tpl")) {
+        ["#select-all-wrap", "#batch-approve", "#batch-revert", "#batch-delete"].forEach((sel) => { $(sel).hidden = true; });
+      }
+      updateBatchButtons();
     }
-    updateBatchButtons();
   }
 }
 
 function listUrl() {
   const paging = `page=${state.page}&page_size=${PAGE_SIZE}`;
   if (state.tab === "candidate" || state.tab === "verified") return `/api/patterns?status=${state.tab}&${paging}`;
-  if (state.tab === "executions") return `/api/executions?${paging}`;
+  if (state.tab === "executions") return `/api/executions?${paging}&include_details=false`;
   if (state.tab === "qa") {
     if (state.filter === "archive") return `/api/qa-archive?status=active&${paging}`;
     if (state.filter === "retired") return `/api/qa-archive?status=retired&${paging}`;
@@ -1665,7 +1703,7 @@ $("#content").addEventListener("toggle", async (e) => {
 /* ---------------- executions ---------------- */
 function renderExecutions(rows) {
   if (!rows.length) { $("#content").innerHTML = emptyBox("executions"); return; }
-  const body = rows.map((r, i) => {
+  const body = rows.map((r) => {
     const planning = r.planning_model
       ? `${esc(r.planning_model)}<span class="sub">${(r.planning_ms / 1000).toFixed(1)} 秒，${r.planning_calls} 次调用</span>` : "–";
     const reading = r.model_name
@@ -1673,7 +1711,7 @@ function renderExecutions(rows) {
     const readingNote = r.interpretation_status && r.interpretation_status !== "done"
       ? `<span class="sub">研读：${esc(r.interpretation_status)}${r.error_kind ? "，" + esc(r.error_kind) : ""}</span>` : "";
     return `
-      <tr class="row" data-i="${i}" data-state="${esc(r.terminal_status)}" data-source="${esc(r.report_source)}" tabindex="0" aria-expanded="false">
+      <tr class="row" data-message-id="${esc(r.message_id)}" data-state="${esc(r.terminal_status)}" data-source="${esc(r.report_source)}" tabindex="0" aria-expanded="false">
         <td class="when">${fmt(r.created_at)}</td>
         <td class="request">${esc(r.request_text) || "–"}<span class="sub">${esc(r.user_name || r.user_id) || ""}</span></td>
         <td>${planning}</td>
@@ -1682,22 +1720,33 @@ function renderExecutions(rows) {
         <td>${reading}</td>
         <td class="chev">展开</td>
       </tr>
-      <tr class="detail" data-for="${i}" hidden><td colspan="7">
-        ${r.ai_summary ? `<h4>AI 说明</h4><pre class="lines">${esc(r.ai_summary)}</pre>` : ""}
-        <h4>执行明细</h4><pre class="lines">${esc(r.summary_text)}</pre>
-      </td></tr>`;
+      <tr class="detail" hidden><td colspan="7" aria-live="polite"></td></tr>`;
   }).join("");
   $("#content").innerHTML = `<div class="table-wrap"><table class="exec">
     <thead><tr><th>时间</th><th>请求与发起人</th><th>需求分析</th><th>终态</th><th>说明来源</th><th>结果研读</th><th></th></tr></thead>
     <tbody>${body}</tbody></table></div>`;
 }
 
-function toggleRow(row) {
-  const detail = document.querySelector(`tr.detail[data-for="${row.dataset.i}"]`);
+async function toggleRow(row) {
+  const detail = row.nextElementSibling;
   const open = detail.hidden;
   detail.hidden = !open;
   row.setAttribute("aria-expanded", String(open));
   row.querySelector(".chev").textContent = open ? "收起" : "展开";
+  if (!open || detail.dataset.status) return;
+
+  const cell = detail.cells[0];
+  detail.dataset.status = "loading";
+  cell.textContent = "正在加载执行明细…";
+  try {
+    const data = await api("GET", `/api/executions/${encodeURIComponent(row.dataset.messageId)}`);
+    cell.innerHTML = (data.ai_summary ? `<h4>AI 说明</h4><pre class="lines">${esc(data.ai_summary)}</pre>` : "")
+      + `<h4>执行明细</h4><pre class="lines">${esc(data.summary_text)}</pre>`;
+    detail.dataset.status = "loaded";
+  } catch (err) {
+    cell.textContent = `加载失败：${err.message}。可收起后重新展开。`;
+    delete detail.dataset.status;
+  }
 }
 $("#content").addEventListener("click", (e) => { const row = e.target.closest("tr.row"); if (row) toggleRow(row); });
 $("#content").addEventListener("keydown", (e) => {
@@ -1722,7 +1771,7 @@ $("#batch-delete").onclick = () => act(selectedIds(), "delete");
 document.querySelectorAll("#mode input").forEach((input) => input.addEventListener("change", async () => {
   try {
     await api("PUT", "/api/settings/read-success-mode", { mode: input.value });
-    if (summaryCache) summaryCache.data.read_success_mode = input.value;
+    summaryRequest = null;
     setMode(input.value);
     toast(input.value === "ai" ? "查询成功后：AI 解读日志" : "查询成功后：只发程序结果");
   } catch (err) { toast(`切换失败：${err.message}`, true); load({ force: true }); }

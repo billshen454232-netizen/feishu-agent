@@ -129,7 +129,18 @@ def test_recent_executions_view_joins_request_and_reading(tmp_path):
     assert by_id["om_q"]["elapsed_ms"] == 6731
     assert by_id["om_q"]["ai_summary"] == "2007 已开服"
     assert by_id["om_w"]["report_source"] == "template" and by_id["om_w"]["model_name"] == ""
-    assert "最近执行" in _client(store).get("/").text
+    client = _client(store)
+    assert "最近执行" in client.get("/").text
+    compact = client.get("/api/executions?include_details=false").json()["executions"]
+    by_id = {row["message_id"]: row for row in compact}
+    assert by_id["om_q"]["model_name"] == "gpt-5.6-terra"
+    assert all("summary_text" not in row and "ai_summary" not in row for row in compact)
+    assert client.get("/api/executions/om_q").json() == {
+        "summary_text": "✅ 执行完成：查询 2007 服",
+        "ai_summary": "2007 已开服",
+    }
+    assert client.get("/api/executions/om_w").json()["ai_summary"] == ""
+    assert client.get("/api/executions/missing").status_code == 404
 
 
 def test_outcome_verdict_endpoint(tmp_path):
