@@ -395,7 +395,8 @@
 - 查询示例「列出国服 Weekly GVG 连接了哪些游戏服」「国服 QA GVG 有哪些关联服」。支持 Weekly、DEV、QA，分别对应 `weeklygvg`、`devgvg`、`qagvg`。
 - 查询合同使用 `kind:"operation"`、`route_scope:"cn"`、单步 `path:"/home/serverGeneralScript/gvg_topology.py"` 和 `args:["list", "<scope>"]`，用用户明确给出的环境填充 `<scope>`。
 - Worker 经 Task 89 运行 GS-1 拓扑扫描，报告 GVG 侧运行态和关联服状态。
-- 启停示例「国服 DEV GVG 停服」「国服 QA GVG 起服」。Gateway 直接解析，先查批次再出确认卡。`preview-stop`、`preview-start`、`stop`、`start` 由系统生成，模型只生成查询合同。
+- GVG 停服自动按拓扑先停关联游戏服，再停所选 GVG。AI 对停服和起服分别生成 `["preview-stop", "<scope>"]` 和 `["preview-start", "<scope>"]`，两种都沿用本模式的路径和 `route_scope:"cn"`。
+- 用户要求重启（如「关掉连着的游戏服，重启 Weekly GVG 中心服」）时，AI 按顺序为同一组 GVG 生成这两个预检步骤。系统会把起服预检调整为停服后的场景，展示两个批次的确认卡。执行器核实停服成功后才启动 GVG。停下的普通游戏服另行起服。`preview-start-after-stop`、`stop` 和 `start` 是系统参数，由模型之外的流程生成。
 - **配置变更入口**：「国服 Weekly GVG 只保留 2016 的连接配置」或「恢复 GVG 变更单 <单号>」。由 Gateway 直接解析请求，Worker 只读预检后生成确认卡。模型只能规划本模式的 `list` 查询。`preview-keep`、`preview-restore` 和 `apply` 都由系统生成。配置改动检测 game 停服状态，不自动启停进程。
 
 ## 维护要求
@@ -1028,7 +1029,7 @@
       "name": "preview-cn-gvg-topology",
       "path": "/home/serverGeneralScript/gvg_topology.py",
       "args": ["{preview_mode}", "{scope}"],
-      "variables": {"preview_mode": "preview-stop|preview-start", "scope": "weeklygvg|devgvg|qagvg"},
+      "variables": {"preview_mode": "preview-stop|preview-start|preview-start-after-stop", "scope": "weeklygvg|devgvg|qagvg"},
       "runner": "python3.7",
       "risk": "read",
       "route_scopes": ["cn"]

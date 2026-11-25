@@ -78,7 +78,7 @@ def dependency_lines(scan, scope):
             "game 状态待核对：" + display(unknown)]
 
 
-def plan_preview(plan, scope, operation):
+def plan_preview(plan, scope, operation, *, include_running_gvg=False):
     """Bind scope, operation, target identities and order while keeping machine names on GS-1."""
     cluster = SCOPES[scope][1]
     if plan.get("ignored_missing_connections"):
@@ -87,10 +87,13 @@ def plan_preview(plan, scope, operation):
     for batch in plan["batches"]:
         index = batch["batch_index"]
         for action in batch["actions"]:
-            if action["status"] == "already_running" or action["status"].startswith("skipped"):
-                continue
             server, group = action["host_num"], action["group"]
-            if (action["status"] != "pending" or not ID.fullmatch(server) or not LABEL.fullmatch(group)
+            status = action["status"]
+            if include_running_gvg and status == "already_running" and (server, group) == (cluster, "gvg_zone"):
+                status = "pending"
+            if status == "already_running" or status.startswith("skipped"):
+                continue
+            if (status != "pending" or not ID.fullmatch(server) or not LABEL.fullmatch(group)
                     or (server == cluster and group != "gvg_zone")):
                 raise TopologyError("拓扑执行计划包含无法核实的节点。")
             identities.append([index, server, group, action["machine"], action["mode"], action.get("start_shell_script"),
@@ -102,7 +105,7 @@ def plan_preview(plan, scope, operation):
     return {"scope": scope, "operation": operation, "signature": signature, "actions": display}
 
 
-def run_plan(module, scope, operation, argv, expected):
+def run_plan(module, scope, operation, argv, expected, *, include_running_gvg=False):
     """Use the same vendor planner for preview and commit, with the guard at its write boundary."""
     boundary = "execute_{}_plan".format("shutdown" if operation == "stop" else "start")
     runner = getattr(module, "run_shutdown" if operation == "stop" else "run_start")
@@ -114,7 +117,15 @@ def run_plan(module, scope, operation, argv, expected):
     def guarded(plan, args):
         if previews:
             raise TopologyError("GS-1 返回多份执行计划，请重新核对。")
-        preview = plan_preview(plan, scope, operation)
+        preview = plan_preview(plan, scope, operation, include_running_gvg=include_running_gvg)
+        actions = preview["actions"]
+        if include_running_gvg or (operation == "stop" and actions):
+            cluster = SCOPES[scope][1]
+            if sum((server, group) == (cluster, "gvg_zone") for _, server, group, _ in actions) != 1:
+                raise TopologyError("没有唯一的 GVG 中心服操作目标。")
+        if include_running_gvg:
+            if any(group == "game" for _, _, group, _ in actions):
+                raise TopologyError("GVG 起服计划包含普通游戏服，请核对拓扑。")
         previews.append(preview)
         if expected is None:
             return 0
@@ -132,13 +143,9 @@ def run_plan(module, scope, operation, argv, expected):
     return status, previews[0]
 
 
-def execute(args, output):
-    label, cluster = SCOPES[args.scope]
-    if args.mode == "list":
-        return 0, dependency_lines(read_scan(output), args.scope)
-    operation = args.mode.replace("preview-", "")
+def run_phase(scope, operation, output, expected=None, *, include_running_gvg=False):
     number_file = output / "target.txt"
-    number_file.write_text(cluster + "\n", encoding="ascii")
+    number_file.write_text(SCOPES[scope][1] + "\n", encoding="ascii")
     argv = ["--all-machine-file", str(INVENTORY), "--output-dir", str(output)]
     sys.path[:0] = [str(CODE_ROOT / "run_console"), str(CODE_ROOT)]
     if operation == "stop":
@@ -149,25 +156,44 @@ def execute(args, output):
     else:
         module = importlib.import_module("start_game_server_by_topology")
         argv = ["--start-hostnum-file", str(number_file)] + argv
-    status, preview = run_plan(module, args.scope, operation, argv, args.signature)
-    if args.signature is None:
-        return status, ["GVG_TOPOLOGY_PREVIEW " + json.dumps(preview, separators=(",", ":"))]
+    return run_plan(module, scope, operation, argv, expected, include_running_gvg=include_running_gvg)
+
+
+def phase_result(scope, operation, output, status, *, require_root=False):
+    label, cluster = SCOPES[scope]
     result_file = output / ("game_server_shutdown_topology.json" if operation == "stop" else "game_server_start_topology.json")
     result = json.loads(result_file.read_text(encoding="utf-8"))
     terminal = "shutdown_completed" if operation == "stop" else "start_completed"
     action_label = "关服" if operation == "stop" else "起服"
     lines = ["国服 {} GVG {} {}".format(label, cluster, action_label)]
+    root_completed = False
     for batch in result["batches"]:
         for action in batch["actions"]:
             server, group, state = action["host_num"], action["group"], action["status"]
             if ID.fullmatch(server) and LABEL.fullmatch(group) and LABEL.fullmatch(state):
                 lines.append("批次 {} · {} {} · {}".format(batch["batch_index"], group, server, state))
-    return 0 if status == 0 and result["status"] == terminal else 1, lines
+            if (server, group, state) == (cluster, "gvg_zone", terminal):
+                root_completed = True
+    ok = status == 0 and result["status"] == terminal and (root_completed or not require_root)
+    return 0 if ok else 1, lines
+
+
+def execute(args, output):
+    if args.mode == "list":
+        return 0, dependency_lines(read_scan(output), args.scope)
+    after_stop = args.mode == "preview-start-after-stop"
+    operation = "start" if after_stop else args.mode.replace("preview-", "")
+    status, preview = run_phase(args.scope, operation, output, args.signature, include_running_gvg=after_stop)
+    if args.signature is None:
+        return status, ["GVG_TOPOLOGY_PREVIEW " + json.dumps(preview, separators=(",", ":"))]
+    cluster = SCOPES[args.scope][1]
+    require_root = any((server, group) == (cluster, "gvg_zone") for _, server, group, _ in preview["actions"])
+    return phase_result(args.scope, operation, output, status, require_root=require_root)
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("list", "preview-stop", "preview-start", "stop", "start"))
+    parser.add_argument("mode", choices=("list", "preview-stop", "preview-start", "preview-start-after-stop", "stop", "start"))
     parser.add_argument("scope", choices=tuple(SCOPES))
     parser.add_argument("signature", nargs="?")
     args = parser.parse_args(argv)

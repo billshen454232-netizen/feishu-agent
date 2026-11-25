@@ -676,7 +676,7 @@
         "{scope}"
       ],
       "variables": {
-        "preview_mode": "preview-stop|preview-start",
+        "preview_mode": "preview-stop|preview-start|preview-start-after-stop",
         "scope": "weeklygvg|devgvg|qagvg"
       },
       "runner": [

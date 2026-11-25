@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .muliu_plan import MuliuPlan, MuliuPlanError, MuliuStep
+from .gvg_topology import validate_topology_steps
 
 
 _CONTRACT_BLOCK_PATTERN = re.compile(
@@ -196,11 +197,15 @@ class MuliuCallContracts:
             )
 
         self._validate_contract_semantics(matched_contracts, plan.steps)
+        try:
+            is_topology = validate_topology_steps(plan)
+        except MuliuPlanError as exc:
+            raise MuliuCallContractError(str(exc)) from exc
         if plan.route_scope is None:
             if any(contract.route_scopes for contract in matched_contracts):
                 raise MuliuCallContractError("该已登记范围查询必须声明 cn 或 overseas 路由范围")
             return
-        if len(matched_contracts) != 1 or not self.permits_route_scope(plan, plan.route_scope):
+        if (len(matched_contracts) != 1 and not is_topology) or not self.permits_route_scope(plan, plan.route_scope):
             raise MuliuCallContractError("计划声明的范围路由未由已登记只读调用合同允许")
 
     @staticmethod

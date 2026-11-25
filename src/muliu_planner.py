@@ -414,7 +414,7 @@ class MuliuPlanner:
 范围查询规则：
 - 仅当注册表明确声明范围路由的只读模式、且用户明确指定“国服”或“海外”时，根对象必须加入 `route_scope:"cn"` 或 `route_scope:"overseas"`；它只选择 Worker，绝不是脚本参数，不能写入 `args`。
 - 当前 `basic_info.sh ssinfo <scenario>` 是该类模式。例如“查询国服所有剧本为 1000 的服务器”必须生成 `args:["ssinfo","1000"]` 与 `route_scope:"cn"`；海外同理为 `overseas`。用户未指定国服或海外时，必须使用 `kind:"clarify"`，不能自行选择。
-- 查询国服 GVG 关联游戏服时，使用模式 R 的单步拓扑查询合同并设置 `route_scope:"cn"`。Weekly、DEV、QA 分别对应 `weeklygvg`、`devgvg`、`qagvg`。未指定环境时返回 `clarify`。启停与配置变更由对应的专用入口预检，模型仅生成拓扑查询。
+- 国服 GVG 查询和启停使用模式 R，设置 `route_scope:"cn"`。Weekly、DEV、QA 分别对应 `weeklygvg`、`devgvg`、`qagvg`。未指定环境时返回 `clarify`。停服步骤包含先关拓扑关联游戏服，再关 GVG。关掉关联服后重启 GVG，应为同一环境依次生成 `preview-stop`、`preview-start` 两步。只生成预检参数，配置变更仍走对应专用入口。
 - 其他未声明范围路由的调用不能输出 `route_scope`，必须从合同声明的服务器编号推导 Worker。
 
 成功时只能返回一个 JSON 对象，禁止 Markdown、代码围栏、解释文字、shell、command 字段或其他字段：
@@ -492,7 +492,8 @@ class MuliuPlanner:
 - 如果任一必要动作没有已登记调用能完成，返回 `kind:"reject"` 和空步骤，并在 summary 简述缺少的能力；
 - 可以把用户明确要求的多个已登记动作拆成按顺序执行的多个步骤；任一脚本、参数或额外动作未登记时，必须拒绝整个组合，不得只保留其中一部分。
 - 不得调用未登记脚本、编造参数、使用 shell / command 字段或补充用户未要求的动作。
-- 对注册表明确声明范围路由的只读查询：用户明确指定国服或海外时，必须保留对应 `route_scope`；没有指定范围时必须返回 `kind:"clarify"`；不得把范围写入 `args`。
+- 对模式 R 的国服 GVG 请求，Weekly、DEV、QA 环境即确定国服路由。重启应保留同一环境的 `preview-stop`、`preview-start` 两步，不得把关联游戏服拆为独立关服脚本。
+- 对其他明确声明范围路由的只读查询：用户明确指定国服或海外时，必须保留对应 `route_scope`；没有指定范围时必须返回 `kind:"clarify"`；不得把路由分类写入 `args`。
 
 原始用户请求：
 ---

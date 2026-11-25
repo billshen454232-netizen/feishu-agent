@@ -281,10 +281,13 @@ async def test_gateway_gvg_preview_freezes_targets_in_confirmation(tmp_path):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("label", "scope", "cluster"), [
-    ("Weekly", "weeklygvg", "4"), ("DEV", "devgvg", "260005"), ("QA", "qagvg", "260006"),
+@pytest.mark.parametrize(("text", "operation", "scope", "cluster"), [
+    ("国服 Weekly GVG 停服", "stop", "weeklygvg", "4"),
+    ("国服 DEV GVG 停服", "stop", "devgvg", "260005"),
+    ("国服 QA GVG 停服", "stop", "qagvg", "260006"),
+    ("关掉连着的游戏服 重启weekly gvg中心服", "restart", "weeklygvg", "4"),
 ])
-async def test_gateway_topology_stop_requires_original_requester_confirmation(tmp_path, label, scope, cluster):
+async def test_gateway_topology_requires_original_requester_confirmation(tmp_path, text, operation, scope, cluster):
     from src.muliu_plan import parse_plan
 
     class Feishu(FakeFeishuClient):
@@ -297,11 +300,20 @@ async def test_gateway_topology_stop_requires_original_requester_confirmation(tm
     config = replace(make_config(), runtime=RuntimeConfig(role="gateway"))
     store = MessageJobStore(tmp_path / "jobs.sqlite3")
     store.initialize()
-    message_id = "om_gvg_stop"
-    store.create_if_new(message_id, "event", "oc_group", "ou_requester", f"国服 {label} GVG 停服", chat_type="group")
+    message_id = "om_gvg_operation"
+    store.create_if_new(message_id, "event", "oc_group", "ou_requester", text, chat_type="group")
+    class Planner:
+        async def create_plan(self, user_text):
+            assert operation == "restart" and user_text == text
+            return MuliuPlan("重启 Weekly GVG", [
+                MuliuStep(GVG_TOPOLOGY_PATH, ["preview-stop", scope], "预检停服"),
+                MuliuStep(GVG_TOPOLOGY_PATH, ["preview-start", scope], "预检起服"),
+            ], route_scope="cn")
+
     feishu = Feishu()
     processor = MessageJobProcessor(
         config, store, ConversationStore(4), FakeAIClient(), feishu,
+        operation_planner=Planner(),
         muliu_firewall=MuliuFirewall(config.muliu, contracts),
         route_resolver=MuliuPlanRouteResolver(str(CONFIG / "server_environments.json"), contracts),
         script_catalog=catalog,
@@ -310,16 +322,30 @@ async def test_gateway_topology_stop_requires_original_requester_confirmation(tm
     job = store.claim_next_worker_job("test-worker")
     assert job and not feishu.replies
     plan = parse_plan(job.plan_json)
-    assert plan.steps[0].args == ["preview-stop", scope]
+    expected_preview = [["preview-stop", scope]]
+    if operation == "restart":
+        expected_preview.append(["preview-start-after-stop", scope])
+    assert [step.args for step in plan.steps] == expected_preview
 
     done = store.complete_worker_job(message_id, "test-worker", status="done")
-    log = "GVG_TOPOLOGY_PREVIEW " + json.dumps({
+    stop_log = "GVG_TOPOLOGY_PREVIEW " + json.dumps({
         "scope": scope, "operation": "stop", "signature": "a" * 64,
         "actions": [[0, "2005", "game", 0], [2, cluster, "gvg_zone", 0]],
     })
-    await processor.present_topology_preview(done, plan, log)
+    logs = [stop_log]
+    expected_steps = [["stop", scope, "a" * 64]]
+    if operation == "restart":
+        logs.append("GVG_TOPOLOGY_PREVIEW " + json.dumps({
+            "scope": scope, "operation": "start", "signature": "b" * 64,
+            "actions": [[2, cluster, "gvg_zone", 3]],
+        }))
+        expected_steps.append(["start", scope, "b" * 64])
+    await processor.present_topology_preview(done, plan, logs)
     pending = store.get(message_id)
     assert pending.status == "awaiting_confirmation" and pending.user_id == "ou_requester"
-    assert parse_plan(pending.plan_json).steps[0].args == ["stop", scope, "a" * 64]
-    assert "game 2005" in json.dumps(feishu.replies[0][1], ensure_ascii=False)
+    assert [step.args for step in parse_plan(pending.plan_json).steps] == expected_steps
+    card = json.dumps(feishu.replies[0][1], ensure_ascii=False)
+    assert "game 2005" in card
+    if operation == "restart":
+        assert "停服批次" in card and "起服批次" in card
     assert store.claim_next_worker_job("test-worker") is None

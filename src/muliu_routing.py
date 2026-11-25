@@ -52,8 +52,6 @@ class MuliuPlanRouteResolver:
         try:
             self._call_contracts.validate(plan)
             if any(step.path == GVG_TOPOLOGY_PATH for step in plan.steps):
-                if len(plan.steps) != 1:
-                    raise ValueError("GVG 拓扑操作必须单独发起")
                 return MuliuRouteSnapshot.from_region("cn")
             backends = {self._call_contracts.backend_for(step) for step in plan.steps}
             if backends == {BACKEND_GVG_QUERY}:

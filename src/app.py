@@ -423,9 +423,10 @@ def _add_gateway_worker_routes(
                 and plan.steps[0].args[0] in {"preview-keep", "preview-restore"}):
             await job_processor.present_gvg_preview(pending_job, plan, result.step_results[0].log)
             return {"status": "accepted"}
-        if (result.succeeded and len(plan.steps) == 1 and plan.steps[0].path == GVG_TOPOLOGY_PATH
-                and plan.steps[0].args[0] in GVG_TOPOLOGY_MODES):
-            await job_processor.present_topology_preview(pending_job, plan, result.step_results[0].log)
+        if result.succeeded and plan.steps and all(
+            step.path == GVG_TOPOLOGY_PATH and step.args[0] in GVG_TOPOLOGY_MODES for step in plan.steps
+        ):
+            await job_processor.present_topology_preview(pending_job, plan, [step.log for step in result.step_results])
             return {"status": "accepted"}
         await job_processor.present_execution_result(
             pending_job,

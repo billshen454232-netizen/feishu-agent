@@ -14,7 +14,7 @@ from .config import AppConfig
 from .conversation_log import ConversationLogEntry
 from .conversation import ConversationStore
 from .gvg_connection import GVG_QUERY_PATH, WEEKLY_GVG_SCOPE, GvgQueryError, WeeklyGvgScope, change_request, parse_preview
-from .gvg_topology import GVG_TOPOLOGY_LABELS, GVG_TOPOLOGY_PATH, parse_topology_preview, topology_request
+from .gvg_topology import GVG_TOPOLOGY_LABELS, GVG_TOPOLOGY_MODES, GVG_TOPOLOGY_PATH, parse_topology_preview, topology_request
 from .message_jobs import MessageJobStore
 from .muliu_executor import MuliuExecutionError, MuliuExecutionResult, MuliuSubmittedError
 from .muliu_firewall import MuliuFirewallError
@@ -283,8 +283,13 @@ class MessageJobProcessor:
                         if any(step.path == GVG_QUERY_PATH for step in plan.steps):
                             raise MuliuPlanError("变更 GVG 配置请发「国服 Weekly GVG 只保留 <服号> 的连接配置」或「恢复 GVG 变更单 <单号>」。")
                         if any(step.path == GVG_TOPOLOGY_PATH for step in plan.steps):
-                            if len(plan.steps) != 1 or plan.steps[0].args[0] != "list":
-                                raise MuliuPlanError("请单独发起 GVG 启停请求，例如「国服 QA GVG 停服」。")
+                            if any(step.args[0] not in {"list", "preview-stop", "preview-start"} for step in plan.steps):
+                                raise MuliuPlanError("GVG 启停必须先生成拓扑预检。")
+                            if len(plan.steps) == 2:
+                                stop, start = plan.steps
+                                plan = MuliuPlan(plan.summary, [stop, MuliuStep(
+                                    start.path, ["preview-start-after-stop", start.args[1]], start.description,
+                                )], route_scope=plan.route_scope)
                             await self._queue_gvg_read(job, plan)
                             return
                         route_snapshot = self._resolve_route_snapshot(plan)
@@ -660,25 +665,33 @@ class MessageJobProcessor:
         except (MuliuFirewallError, MuliuRoutingError, MuliuPlanError) as exc:
             await self._reply_and_finish(job.message_id, format_rejection(str(exc)))
 
-    async def present_topology_preview(self, job: Any, plan: MuliuPlan, log: str) -> None:
-        mode, scope = plan.steps[0].args
+    async def present_topology_preview(self, job: Any, plan: MuliuPlan, logs: list[str]) -> None:
+        steps: list[MuliuStep] = []
+        detail: list[str] = []
+        combined = len(plan.steps) == 2
         try:
-            if topology_request(job.text) != (mode, scope):
-                raise ValueError("启停预检与原请求不一致。")
-            operation = mode.removeprefix("preview-")
-            signature, targets = parse_topology_preview(log, scope, operation)
-            if not targets:
-                await self._reply_and_finish(job.message_id, "当前拓扑没有待执行的启停节点。")
-                return
-            action = "停服" if operation == "stop" else "起服"
-            title = f"国服 {GVG_TOPOLOGY_LABELS[scope]} GVG {action}"
-            write = MuliuPlan(title, [MuliuStep(GVG_TOPOLOGY_PATH, [operation, scope, signature], "按确认的拓扑批次执行")])
+            if len(plan.steps) != len(logs):
+                raise ValueError("未取得完整的 GVG 拓扑预检结果。")
+            for preview, log in zip(plan.steps, logs):
+                mode, scope = preview.args
+                operation = GVG_TOPOLOGY_MODES[mode]
+                signature, targets = parse_topology_preview(log, scope, operation)
+                if not targets:
+                    await self._reply_and_finish(job.message_id, "拓扑预检没有找到该流程所需的启停节点。")
+                    return
+                action = "停服" if operation == "stop" else "起服"
+                detail.extend([f"{action}批次", *targets])
+                steps.append(MuliuStep(GVG_TOPOLOGY_PATH, [operation, scope, signature], f"按确认的拓扑批次{action}"))
+            if combined:
+                detail.append("停服成功后才开始起服。本次停下的普通游戏服由你另行起服。")
+            title = f"国服 {GVG_TOPOLOGY_LABELS[scope]} GVG {'重启' if combined else action}"
+            write = MuliuPlan(title, steps)
             self._muliu_firewall.validate(write)
             route = self._resolve_route_snapshot(write)
-        except (ValueError, MuliuFirewallError) as exc:
+        except (KeyError, ValueError, MuliuFirewallError) as exc:
             await self._reply_and_finish(job.message_id, format_rejection(str(exc)))
             return
-        await self._send_gvg_confirmation(job, write, route, detail="\n".join(targets))
+        await self._send_gvg_confirmation(job, write, route, detail="\n".join(detail))
 
     async def present_gvg_preview(self, job: Any, plan: MuliuPlan, log: str) -> None:
         """Publish a write plan only after the validated read job returned exact targets."""
@@ -741,8 +754,11 @@ class MessageJobProcessor:
             plan = None
         if plan is not None and any(step.path in {GVG_QUERY_PATH, GVG_TOPOLOGY_PATH} for step in plan.steps):
             # Use verified per-server outcomes even when the requester chose a summary-only card.
-            detail = ("\n".join(clean_muliu_execution_log(step.log) for step in result.step_results)
-                      or result.result_unknown_reason or result.failure_reason)
+            details = [clean_muliu_execution_log(step.log) for step in result.step_results]
+            reason = result.result_unknown_reason or result.failure_reason
+            if reason:
+                details.append(reason)
+            detail = "\n".join(details)
             await self.deliver_execution_result(
                 pending_job, reply_message_id, fallback_reply,
                 status_card=build_execution_status_card(result, detail=mask_sensitive_operation_data(detail)),
