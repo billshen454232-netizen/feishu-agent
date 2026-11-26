@@ -37,6 +37,7 @@ from .baye_check import (
 from .qa_library import QaService, QaStore
 from .duty_queries import DutyQueries
 from .event_handler import FeishuEventHandler
+from .gmt_server_tab import GMT_TAB_PATH
 from .gvg_connection import GVG_QUERY_PATH
 from .gvg_topology import GVG_TOPOLOGY_MODES, GVG_TOPOLOGY_PATH
 from .execution_report import ExecutionReportStore
@@ -419,6 +420,10 @@ def _add_gateway_worker_routes(
         )
         if pending_job is None:
             raise HTTPException(status_code=404, detail="worker lease not found")
+        if (result.succeeded and len(plan.steps) == 1 and plan.steps[0].path == GMT_TAB_PATH
+                and plan.steps[0].args[0] == "preview"):
+            await job_processor.present_gmt_preview(pending_job, plan, result.step_results[0].log)
+            return {"status": "accepted"}
         if (result.succeeded and len(plan.steps) == 1 and plan.steps[0].path == GVG_QUERY_PATH
                 and plan.steps[0].args[0] in {"preview-keep", "preview-restore"}):
             await job_processor.present_gvg_preview(pending_job, plan, result.step_results[0].log)

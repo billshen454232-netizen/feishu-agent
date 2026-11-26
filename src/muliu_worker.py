@@ -18,7 +18,8 @@ from .muliu_routing import MuliuPlanRouteResolver, MuliuRouteSnapshot, MuliuRout
 from .server_manager import ROUTE_API, ROUTES, ServerManagerClient, ServerManagerStepRunner, translate
 from .baye_check import BayeCheckCoordinator, BayeCheckError, BayeCheckSubmitUnknown
 from .muliu_executor import MuliuStepResult
-from .muliu_script_catalog import BACKEND_BAYE_CHECK, BACKEND_GVG_CHANGE, BACKEND_GVG_QUERY
+from .muliu_script_catalog import BACKEND_BAYE_CHECK, BACKEND_GMT_TAB, BACKEND_GVG_CHANGE, BACKEND_GVG_QUERY
+from .gmt_server_tab import GmtClient, GmtError, GmtResultUnknown, PAGE as GMT_PAGE
 from .gvg_connection import GvgChangeStore, GvgQueryError, WeeklyGvgChange, WeeklyGvgScope
 from .worker_protocol import serialize_execution_result
 
@@ -172,6 +173,7 @@ class MuliuWorker:
         self._stopping = False
         self._sm_clients: dict[str, ServerManagerClient] = {}
         self._sm_inventory: dict[str, tuple[float, set[str]]] = {}
+        self._gmt_clients: dict[str, GmtClient] = {}
 
     async def run_forever(self) -> None:
         self._stopping = False
@@ -197,6 +199,9 @@ class MuliuWorker:
                     logger.exception("unexpected Muliu worker loop error")
                     await asyncio.sleep(self._config.runtime.poll_interval_seconds)
         finally:
+            for gmt_client in self._gmt_clients.values():
+                gmt_client.http.close()
+            self._gmt_clients.clear()
             await self._gateway_client.close()
 
     def stop(self) -> None:
@@ -211,7 +216,7 @@ class MuliuWorker:
             if local_snapshot != gateway_snapshot:
                 raise MuliuRoutingError("Gateway 路由分类与 Worker 本地服号归属不一致")
             backend = self._call_contracts.backend_for(plan.steps[0]) if self._call_contracts is not None else ""
-            routed_config = None if backend in {BACKEND_GVG_QUERY, BACKEND_GVG_CHANGE} else muliu_config_for_route(
+            routed_config = None if backend in {BACKEND_GVG_QUERY, BACKEND_GVG_CHANGE, BACKEND_GMT_TAB} else muliu_config_for_route(
                 self._config.muliu,
                 local_snapshot.region,
                 local_snapshot.identifier,
@@ -234,6 +239,8 @@ class MuliuWorker:
 
         if backend in {BACKEND_GVG_QUERY, BACKEND_GVG_CHANGE}:
             execution_task = asyncio.create_task(asyncio.to_thread(self._execute_gvg, plan, job.message_id))
+        elif backend == BACKEND_GMT_TAB:
+            execution_task = asyncio.create_task(asyncio.to_thread(self._execute_gmt_tab, plan, local_snapshot.region))
         else:
             api_steps, api_runner = await self._api_route(plan, job, local_snapshot.region)
             routed_executor = MuliuExecutor(routed_config)
@@ -278,6 +285,41 @@ class MuliuWorker:
         accepted = await self._gateway_client.submit_result(job.message_id, result)
         if not accepted:
             logger.error("gateway no longer accepts result message_id=%s", job.message_id)
+
+    def _execute_gmt_tab(self, plan: Any, region: str) -> MuliuExecutionResult:
+        step = plan.steps[0]
+        mode, host, season, scenario, *signature = step.args
+        try:
+            origin = self._config.gmt_origins.get(region)
+            route = self._config.muliu.routes.get(region)
+            if not origin or route is None or not route.enabled:
+                raise GmtError(f"Worker 尚未配置该服的 GMT，请检查 gmt.origins.{region} 和对应运维账号。")
+            if region not in self._gmt_clients:
+                self._gmt_clients[region] = GmtClient(httpx.Client(base_url=origin, timeout=15, follow_redirects=False, headers={
+                    "X-Requested-With": "XMLHttpRequest", "Origin": origin, "Referer": origin + GMT_PAGE,
+                }))
+            gmt = self._gmt_clients[region]
+            gmt.ensure_session(route.username, route.password)
+            snapshot = gmt.read_tab(int(host))
+            new_season, new_scenario = int(season), int(scenario)
+            if mode == "preview":
+                log = gmt.preview(snapshot, new_season, new_scenario)
+            else:
+                if gmt.signature(snapshot, new_season, new_scenario) != signature[0]:
+                    raise GmtError("预检后的 GMT 记录已变化，请重新发起。")
+                updated = gmt.update_tab(snapshot, new_season, new_scenario)
+                log = f"{host} 服 GMT 回读成功。赛季 {updated.season}，剧本 {updated.scenario}。"
+        except GmtResultUnknown as exc:
+            return MuliuExecutionResult(summary=plan.summary, step_results=[], result_unknown_reason=str(exc))
+        except GmtError as exc:
+            reason = str(exc)
+        except (httpx.HTTPError, ValueError):
+            reason = "GMT 登录或预检失败。"
+        else:
+            return MuliuExecutionResult(summary=plan.summary, step_results=[
+                MuliuStepResult(1, step.description, step.path, step.args, True, log),
+            ])
+        return MuliuExecutionResult(summary=plan.summary, step_results=[], failed_step_number=1, failure_reason=reason)
 
     def _execute_gvg(self, plan: Any, message_id: str) -> MuliuExecutionResult:
         step = plan.steps[0]

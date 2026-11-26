@@ -5,6 +5,8 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
 
+from .gmt_server_tab import gmt_origin
+
 
 class ConfigError(ValueError):
     """Raised when the JSON configuration is missing or invalid."""
@@ -316,6 +318,7 @@ class AppConfig:
     clear_notification: ClearNotificationConfig = field(default_factory=ClearNotificationConfig)
     server_manager: ServerManagerConfig = field(default_factory=ServerManagerConfig)
     baye_check: BayeCheckConfig = field(default_factory=BayeCheckConfig)
+    gmt_origins: dict[str, str] = field(default_factory=dict)
     # 按用途选择的模型池；未配置 ai.pools 时为空，所有用途共用 ``ai``。
     ai_routes: dict[str, AIPoolConfig] = field(default_factory=dict)
 
@@ -674,6 +677,22 @@ def load_config(path: str | Path = "config/config.json") -> AppConfig:
     if not isinstance(runtime_raw, dict):
         raise ConfigError("runtime section must be a JSON object")
     runtime = _load_runtime(runtime_raw)
+    configured_gmt_origins = {}
+    if runtime.role == "worker":
+        gmt = raw.get("gmt", {})
+        if not isinstance(gmt, dict):
+            raise ConfigError("gmt 必须是对象")
+        origins = gmt.get("origins", {})
+        if not isinstance(origins, dict) or set(origins) - {"cn", "overseas"}:
+            raise ConfigError("gmt.origins 必须按 cn 和 overseas 配置")
+        for region, origin in {"overseas": gmt.get("origin", ""), **origins}.items():
+            try:
+                if not isinstance(origin, str):
+                    raise ValueError
+                if origin:
+                    configured_gmt_origins[region] = gmt_origin(origin)
+            except ValueError as exc:
+                raise ConfigError(f"gmt.origins.{region} 必须是 HTTPS 站点地址") from exc
     muliu_routes = _load_muliu_routes(muliu_raw.get("routes"), runtime_role=runtime.role)
     if not isinstance(script_knowledge_raw, dict):
         raise ConfigError("script_knowledge section must be a JSON object")
@@ -821,5 +840,6 @@ def load_config(path: str | Path = "config/config.json") -> AppConfig:
         clear_notification=clear_notification,
         server_manager=_load_server_manager(raw.get("server_manager", {})),
         baye_check=_load_baye_check(raw.get("baye_check", {})),
+        gmt_origins=configured_gmt_origins,
     )
     return config

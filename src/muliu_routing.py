@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from .muliu_plan import MuliuPlan
-from .muliu_script_catalog import BACKEND_GVG_CHANGE, BACKEND_GVG_QUERY, MuliuCallContracts
+from .muliu_script_catalog import BACKEND_GMT_TAB, BACKEND_GVG_CHANGE, BACKEND_GVG_QUERY, MuliuCallContracts
 from .gvg_connection import WeeklyGvgScope
 from .gvg_topology import GVG_TOPOLOGY_PATH
 from .server_environments import ServerEnvironments, ServerEnvironmentsError
@@ -65,7 +65,9 @@ class MuliuPlanRouteResolver:
                         or not set(targets).issubset(scope.game_servers)):
                     raise ValueError("GVG 配置变更仅允许一次操作国服 Weekly 普通游戏服")
                 return MuliuRouteSnapshot.from_region("cn")
-            if backends != {""}:
+            if BACKEND_GMT_TAB in backends and len(plan.steps) != 1:
+                raise ValueError("GMT 页签修改必须单独发起")
+            if backends not in ({""}, {BACKEND_GMT_TAB}):
                 if len(plan.steps) != 1:
                     raise ValueError("开服配置检查需要单独发起，不能和其他操作放在同一个计划里")
                 # Executed by the intranet Worker itself (UI-automation API), not by a regional Muliu task.

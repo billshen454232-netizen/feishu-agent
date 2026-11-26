@@ -43,6 +43,12 @@
     "script_catalog_path": "config/muliu_script_catalog.md",
     "max_steps": 10
   },
+  "gmt": {
+    "origins": {
+      "cn": "",
+      "overseas": ""
+    }
+  },
   "server_manager": {
     "enabled": true,
     "env": "qa_test",

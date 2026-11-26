@@ -22,7 +22,8 @@ _RISK_VALUES = frozenset({"read", "write"})
 BACKEND_BAYE_CHECK = "baye_check"
 BACKEND_GVG_QUERY = "gvg_query"
 BACKEND_GVG_CHANGE = "gvg_change"
-_BACKEND_VALUES = frozenset({BACKEND_BAYE_CHECK, BACKEND_GVG_QUERY, BACKEND_GVG_CHANGE})
+BACKEND_GMT_TAB = "gmt_tab"
+_BACKEND_VALUES = frozenset({BACKEND_BAYE_CHECK, BACKEND_GVG_QUERY, BACKEND_GVG_CHANGE, BACKEND_GMT_TAB})
 
 
 class MuliuScriptCatalogError(RuntimeError):

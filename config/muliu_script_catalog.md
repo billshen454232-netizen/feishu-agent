@@ -399,6 +399,12 @@
 - 用户要求重启（如「关掉连着的游戏服，重启 Weekly GVG 中心服」）时，AI 按顺序为同一组 GVG 生成这两个预检步骤。系统会把起服预检调整为停服后的场景，展示两个批次的确认卡。执行器核实停服成功后才启动 GVG。停下的普通游戏服另行起服。`preview-start-after-stop`、`stop` 和 `start` 是系统参数，由模型之外的流程生成。
 - **配置变更入口**：「国服 Weekly GVG 只保留 2016 的连接配置」或「恢复 GVG 变更单 <单号>」。由 Gateway 直接解析请求，Worker 只读预检后生成确认卡。模型只能规划本模式的 `list` 查询。`preview-keep`、`preview-restore` 和 `apply` 都由系统生成。配置改动检测 game 停服状态，不自动启停进程。
 
+### 模式 S：修改测试服的 GMT 选服页签
+
+- 例「把 2003 服的选服页签改为赛季 10、剧本 16」。服号、赛季和剧本由用户指定。缺任一项时澄清。只有明确请求修改 GMT 选服列表或页签时才匹配本能力。
+- AI 只生成单步 `/home/serverGeneralScript/_bot/gmt_server_tab`，参数 `["preview", "<server_id>", "<season>", "<scenario>"]`。按资产表中的服号选择国服或海外 GMT。
+- Worker 读取现值后，Gateway 向原请求人展示修改前后的赛季和剧本。`apply` 参数由 Gateway 从预检回执生成。Worker 通过 GMT 接口提交并回读。此入口由 Worker 直接处理。
+
 ## 维护要求
 
 新增可执行模式时，在同一次修改中更新本文件的自然语言映射、精确模板和文件末尾的机器可校验合同，并为该模式及其与其他已登记动作的组合补充本地测试。本地资料和调用合同负责让 AI 生成合规 `path + args`；任务入口脚本只负责根目录、普通文件、固定 argv 与 `shell=False`，不应再维护第二份服务器端业务白名单或按扩展名决定能否执行。脚本必须已放入本机 `knowledge/scripts/` 作为阅读参考，并确认实际部署在 GS-1 的相同路径；通过本地测试后才可供机器人执行。
@@ -1070,6 +1076,24 @@
       "runner": "bash",
       "risk": "write",
       "backend": "gvg_change"
+    },
+    {
+      "name": "preview-gmt-server-tab",
+      "path": "/home/serverGeneralScript/_bot/gmt_server_tab",
+      "args": ["preview", "{server_id}", "{season}", "{scenario}"],
+      "variables": {"server_id": "[1-9][0-9]{2,7}", "season": "[0-9]{1,8}", "scenario": "[0-9]{1,8}"},
+      "runner": "bash",
+      "risk": "read",
+      "backend": "gmt_tab"
+    },
+    {
+      "name": "apply-gmt-server-tab",
+      "path": "/home/serverGeneralScript/_bot/gmt_server_tab",
+      "args": ["apply", "{server_id}", "{season}", "{scenario}", "{signature}"],
+      "variables": {"server_id": "[1-9][0-9]{2,7}", "season": "[0-9]{1,8}", "scenario": "[0-9]{1,8}", "signature": "[a-f0-9]{64}"},
+      "runner": "bash",
+      "risk": "write",
+      "backend": "gmt_tab"
     }
   ]
 }
