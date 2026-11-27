@@ -42,6 +42,7 @@ from .execution_report import (
     READ_SUCCESS_MODE_AI,
     ExecutionReportStore,
     compute_error_signature,
+    failed_step,
     is_read_only_result,
     result_scope,
 )
@@ -966,26 +967,22 @@ class MessageJobProcessor:
             return
 
         is_failure = task.kind == INTERPRETATION_FAILURE
-        execution_data = _build_clean_execution_data(
-            result,
-            max_chars=self._config.execution_interpretation.max_execution_data_chars,
-        )
+        max_chars = self._config.execution_interpretation.max_execution_data_chars
         environment_context = _load_environment_context(
             self._config.execution_interpretation.server_environments_path
         )
         if is_failure:
             prompt = _build_failure_diagnosis_prompt(
-                user_text=job.text,
                 result=result,
                 environment_context=environment_context,
-                execution_data=execution_data,
+                max_chars=max_chars,
             )
             base_detail = _failure_detail(result)
         else:
             prompt = _build_execution_interpretation_prompt(
                 user_text=job.text,
                 environment_context=environment_context,
-                execution_data=execution_data,
+                execution_data=_build_clean_execution_data(result, max_chars=max_chars),
             )
             base_detail = _success_detail(result)
 
@@ -1726,7 +1723,14 @@ def _unknown_detail(result: MuliuExecutionResult) -> str:
 
 
 def _failure_detail(result: MuliuExecutionResult) -> str:
-    return mask_sensitive_operation_data("【执行失败】{}".format(result.failure_reason))
+    step = failed_step(result)
+    lines = ["【执行失败】{}".format(result.failure_reason)]
+    if step is not None:
+        lines.append(f"失败环节 第 {step.step_number} 步 · {step.description}")
+    completed = [item.description for item in result.step_results if item.succeeded]
+    if completed:
+        lines.append("已成功执行的步骤 · " + "、".join(completed))
+    return mask_sensitive_operation_data("\n".join(lines))
 
 
 def _pattern_label(pattern: Any) -> str:
@@ -1753,7 +1757,7 @@ def result_card_detail(reply: str, result: MuliuExecutionResult) -> str:
         return "【执行完成】{}".format(result.summary)
     if result.result_unknown:
         return "【结果尚未核验】{}".format(result.result_unknown_reason)
-    return "【执行失败】{}".format(result.failure_reason)
+    return _failure_detail(result)
 
 
 def _build_clean_execution_data(result: MuliuExecutionResult, *, max_chars: int) -> str:
@@ -1818,32 +1822,29 @@ def _build_execution_interpretation_prompt(
 
 def _build_failure_diagnosis_prompt(
     *,
-    user_text: str,
     result: MuliuExecutionResult,
     environment_context: str,
-    execution_data: str,
+    max_chars: int,
 ) -> str:
+    step = failed_step(result)
+    failure_evidence = "（无失败环节的脚本输出）"
+    if step is not None:
+        log = mask_sensitive_operation_data(clean_muliu_execution_log(step.log))
+        failure_evidence = f"脚本：{step.path.rsplit('/', 1)[-1]}\n{log[:max_chars]}"
     return (
-        "你是飞书测试服运维 AI 助手。一次操作已由机器人判定为失败；你只能依据下列脱敏后的真实结果做故障诊断。"
-        "你的诊断会被收集为【典型故障模板】，以后同类错误（可能是其他服号、其他参数）会直接复用。"
-        "\n\n【可信终态】failed（执行失败，不可更改）"
-        "\n\n【可信失败原因】\n{}"
-        "\n\n【用户原始提问】\n{}"
+        "你是飞书测试服运维 AI 助手。请诊断下面的失败环节，诊断将作为同类错误的候选模板。"
+        "\n\n【可信终态】failed（整体流程未完成）"
+        "\n\n【程序逐步判定】\n{}"
         "\n\n【环境资产参考】\n{}"
-        "\n\n【实际执行结果】\n{}"
+        "\n\n【失败环节的输出】\n{}"
         "\n\n【输出约束】\n"
-        "1. 不得把失败说成成功；日志中出现“完成”“成功”等文本与失败终态冲突时，明确指出冲突，不裁决成功。\n"
-        "2. 输出：可能原因（只写日志与失败原因能支持的）、排查/核验建议、证据缺口。\n"
+        "1. 整体终态与各步骤终态分别成立。保留已成功步骤的判定，只诊断失败环节。启动脚本成功和后续就绪核验失败可以同时成立。\n"
+        "2. 只写证据支持的原因、核验建议和证据缺口。历史日志需有时间或其他证据关联到本次失败才能用于归因。\n"
         "3. 写成适用于同类错误的通用说明：不要写具体服号、赛季、剧本号等本次参数。\n"
         "4. 只给核验与排查建议，不建议自动重试、重放或重复执行写操作。\n"
         "5. 严禁输出私网 IP、主机地址、账号、凭据、Cookie、Token、数据库连接、工作目录或执行命令。\n"
         "6. 简洁中文，不超过 300 字，不要客套话和多余标题。"
-    ).format(
-        mask_sensitive_operation_data(result.failure_reason or "（无）"),
-        mask_sensitive_operation_data(user_text),
-        environment_context,
-        execution_data or "（无可用脚本输出）",
-    )
+    ).format(_failure_detail(result), environment_context, failure_evidence)
 
 
 def _plan_to_json(plan: MuliuPlan) -> str:

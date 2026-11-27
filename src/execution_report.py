@@ -163,16 +163,8 @@ def normalize_error_text(text: str, *, variable_values: Iterable[str] = ()) -> s
 
 
 def failed_step(result: MuliuExecutionResult) -> MuliuStepResult | None:
-    if result.failed_step_number is not None:
-        for step in result.step_results:
-            if step.step_number == result.failed_step_number:
-                return step
-        if 0 < result.failed_step_number <= len(result.step_results):
-            return result.step_results[result.failed_step_number - 1]
-    for step in result.step_results:
-        if not step.succeeded:
-            return step
-    return result.step_results[-1] if result.step_results else None
+    # A start command and its verification share a step number. Only the failed result is diagnostic evidence.
+    return next((step for step in result.step_results if not step.succeeded), None)
 
 
 def extract_key_error_lines(log: str, *, variable_values: Iterable[str] = (), count: int = KEY_ERROR_LINE_COUNT) -> tuple[str, ...]:

@@ -422,6 +422,38 @@ async def test_failure_miss_collects_candidate_and_same_error_on_other_server_re
 
 
 @pytest.mark.asyncio
+async def test_merge_success_and_start_verification_failure_have_separate_outcomes(tmp_path):
+    ai = InterpretationAIClient("核验未确认就绪，请查看本次启动的日志。")
+    feishu = FakeCardFeishuClient()
+    store, report_store, processor = _report_processor(tmp_path, ai, feishu)
+    job = _card_job(store, "om_verify", "合服完成后启动目标服")
+    root = "/home/serverGeneralScript/"
+    result = MuliuExecutionResult(
+        "合服并启动目标服",
+        [
+            MuliuStepResult(1, "合并来源服至目标服", root + "exc_server_merge.sh", [], True, "COMBINE_STATE=succeeded"),
+            MuliuStepResult(2, "启动目标服", root + "start", [], True, "successful start command output"),
+            MuliuStepResult(2, "核验目标服是否起服成功", root + "basic_info.sh", [], False, "未检测到开服成功信息"),
+        ],
+        failed_step_number=2,
+        failure_reason="脚本执行失败，exit_code=1",
+    )
+
+    await processor.present_execution_result(job, result, "om_verify")
+    await processor.wait_for_interpretations()
+
+    prompt = ai.calls[0][1]
+    assert "失败环节 第 2 步 · 核验目标服是否起服成功" in prompt
+    assert "已成功执行的步骤 · 合并来源服至目标服、启动目标服" in prompt
+    assert "脚本：basic_info.sh" in prompt and "未检测到开服成功信息" in prompt
+    assert "COMBINE_STATE=succeeded" not in prompt and "successful start command output" not in prompt
+    assert report_store.list_patterns("candidate")[0].script_path == root + "basic_info.sh"
+    for _, card in feishu.card_updates:
+        assert "核验目标服是否起服成功" in _card_detail(card)
+        assert "已成功执行的步骤 · 合并来源服至目标服、启动目标服" in _card_detail(card)
+
+
+@pytest.mark.asyncio
 async def test_failure_with_different_error_does_not_reuse_template(tmp_path):
     ai = InterpretationAIClient("诊断")
     feishu = FakeCardFeishuClient()
